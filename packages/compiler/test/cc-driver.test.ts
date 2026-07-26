@@ -31,12 +31,14 @@ function zigOnPath(): boolean {
   }
 }
 
-test("default driver is bare clang with no extra args (byte-identical contract)", () => {
+test("default driver is bare clang; linux host adds -D_GNU_SOURCE for glibc", () => {
   for (const env of [{}, { SCRIPTC_CC: "clang" }, { SCRIPTC_CC: "" }]) {
     const d = resolveCc(env);
     expect(d.argv).toEqual(["clang"]);
     expect(d.target).toBeNull();
-    expect(d.targetArgs).toEqual([]);
+    // Linux/glibc needs -D_GNU_SOURCE because -std=c11 sets __STRICT_ANSI__
+    // which hides POSIX/GNU declarations (macOS exposes them regardless).
+    expect(d.targetArgs).toEqual(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []);
   }
 });
 
@@ -52,7 +54,8 @@ test("unknown SCRIPTC_CC values are rejected", () => {
 test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", () => {
   const native = resolveCc({ SCRIPTC_CC: "zigcc" });
   expect(native.argv).toEqual(["zig", "cc"]);
-  expect(native.targetArgs).toEqual([]);
+  // Linux host needs -D_GNU_SOURCE for glibc (same as the default clang path)
+  expect(native.targetArgs).toEqual(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []);
 
   const cross = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "aarch64-linux-gnu.2.36" });
   expect(cross.argv).toEqual(["zig", "cc"]);

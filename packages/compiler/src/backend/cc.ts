@@ -263,12 +263,22 @@ export function resolveCc(env: NodeJS.ProcessEnv = process.env): CcDriver {
         `SCRIPTC_TARGET=${target} requires SCRIPTC_CC=zigcc — the default clang path has no cross-target sysroots.`,
       );
     }
-    return { argv: ["clang"], target: null, targetArgs: [] };
+    return {
+      argv: ["clang"],
+      target: null,
+      targetArgs: process.platform === "linux" ? ["-D_GNU_SOURCE"] : [],
+    };
   }
   if (cc !== "zigcc") {
     throw new Error(`unknown SCRIPTC_CC '${cc}' (supported: clang, zigcc)`);
   }
-  if (target === "") return { argv: ["zig", "cc"], target: null, targetArgs: [] };
+  if (target === "") {
+    return {
+      argv: ["zig", "cc"],
+      target: null,
+      targetArgs: process.platform === "linux" ? ["-D_GNU_SOURCE"] : [],
+    };
+  }
   return {
     argv: ["zig", "cc"],
     target,
@@ -1183,7 +1193,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
               : [rt(join(rtDir, "scr_fetch_curl.c")), "-lcurl"]
             : []),
           engineArchive,
-          "-lm",
           // ld64 dead-stripping claws back a chunk of the engine archive;
           // harmless elsewhere but only spelled this way on macOS. Keyed on
           // the TARGET platform (= the host on the default path, where this
@@ -1208,6 +1217,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     opts.cPath,
     ...(opts.linkInputs ?? []),
     ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
+    "-lm",
     "-o", opts.outPath,
   ];
   const ccName = driver.argv.join(" ");
