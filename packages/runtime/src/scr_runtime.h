@@ -37,6 +37,38 @@ void arc4random_buf(void *buf, size_t n);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 char *strcasestr(const char *hay, const char *needle);
 #ifdef _MSC_VER
+#include <stdlib.h>   /* _MAX_PATH */
+#include <sys/stat.h> /* _S_IFMT, _S_IFDIR, _S_IFREG */
+#ifndef PATH_MAX
+#define PATH_MAX _MAX_PATH
+#endif
+#ifndef F_OK
+#define F_OK 0
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#ifndef S_ISLNK
+#define S_ISLNK(m) (0)
+#endif
+#ifndef S_ISFIFO
+#define S_ISFIFO(m) (0)
+#endif
+#ifndef S_ISSOCK
+#define S_ISSOCK(m) (0)
+#endif
+#ifndef S_ISBLK
+#define S_ISBLK(m) (0)
+#endif
+#ifndef S_ISCHR
+#define S_ISCHR(m) (0)
+#endif
+#ifndef _mode_t_defined
+typedef unsigned int mode_t;
+#endif
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 int clock_gettime(int clk_id, struct timespec *ts);
