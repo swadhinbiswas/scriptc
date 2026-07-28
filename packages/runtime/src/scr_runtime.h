@@ -37,10 +37,6 @@ void arc4random_buf(void *buf, size_t n);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 char *strcasestr(const char *hay, const char *needle);
 #ifdef _MSC_VER
-#ifndef _TIMESPEC_DEFINED
-#define _TIMESPEC_DEFINED
-struct timespec { time_t tv_sec; long tv_nsec; };
-#endif
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 int clock_gettime(int clk_id, struct timespec *ts);
