@@ -107,6 +107,7 @@ struct dirent *readdir(DIR *d) {
       continue;
     WideCharToMultiByte(CP_UTF8, 0, d->fdata.cFileName, -1,
                         d->entry.d_name, sizeof d->entry.d_name, NULL, NULL);
+    d->entry.d_name[sizeof d->entry.d_name - 1] = '\0';
     d->entry.d_type = (d->fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                       ? DT_DIR : DT_REG;
     return &d->entry;
