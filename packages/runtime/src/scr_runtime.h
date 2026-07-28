@@ -13,7 +13,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>    /* memcpy in the inline slot accessors */
+#ifdef _MSC_VER
+#include <BaseTsd.h>   /* SSIZE_T on MSVC */
+typedef SSIZE_T ssize_t;
+#else
 #include <sys/types.h> /* ssize_t in the transport ops table */
+#endif
 
 /* ── win32 libc shims (scr_win.c; see the windows portability inventory) ──
  * The POSIX/BSD functions the runtime calls that mingw-w64's CRT does not
@@ -31,6 +36,14 @@ char *stpcpy(char *dst, const char *src);
 void arc4random_buf(void *buf, size_t n);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 char *strcasestr(const char *hay, const char *needle);
+#ifdef _MSC_VER
+#include <windows.h>
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+struct timespec { time_t tv_sec; long tv_nsec; };
+int clock_gettime(int clk_id, struct timespec *ts);
+int nanosleep(const struct timespec *req, struct timespec *rem);
+#endif /* _MSC_VER */
 #endif
 
 /* ── process ──────────────────────────────────────────────────────────── */
