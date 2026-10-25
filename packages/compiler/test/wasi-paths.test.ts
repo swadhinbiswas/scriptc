@@ -10,6 +10,11 @@ test("WASI guest paths follow the cwd and temp preopens", () => {
     .toBeNull();
 });
 
+test("WASI guest paths resolve relative host paths against cwd", () => {
+  expect(wasiGuestPath("tests/main.cjs", "/work/repo", "/host/tmp", "posix")).toBe("/tests/main.cjs");
+  expect(wasiGuestPath("../../host/tmp/build/main.cjs", "/work/repo", "/host/tmp", "posix")).toBe("/tmp/build/main.cjs");
+  expect(wasiGuestPath("../outside/main.cjs", "/work/repo", "/host/tmp", "posix")).toBeNull();
+});
 test("WASI guest paths normalize Windows host separators", () => {
   expect(wasiGuestPath(
     "C:\\work\\repo\\tests\\main.cjs",
