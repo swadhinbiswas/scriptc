@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/process-constrained-memory.ts"
+ ],
+ "diags": []
+}

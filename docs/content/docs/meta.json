@@ -7,13 +7,17 @@
     "---Guides---",
     "coverage",
     "dependencies",
-    "ffi",
-    "native-objects",
-    "wasm",
     "platforms",
+    "wasm",
+    "ffi",
+    "threads",
+    "contracts",
+    "experimental",
+    "native-objects",
     "---Reference---",
     "cli",
-    "how-it-works",
-    "limitations"
+    "limitations",
+    "[Node.js Compatibility](/compatibility)",
+    "how-it-works"
   ]
 }

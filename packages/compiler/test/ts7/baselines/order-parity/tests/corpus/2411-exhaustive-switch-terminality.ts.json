@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2411-exhaustive-switch-terminality.ts"
+ ],
+ "diags": []
+}

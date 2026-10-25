@@ -8,11 +8,13 @@ export interface Ts7FileSystem {
   getAccessibleEntries: (path: string) => { files: string[]; directories: string[] } | undefined;
 }
 
-export const TS7_FILE_SYSTEM_CALLBACKS = "readFile,fileExists,directoryExists,realpath,getAccessibleEntries";
+export const TS7_FILE_SYSTEM_CALLBACKS =
+  "readFile,fileExists,directoryExists,realpath,getAccessibleEntries";
 
 function pathArgument(payload: string): string {
   const value: unknown = JSON.parse(payload);
-  if (typeof value !== "string") throw new TypeError("TypeScript filesystem callback requires a path string");
+  if (typeof value !== "string")
+    throw new TypeError("TypeScript filesystem callback requires a path string");
   return value;
 }
 

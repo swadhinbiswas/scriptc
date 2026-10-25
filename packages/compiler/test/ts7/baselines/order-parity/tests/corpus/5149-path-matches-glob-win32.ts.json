@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5149-path-matches-glob-win32.ts"
+ ],
+ "diags": []
+}

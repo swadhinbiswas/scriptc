@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5253-cipher-chacha20-poly1305.ts"
+ ],
+ "diags": []
+}

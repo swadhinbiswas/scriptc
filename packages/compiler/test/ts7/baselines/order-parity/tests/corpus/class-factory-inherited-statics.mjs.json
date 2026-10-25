@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/class-factory-inherited-statics.mjs"
+ ],
+ "diags": []
+}

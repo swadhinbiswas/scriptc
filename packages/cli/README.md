@@ -1,6 +1,6 @@
 # scriptc
 
-Compile ordinary TypeScript and JavaScript to small, fast native executables or WASI WebAssembly modules — no Node, no V8, no JavaScript engine in the artifact.
+Compile TypeScript and JavaScript to native executables or WASI WebAssembly modules that run without Node.js installed.
 
 ```console
 $ cat fib.ts
@@ -12,9 +12,13 @@ console.log(fib(30));
 $ scriptc run fib.ts
 832040
 
-$ scriptc build fib.ts -o fib && ./fib
+$ scriptc build fib.ts -o fib >/dev/null && ./fib
 832040
 ```
+
+scriptc compiles the same TypeScript you run on Node.js, type-checked by the TypeScript compiler. npm packages your program imports compile along with it. Code scriptc can't compile fails the build with an error code and, where available, a rewrite hint.
+
+scriptc is experimental. See the [limitations](https://scriptc.dev/docs/limitations) and the [Node.js compatibility reference](https://scriptc.dev/compatibility).
 
 ## Install
 
@@ -22,26 +26,29 @@ $ scriptc build fib.ts -o fib && ./fib
 $ npm install -g scriptc
 ```
 
-The installed compiler runs natively on supported macOS, Linux, and Windows hosts. Compilation, compile-time evaluation, and native execution do not require Node. `--emit=ir|llvm|asm|obj` uses the bundled TypeScript checker and LLVM helper without an external compiler, archiver, linker, or SDK. Executable builds additionally need a platform linker driver and SDK/sysroot; precompiled runtime packs supply the C runtime. Set `SCRIPTC_LINKER` to choose that driver. Runtime development with `--sanitize` additionally needs a C compiler. Node.js 24 or newer is needed for npm installation and `scriptc run` of WASI modules.
+npm installs the native compiler for your platform (macOS, Linux, or Windows). Node.js 24 or later is needed to install it and to run WASI modules with `scriptc run`; compiling and running executables doesn't need Node.js.
 
-The native compiler includes its host runtime pack. Cross-compilation uses additional `@scriptc/runtime-<target>` packages installed in your project at the same version as `scriptc --version`. WASI builds use `@scriptc/runtime-wasm32-wasi`, for example. Run the compiler from that project or set `SCRIPTC_RUNTIME_PACK` to the pack directory. Linux GNU distributions require glibc 2.34 or newer.
-
-Builds use a bounded persistent cache. Unchanged source can reuse the validated frontend result and LLVM program objects. Library identity getters occupy a separate LLVM module, so an identity change can reuse the large program object. Runtime objects come from the installed pack. Executable cache entries verify their native dependencies; FFI builds relink against current external inputs. Set `SCRIPTC_NO_CACHE=1` to bypass the cache or `SCRIPTC_CACHE_DIR` to select its location. An existing POSIX override must already be private.
+Building executables needs a linker and the platform SDK or sysroot, such as the Xcode Command Line Tools on macOS. Set `SCRIPTC_LINKER` to choose the linker driver. `--emit=ir|llvm|asm|obj` needs no external tools. See the [quickstart](https://scriptc.dev/docs/quickstart) for details.
 
 ## Commands
 
-- `scriptc build <file.ts>` — compile to a native executable or selected target artifact
-- `scriptc run <file.ts>` — compile and run
-- `scriptc coverage <file.ts>` — what compiles statically, and why the rest doesn't
+- `scriptc build <file.ts>`: compile to a native executable or another artifact selected with `--emit`.
+- `scriptc run <file.ts>`: compile and run.
+- `scriptc coverage <file.ts>`: report what compiles, and explain what doesn't.
+- `scriptc build --lib --profile <profile.json>`: compile a static library, or a Wasm reactor on `wasm32-wasi`.
 
-`scriptc build app.ts --emit=ir|llvm|asm|obj` selects serialized typed IR, textual LLVM IR, target assembly, or a relocatable program object as the one primary artifact. `--emit=exe` is the default. Assembly/object emission uses the matching helper on supported macOS, Linux, and Windows hosts (and produces WASI artifacts when that target is selected). Objects retain undefined `scr_*` runtime references plus the `scr_runtime_abi_v6` compatibility marker; they are not library archives. External consumption is experimental and requires the exact matching runtime. `scriptc build app.ts --print=native-link-info -o app.o` prints the versioned JSON target/runtime/link recipe without performing a link. `--emit=asm|obj --sanitize` is rejected until ASan pipeline parity is available.
+See the [CLI reference](https://scriptc.dev/docs/cli) for every option.
 
-For embedder-hosted modules that are not installed npm packages, coverage can map an exact bare specifier to a local declaration with repeatable `--external-types <specifier=file.d.ts>` options. This is analysis-only: the types unblock application measurement, while runtime module uses remain reported as blockers.
+## Cross-compilation and WebAssembly
 
-No annotations, no dialect, no special stdlib: the same TypeScript you run on Node, type-checked by the real TypeScript compiler. Programs outside the static tier can opt into `--dynamic`, which embeds a small JavaScript engine (~620KB) for the parts that can't be static; everything else fails the build with a specific error code and usually a rewrite hint.
+Set `SCRIPTC_TARGET` to build for another platform, for example `SCRIPTC_TARGET=aarch64-linux-gnu.2.36` or `SCRIPTC_TARGET=wasm32-wasi`. Install the matching `@scriptc/runtime-<target>` package in your project, at the same version as `scriptc --version`, or set `SCRIPTC_RUNTIME_PACK` to a runtime pack directory. See [platform support](https://scriptc.dev/docs/platforms) and [WebAssembly modules](https://scriptc.dev/docs/wasm).
 
-WebAssembly is available as a production LLVM target: `SCRIPTC_TARGET=wasm32-wasi scriptc build app.ts`. It emits a WASI Preview 1 `.wasm` module, and `scriptc run` supplies a WASI host. The complete executable language tier—including async, generators, timers, and `--dynamic`—is supported. APIs needing capabilities WASI P1 does not expose (network sockets/fetch, child processes, OS signals, and filesystem watching), sanitizer builds, and native FFI are rejected with `SC3002`. With `--lib --profile`, the target produces a callable Wasm reactor with named host imports and per-instance memory. See [WebAssembly Modules](https://scriptc.dev/wasm) for the embedding contract.
+## Native code
 
-Native code can be called through an explicit, link-time C ABI manifest: declare the function signature in TypeScript, bind it to a C symbol, and build with `--ffi <manifest.json>`. See the [Native FFI guide](https://scriptc.dev/ffi).
+Call C functions by declaring their signatures in TypeScript and binding them to C symbols in a manifest passed with `--ffi <manifest.json>`. See the [Native FFI guide](https://scriptc.dev/docs/ffi).
+
+## Build cache
+
+Builds reuse a bounded persistent cache. Set `SCRIPTC_NO_CACHE=1` to bypass it or `SCRIPTC_CACHE_DIR` to choose its location.
 
 Docs: [scriptc.dev](https://scriptc.dev)

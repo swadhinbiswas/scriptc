@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2684-filter-no-predicate-dyn.cjs"
+ ],
+ "diags": []
+}

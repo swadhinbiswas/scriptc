@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/502-array-for-of.ts"
+ ],
+ "diags": []
+}

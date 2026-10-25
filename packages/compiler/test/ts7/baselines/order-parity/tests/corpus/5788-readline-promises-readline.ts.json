@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5788-readline-promises-readline.ts"
+ ],
+ "diags": []
+}

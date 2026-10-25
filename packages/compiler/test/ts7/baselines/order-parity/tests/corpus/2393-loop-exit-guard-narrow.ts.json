@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2393-loop-exit-guard-narrow.ts"
+ ],
+ "diags": []
+}

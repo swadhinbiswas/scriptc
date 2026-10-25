@@ -1,4 +1,3 @@
-// @dynamic
 // Dynamic import() into a benign import cycle: ping.ts and pong.ts are
 // mutually-recursive modules reachable ONLY through import(), so the
 // static preflight never sees them — the --dynamic subgraph walk

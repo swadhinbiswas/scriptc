@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2705-type-import-link-dynamic/types.ts",
+  "<repo>/tests/corpus/2705-type-import-link-dynamic/main.ts"
+ ],
+ "diags": []
+}

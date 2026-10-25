@@ -1,0 +1,61 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/import-defer-type/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "'from' expected.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 223,
+    "end": 224
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "';' expected.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 228,
+    "end": 231
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Unexpected keyword or identifier.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 232,
+    "end": 236
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "String literal expected.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 223,
+    "end": 227
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Cannot find name 'ns1'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 228,
+    "end": 231
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Cannot find name 'from'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-defer-type/main.ts",
+    "start": 232,
+    "end": 236
+   }
+  }
+ ]
+}

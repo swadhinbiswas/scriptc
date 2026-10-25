@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5423-stream-end-and-eos-timing.ts"
+ ],
+ "diags": []
+}

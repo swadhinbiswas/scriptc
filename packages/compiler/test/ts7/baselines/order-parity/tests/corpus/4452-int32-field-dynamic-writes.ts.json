@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4452-int32-field-dynamic-writes.ts"
+ ],
+ "diags": []
+}

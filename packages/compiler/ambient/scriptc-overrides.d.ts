@@ -10,47 +10,27 @@
  * rejected over an override-manufactured error; the affected sites meet the
  * lowerer's honest fences instead (SC1100's checked-cast family for
  * JSON.parse results, the executor fences for Promise shapes). The
- * primitives every world needs (comptime, setTimeout, __island_eval) live
+ * primitives every world needs (comptime, setTimeout) live
  * in scriptc.d.ts, which ships to BOTH programs. */
 
-/* `at(): string`, not the lib's `string | undefined`: undefined is
- * unrepresentable, so an out-of-range at() THROWS a catchable TypeError at
- * the validated island exit instead of returning undefined (documented
- * divergence, SEMANTICS.md). */
 interface String {
   at(index: number): string;
 }
 
-/* Object.values/entries with the actual field-value union, not the lib's
- * `any` (the lib's precise overloads only cover index-signature and
- * ArrayLike sources). A PRECISION override, not a divergence: the lowering
- * emits the field list statically and the values are exactly T[keyof T] —
- * without this the result would be `any`-typed and drag every downstream
- * use into the island. An opaque object has no statically known keys;
- * its actual values remain unknown instead of becoming an impossible
- * never payload. */
 interface ObjectConstructor {
   values<T extends object>(o: T): Array<keyof T extends never ? unknown : T[keyof T]>;
   entries<T extends object>(o: T): Array<[string, keyof T extends never ? unknown : T[keyof T]]>;
 }
 
-/* `parse` returns `unknown`, not the lib's `any` — the dynamic boundary. A
- * checked cast (`JSON.parse(s) as Config`) validates the value against the
- * target type at runtime and THROWS on mismatch — the mechanism that makes
- * trusting TS types sound at data boundaries. Reviver results use the same
- * checked boundary. A function replacer can omit the root, so that form
- * returns string | undefined even though the stock lib promises string.
- *
- * `stringify` takes `unknown`, not the lib's `any`: the same honest
- * surface, but the parameter must not CONTEXTUALLY TYPE literal arguments
- * as `any` (an any-typed slot is the island boundary; `JSON.stringify([1,
- * 2])` must keep building a static array and serializing it
- * type-directedly). */
 interface JSON {
   parse(text: string): unknown;
   parse(text: string, reviver: (this: unknown, key: string, value: unknown) => unknown): unknown;
   stringify(value: unknown): string;
-  stringify(value: unknown, replacer: (this: unknown, key: string, value: unknown) => unknown, space?: string | number): string | undefined;
+  stringify(
+    value: unknown,
+    replacer: (this: unknown, key: string, value: unknown) => unknown,
+    space?: string | number,
+  ): string | undefined;
 }
 
 /* The supported Promise construction shape: an executor whose resolve takes
@@ -89,4 +69,25 @@ interface PromiseConstructor {
         : (value: T) => void;
     reject: (reason: Error) => void;
   };
+}
+
+/* Carriers of the types the lowerer gives untyped JavaScript collections
+ * whose uses prove them (js-collection-types.ts). Nothing reads them at run
+ * time. */
+declare namespace __scriptcInferredCollections {
+  const map_string_string: Map<string, string>;
+  const map_string_number: Map<string, number>;
+  const map_string_boolean: Map<string, boolean>;
+  const map_number_string: Map<number, string>;
+  const map_number_number: Map<number, number>;
+  const map_number_boolean: Map<number, boolean>;
+  const map_boolean_string: Map<boolean, string>;
+  const map_boolean_number: Map<boolean, number>;
+  const map_boolean_boolean: Map<boolean, boolean>;
+  const set_string: Set<string>;
+  const set_number: Set<number>;
+  const set_boolean: Set<boolean>;
+  const array_string: string[];
+  const array_number: number[];
+  const array_boolean: boolean[];
 }

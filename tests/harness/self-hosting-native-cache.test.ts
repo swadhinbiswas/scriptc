@@ -9,14 +9,19 @@ const root = join(import.meta.dirname, "../..");
 const entry = join(root, "tests/fixtures/self-hosting/native-cache.ts");
 
 test("native executable cache discovery, restoration and invalidation match Node", async () => {
-  const directory = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-native-cache-"));
+  const directory = mkdtempSync(
+    join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-native-cache-"),
+  );
   try {
-    const built = await compileInChild(entry, { outDir: directory,
+    const built = await compileInChild(entry, {
+      outDir: directory,
       outPath: join(directory, "cache" + (process.platform === "win32" ? ".exe" : "")),
-      optimization: "dev", dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1" });
+      optimization: "dev",
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+    });
     if (!built.ok) throw new Error(JSON.stringify(built.diagnostics));
     const linker = join(directory, "linker.mjs");
-    writeFileSync(linker, 'console.error(JSON.stringify(process.argv[2]));\n');
+    writeFileSync(linker, "console.error(JSON.stringify(process.argv[2]));\n");
     const sdk = join(directory, "sdk");
     mkdirSync(sdk);
     const library = join(sdk, "system library.tbd");
@@ -26,9 +31,16 @@ test("native executable cache discovery, restoration and invalidation match Node
       mkdirSync(stage);
       writeFileSync(library, "system library");
       const args = [stage, process.execPath, linker, library];
-      const result = spawnSync(native ? built.binaryPath : process.execPath, native ? args : ["--import", "tsx", entry, ...args], {
-        cwd: root, encoding: "utf8", timeout: 30_000, env: { ...process.env, ...(native ? { PATH: "" } : {}) },
-      });
+      const result = spawnSync(
+        native ? built.binaryPath : process.execPath,
+        native ? args : ["--import", "tsx", entry, ...args],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 30_000,
+          env: { ...process.env, ...(native ? { PATH: "" } : {}) },
+        },
+      );
       expect(result.error).toBeUndefined();
       expect(result.signal, result.stderr).toBeNull();
       expect(result.status, result.stderr + result.stdout).toBe(0);
@@ -37,5 +49,7 @@ test("native executable cache discovery, restoration and invalidation match Node
       results.push(result.stdout);
     }
     expect(results[1]).toBe(results[0]);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }, 300_000);

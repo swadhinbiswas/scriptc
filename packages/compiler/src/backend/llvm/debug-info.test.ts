@@ -1,11 +1,23 @@
 import { expect, test } from "vitest";
-import { BOOL, F64, STRING, VOID, type IrFunction, type IrLocal, type SrcLoc } from "../../ir/ir.js";
+import {
+  BOOL,
+  F64,
+  STRING,
+  VOID,
+  type IrFunction,
+  type IrLocal,
+  type SrcLoc,
+} from "../../ir/ir.js";
 import { LlvmDebugInfo } from "./debug-info.js";
 
 const file = "/source/日本/main.ts";
 const text = "function example(value: number) {\r\n  const outer = 1;\n  { const inner = 2; }\n}\n";
 const loc: SrcLoc = { file, start: 0, end: text.length };
-const at = (word: string): SrcLoc => ({ file, start: text.indexOf(word), end: text.indexOf(word) + word.length });
+const at = (word: string): SrcLoc => ({
+  file,
+  start: text.indexOf(word),
+  end: text.indexOf(word) + word.length,
+});
 function local(name: string, scope = loc): IrLocal {
   return { id: name + ".0", name, type: F64, mutable: true, source: { loc: at(name), scope } };
 }
@@ -73,7 +85,9 @@ test.each([32, 64])("boxed and TDZ locals use honest storage descriptions (%i-bi
   const scope = debug.function(fn([boxed, tdz]));
   const real = debug.local(boxed, scope);
   const opaque = debug.local(tdz, scope);
-  expect(real?.expression).toBe(`!DIExpression(DW_OP_deref, DW_OP_plus_uconst, ${bits === 32 ? 24 : 40})`);
+  expect(real?.expression).toBe(
+    `!DIExpression(DW_OP_deref, DW_OP_plus_uconst, ${bits === 32 ? 24 : 40})`,
+  );
   expect(opaque?.expression).toBe("!DIExpression()");
   expect(debug.render()).toContain('name: "ScrBox", flags: DIFlagFwdDecl');
 });
@@ -81,9 +95,27 @@ test.each([32, 64])("boxed and TDZ locals use honest storage descriptions (%i-bi
 test("globals are attached to the correct compilation units and render is stable", () => {
   const other = "/source/other.ts";
   const otherLoc = { file: other, start: 0, end: 5 };
-  const debug = new LlvmDebugInfo(file, new Map([[file, text], [other, "const other = 1;"]]));
-  const first = debug.global({ id: "first", name: "first", type: STRING, mutable: false, source: { loc, scope: loc } });
-  const second = debug.global({ id: "second", name: "second", type: BOOL, mutable: true, source: { loc: otherLoc, scope: otherLoc } });
+  const debug = new LlvmDebugInfo(
+    file,
+    new Map([
+      [file, text],
+      [other, "const other = 1;"],
+    ]),
+  );
+  const first = debug.global({
+    id: "first",
+    name: "first",
+    type: STRING,
+    mutable: false,
+    source: { loc, scope: loc },
+  });
+  const second = debug.global({
+    id: "second",
+    name: "second",
+    type: BOOL,
+    mutable: true,
+    source: { loc: otherLoc, scope: otherLoc },
+  });
   const rendered = debug.render();
   expect(rendered).toContain(`!{${first}}`);
   expect(rendered).toContain(`!{${second}}`);
@@ -94,7 +126,13 @@ test("globals are attached to the correct compilation units and render is stable
 test("locations intern per file and scope and clamp columns to DWARF limits", () => {
   const long = " ".repeat(70000) + "value";
   const other = "/source/other.ts";
-  const debug = new LlvmDebugInfo(file, new Map([[file, text], [other, long]]));
+  const debug = new LlvmDebugInfo(
+    file,
+    new Map([
+      [file, text],
+      [other, long],
+    ]),
+  );
   const scope = debug.function(fn());
   const pos = { file: other, start: 70000, end: 70005 };
   const first = debug.location(pos, scope);
@@ -104,15 +142,18 @@ test("locations intern per file and scope and clamp columns to DWARF limits", ()
   expect(debug.render()).toContain("DILexicalBlockFile");
 });
 
-test.each([32, 64])("nullable reference types describe tags and ABI payload offsets (%i-bit)", (bits) => {
-  const debug = new LlvmDebugInfo(file, new Map([[file, text]]), bits, [
-    { id: "value", arms: [STRING, { kind: "undefinedT" }] },
-  ]);
-  const value: IrLocal = { ...local("value"), type: { kind: "union", unionId: "value" } };
-  const scope = debug.function(fn([value]));
-  debug.local(value, scope);
-  const rendered = debug.render();
-  expect(rendered).toContain('!DIEnumerator(name: "undefined", value: 1');
-  expect(rendered).toContain(`offset: ${(bits === 32 ? 24 : 40) * 8}`);
-  expect(rendered).toContain('name: "ScrUnion_value"');
-});
+test.each([32, 64])(
+  "nullable reference types describe tags and ABI payload offsets (%i-bit)",
+  (bits) => {
+    const debug = new LlvmDebugInfo(file, new Map([[file, text]]), bits, [
+      { id: "value", arms: [STRING, { kind: "undefinedT" }] },
+    ]);
+    const value: IrLocal = { ...local("value"), type: { kind: "union", unionId: "value" } };
+    const scope = debug.function(fn([value]));
+    debug.local(value, scope);
+    const rendered = debug.render();
+    expect(rendered).toContain('!DIEnumerator(name: "undefined", value: 1');
+    expect(rendered).toContain(`offset: ${(bits === 32 ? 24 : 40) * 8}`);
+    expect(rendered).toContain('name: "ScrUnion_value"');
+  },
+);

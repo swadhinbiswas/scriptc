@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary, validateSidecar, wyhash64, type SidecarDoc } from "@scriptc/compiler";
 
+import { nmDefined as nmDefinedText } from "./nm-defined.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
 /* Suite-flavor segment: the plain and SCRIPTC_SAN=1 suites may run
@@ -42,10 +43,25 @@ type Emission = "llvm";
 const EMISSIONS: Emission[] = ["llvm"];
 
 const TOP_LEVEL_ORDER = [
-  "format", "wire_version", "abi_version", "compiler_version", "entry",
-  "source_hash", "build_id", "types", "model", "model_helpers",
-  "model_unbound", "msg", "init_returns_cmd", "update_returns_cmd",
-  "has_subscriptions", "channels", "abi", "integer_slots", "deterministic",
+  "format",
+  "wire_version",
+  "abi_version",
+  "compiler_version",
+  "entry",
+  "source_hash",
+  "build_id",
+  "types",
+  "model",
+  "model_helpers",
+  "model_unbound",
+  "msg",
+  "init_returns_cmd",
+  "update_returns_cmd",
+  "has_subscriptions",
+  "channels",
+  "abi",
+  "integer_slots",
+  "deterministic",
   "async_free",
 ];
 
@@ -66,7 +82,14 @@ async function buildContract(
    * directories is exactly what the canonical root-relative paths
    * guarantee, and the V13-style assertions prove it). */
   root = cacheDir,
-): Promise<{ outDir: string; archive: string; llvmPath: string; sidecarPath: string; doc: SidecarDoc; bytes: Buffer }> {
+): Promise<{
+  outDir: string;
+  archive: string;
+  llvmPath: string;
+  sidecarPath: string;
+  doc: SidecarDoc;
+  bytes: Buffer;
+}> {
   const dir = join(fixtureRoot, fixture);
   const outDir = join(root, `${fixture}-${emission}${tag}`);
   mkdirSync(outDir, { recursive: true });
@@ -79,7 +102,9 @@ async function buildContract(
   if (existsSync(join(dir, "node_modules"))) {
     cpSync(join(dir, "node_modules"), join(outDir, "node_modules"), { recursive: true });
   }
-  const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")) as { emission: string };
+  const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")) as {
+    emission: string;
+  };
   profile.emission = emission;
   writeFileSync(join(outDir, "profile.json"), JSON.stringify(profile, null, 2));
   const result = await compileLibrary({ profilePath: join(outDir, "profile.json"), outDir });
@@ -100,7 +125,7 @@ async function buildContract(
 }
 
 function nmDefined(archive: string, prefix: string): string[] {
-  const out = execFileSync("nm", ["-gU", archive], { encoding: "utf8" });
+  const out = nmDefinedText(archive);
   const set = new Set<string>();
   for (const line of out.split("\n")) {
     const sym = line.trim().split(/\s+/).pop();
@@ -130,7 +155,11 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
     expect(doc.wire_version).toBe(3);
     expect(doc.abi_version).toBe(7);
     expect(doc.compiler_version).toBe(
-      (JSON.parse(readFileSync(join(repoRoot, "packages/compiler/package.json"), "utf8")) as { version: string }).version,
+      (
+        JSON.parse(readFileSync(join(repoRoot, "packages/compiler/package.json"), "utf8")) as {
+          version: string;
+        }
+      ).version,
     );
     expect(doc.entry).toBe("lib.ts");
     expect(doc.source_hash).toMatch(/^[0-9a-f]{16}$/);
@@ -139,7 +168,14 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
 
     // The type table: declaration order everywhere, exactly the reachable
     // set, synthesized entries anchored at their containing declaration.
-    expect(doc.types.structs.map((s) => s.name)).toEqual(["Waypoint", "Shift", "Model", "Msg_blob_tag", "Msg_nudge", "helpers_extent"]);
+    expect(doc.types.structs.map((s) => s.name)).toEqual([
+      "Waypoint",
+      "Shift",
+      "Model",
+      "Msg_blob_tag",
+      "Msg_nudge",
+      "helpers_extent",
+    ]);
     expect(doc.types.enums.map((e) => e.name)).toEqual(["Zone"]);
     expect(doc.types.unions.map((u) => u.name)).toEqual(["Route"]);
     expect(doc.types.enums[0]!.members).toEqual(["west", "north", "east"]);
@@ -149,8 +185,18 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
       { name: "label", type: { kind: "bytes" } },
       { name: "id", type: { kind: "f64" } },
     ]);
-    expect(doc.types.structs[2]!.fields.map((f) => f.name)).toEqual(["waypoints", "title", "speed", "route", "home", "active"]);
-    expect(doc.types.structs[2]!.fields[4]!.type).toEqual({ kind: "optional", inner: { kind: "node", name: "Waypoint" } });
+    expect(doc.types.structs[2]!.fields.map((f) => f.name)).toEqual([
+      "waypoints",
+      "title",
+      "speed",
+      "route",
+      "home",
+      "active",
+    ]);
+    expect(doc.types.structs[2]!.fields[4]!.type).toEqual({
+      kind: "optional",
+      inner: { kind: "node", name: "Waypoint" },
+    });
     expect(doc.types.structs[3]).toEqual({
       name: "Msg_blob_tag",
       synthesized: true,
@@ -184,7 +230,15 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
       { name: "zoom", payload: { kind: "number", class: "f64" } },
       { name: "teleport", payload: { kind: "record", name: "Waypoint" } },
       { name: "rename", payload: { kind: "bytes" } },
-      { name: "poll_done", payload: { kind: "number_bytes", number_field: "status", number_class: "f64", bytes_field: "body" } },
+      {
+        name: "poll_done",
+        payload: {
+          kind: "number_bytes",
+          number_field: "status",
+          number_class: "f64",
+          bytes_field: "body",
+        },
+      },
       { name: "flip", payload: { kind: "scalar", type: { kind: "bool" } } },
       { name: "route_set", payload: { kind: "union", name: "Route" } },
       { name: "zone_set", payload: { kind: "enum", name: "Zone" } },
@@ -200,10 +254,20 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
     // the arena bit derived from the return class.
     expect(doc.model).toBe("Model");
     expect(doc.model_helpers).toEqual([
-      { name: "waypointsOf", params: [], returns: { kind: "slice", elem: { kind: "node", name: "Waypoint" } }, arena: true },
+      {
+        name: "waypointsOf",
+        params: [],
+        returns: { kind: "slice", elem: { kind: "node", name: "Waypoint" } },
+        arena: true,
+      },
       { name: "headline", params: [], returns: { kind: "bytes" }, arena: true },
       { name: "waypointCount", params: [], returns: { kind: "f64" }, arena: false },
-      { name: "extent", params: [], returns: { kind: "value", name: "helpers_extent" }, arena: true },
+      {
+        name: "extent",
+        params: [],
+        returns: { kind: "value", name: "helpers_extent" },
+        arena: true,
+      },
     ]);
     // Helpers are bindable surface: the unbound list may name one.
     expect(doc.model_unbound).toEqual(["title", "waypointCount"]);
@@ -232,7 +296,19 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
     // exactly prefix + suffix over abi.exports — no extras, no misses.
     expect(doc.abi).toEqual({
       prefix: "kc_",
-      exports: ["abi_version", "build_id", "set_panic_sink", "set_callback", "init", "boot", "send", "command_msg", "title", "helper_probe", "boom"],
+      exports: [
+        "abi_version",
+        "build_id",
+        "set_panic_sink",
+        "set_callback",
+        "init",
+        "boot",
+        "send",
+        "command_msg",
+        "title",
+        "helper_probe",
+        "boom",
+      ],
       snapshot_format: 2,
     });
     expect(nmDefined(archive, "kc_")).toEqual(doc.abi.exports.map((s) => `kc_${s}`).sort());
@@ -247,8 +323,10 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
       ...(emission === "llvm"
         ? ["-Wno-override-module"]
         : ["-Wno-comment", "-I", join(repoRoot, "packages/runtime/src")]),
-      "-c", llvmPath,
-      "-o", keptObject,
+      "-c",
+      llvmPath,
+      "-o",
+      keptObject,
     ]);
     expect(nmDefined(keptObject, "kc_")).toEqual(doc.abi.exports.map((s) => `kc_${s}`).sort());
 
@@ -256,7 +334,14 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
     // getters before init and after a trap; both reads equal the
     // sidecar's build_id.
     const probe = join(outDir, "probe");
-    execFileSync("clang", ["-std=c11", join(fixtureRoot, "contract/probe.c"), archive, "-lm", "-o", probe]);
+    execFileSync("clang", [
+      "-std=c11",
+      join(fixtureRoot, "contract/probe.c"),
+      archive,
+      "-lm",
+      "-o",
+      probe,
+    ]);
     const run = spawnSync(probe, [], { encoding: "utf8", timeout: 60_000 });
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
@@ -301,8 +386,12 @@ identity stable: 1
     // rebuild of the same root.
     const pkgFile = join(b.outDir, "node_modules/adderkit/index.js");
     writeFileSync(pkgFile, `${readFileSync(pkgFile, "utf8")}// dist edit\n`);
-    const again = await compileLibrary({ profilePath: join(b.outDir, "profile.json"), outDir: b.outDir });
-    if (!again.ok) throw new Error(again.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    const again = await compileLibrary({
+      profilePath: join(b.outDir, "profile.json"),
+      outDir: b.outDir,
+    });
+    if (!again.ok)
+      throw new Error(again.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const mutated = JSON.parse(readFileSync(again.sidecarPath!, "utf8")) as SidecarDoc;
     expect(mutated.source_hash).not.toBe(a.doc.source_hash);
     expect(mutated.build_id).not.toBe(a.doc.build_id);
@@ -396,7 +485,9 @@ identity stable: 1
     ]);
     // The constituents themselves never join the table: they are spelled
     // into Msg, not referenced as payload types.
-    expect(allNames).toEqual(expect.not.arrayContaining(["SpinMsg", "GadgetMsg", "CoreMsg", "Msg"]));
+    expect(allNames).toEqual(
+      expect.not.arrayContaining(["SpinMsg", "GadgetMsg", "CoreMsg", "Msg"]),
+    );
   });
 });
 
@@ -411,7 +502,11 @@ test("wyhash64 matches the published final_version_3 vectors", () => {
     ["message digest", 3n, "6e2ff3298208a67c"],
     ["abcdefghijklmnopqrstuvwxyz", 4n, "9a64e42e897195b9"],
     ["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 5n, "9199383239c32554"],
-    ["12345678901234567890123456789012345678901234567890123456789012345678901234567890", 6n, "7c1ccf6bba30f5a5"],
+    [
+      "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+      6n,
+      "7c1ccf6bba30f5a5",
+    ],
   ];
   for (const [text, seed, want] of vectors) {
     expect(wyhash64(enc.encode(text), seed).toString(16).padStart(16, "0")).toBe(want);
@@ -523,7 +618,12 @@ function conformanceDoc(): Record<string, unknown> {
     model_helpers: [
       { name: "sending", params: [], returns: { kind: "bool" }, arena: false },
       { name: "draftText", params: [], returns: { kind: "bytes" }, arena: true },
-      { name: "turnRows", params: [], returns: { kind: "slice", elem: { kind: "node", name: "TurnRow" } }, arena: true },
+      {
+        name: "turnRows",
+        params: [],
+        returns: { kind: "slice", elem: { kind: "node", name: "TurnRow" } },
+        arena: true,
+      },
     ],
     model_unbound: ["turns", "nextId", "phase", "draft", "endpoint"],
     msg: {
@@ -531,7 +631,15 @@ function conformanceDoc(): Record<string, unknown> {
       arms: [
         { name: "draft_edit", payload: { kind: "union", name: "EditEvent" } },
         { name: "send", payload: { kind: "void" } },
-        { name: "chat_response", payload: { kind: "number_bytes", number_field: "status", number_class: "i64", bytes_field: "body" } },
+        {
+          name: "chat_response",
+          payload: {
+            kind: "number_bytes",
+            number_field: "status",
+            number_class: "i64",
+            bytes_field: "body",
+          },
+        },
         { name: "chat_failed", payload: { kind: "bytes" } },
         { name: "panel_moved", payload: { kind: "record", name: "PanelState" } },
         { name: "phase_set", payload: { kind: "enum", name: "Phase" } },
@@ -554,7 +662,17 @@ function conformanceDoc(): Record<string, unknown> {
     },
     abi: {
       prefix: "app_core_",
-      exports: ["abi_version", "build_id", "set_panic_sink", "init", "dispatch_void", "dispatch_bytes", "model_snapshot", "helper_call", "collect"],
+      exports: [
+        "abi_version",
+        "build_id",
+        "set_panic_sink",
+        "init",
+        "dispatch_void",
+        "dispatch_bytes",
+        "model_snapshot",
+        "helper_call",
+        "collect",
+      ],
       snapshot_format: 1,
     },
     integer_slots: [
@@ -583,7 +701,10 @@ describe("the V1-V14 validator", () => {
     mutate(doc);
     const violations = validateSidecar(doc);
     expect(violations.length).toBeGreaterThan(0);
-    expect(violations.some((v) => v.startsWith(`${rule}:`)), violations.join("; ")).toBe(true);
+    expect(
+      violations.some((v) => v.startsWith(`${rule}:`)),
+      violations.join("; "),
+    ).toBe(true);
   };
 
   test("V1: a missing required field refuses", () => {
@@ -632,7 +753,10 @@ describe("the V1-V14 validator", () => {
 
   test("V4: a dangling TypeRef refuses", () => {
     expectViolation("V4", (d) => {
-      d["types"].structs[7].fields[0].type = { kind: "slice", elem: { kind: "node", name: "Ghost" } };
+      d["types"].structs[7].fields[0].type = {
+        kind: "slice",
+        elem: { kind: "node", name: "Ghost" },
+      };
     });
   });
 
@@ -656,7 +780,8 @@ describe("the V1-V14 validator", () => {
 
   test("V6: more than 256 msg arms refuse", () => {
     expectViolation("V6", (d) => {
-      for (let i = 0; i < 256; i++) d["msg"].arms.push({ name: `arm_${i}`, payload: { kind: "void" } });
+      for (let i = 0; i < 256; i++)
+        d["msg"].arms.push({ name: `arm_${i}`, payload: { kind: "void" } });
     });
   });
 
@@ -704,7 +829,9 @@ describe("the V1-V14 validator", () => {
 
   test("V10: an i64 spelling without its integer_slots entry refuses", () => {
     expectViolation("V10", (d) => {
-      d["integer_slots"] = d["integer_slots"].filter((s: { slot: string }) => s.slot !== "Model.nextId");
+      d["integer_slots"] = d["integer_slots"].filter(
+        (s: { slot: string }) => s.slot !== "Model.nextId",
+      );
     });
   });
 
@@ -838,7 +965,15 @@ export function boot(): number {
       { name: "rename", payload: { kind: "bytes" } },
       { name: "toggle", payload: { kind: "scalar", type: { kind: "bool" } } },
       { name: "upload", payload: { kind: "bytes" } },
-      { name: "packet", payload: { kind: "number_bytes", number_field: "size", number_class: "f64", bytes_field: "body" } },
+      {
+        name: "packet",
+        payload: {
+          kind: "number_bytes",
+          number_field: "size",
+          number_class: "f64",
+          bytes_field: "body",
+        },
+      },
       { name: "noop", payload: { kind: "void" } },
     ]);
     expect(doc.model_helpers).toEqual([
@@ -894,11 +1029,11 @@ async function sidecarRefusal(
   const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
-  return result.diagnostics.map((d) => (
+  return result.diagnostics.map((d) =>
     d.hint === undefined
       ? { code: d.code, message: d.message, file: d.loc.file }
-      : { code: d.code, message: d.message, file: d.loc.file, hint: d.hint }
-  ));
+      : { code: d.code, message: d.message, file: d.loc.file, hint: d.hint },
+  );
 }
 
 const REFUSAL_BASE = `export interface Model { count: number; }
@@ -953,8 +1088,10 @@ export function boot(): number {
     ]);
   });
 
-  test.each(["Array", "ReadonlyArray"])("a local %s<T> alias is not mistaken for the global array type", async (name) => {
-    const diags = await sidecarRefusal(`export type ${name}<T> = { value: T };
+  test.each(["Array", "ReadonlyArray"])(
+    "a local %s<T> alias is not mistaken for the global array type",
+    async (name) => {
+      const diags = await sidecarRefusal(`export type ${name}<T> = { value: T };
 export interface Model { item: ${name}<number>; }
 export type Msg = { kind: "keep" } | { kind: "alsoKeep" };
 export function init(): Model { return { item: { value: 1 } }; }
@@ -965,9 +1102,10 @@ export function boot(): number {
   return state.item.value;
 }
 `);
-    expect(diags[0]!.code).toBe("SC4009");
-    expect(diags[0]!.message).toContain(`${name}<number>`);
-  });
+      expect(diags[0]!.code).toBe("SC4009");
+      expect(diags[0]!.message).toContain(`${name}<number>`);
+    },
+  );
 
   test("an imported ReadonlyArray binding is not mistaken for the global array type", async () => {
     const diags = await sidecarRefusal(
@@ -1037,10 +1175,9 @@ describe("SC4009: contract sidecar refusals", () => {
 
   test("an inline union field refuses toward a named declaration", async () => {
     const diags = await sidecarRefusal(
-      REFUSAL_BASE.replace("{ count: number; }", '{ count: number; mode: "a" | "b"; }').replace(
-        "return { count: 0 };",
-        'return { count: 0, mode: "a" };',
-      ).replace("return { count: m.count + 1 };", 'return { count: m.count + 1, mode: m.mode };'),
+      REFUSAL_BASE.replace("{ count: number; }", '{ count: number; mode: "a" | "b"; }')
+        .replace("return { count: 0 };", 'return { count: 0, mode: "a" };')
+        .replace("return { count: m.count + 1 };", "return { count: m.count + 1, mode: m.mode };"),
     );
     expect(diags[0]!.code).toBe("SC4009");
     expect(diags[0]!.message).toContain("inline union");
@@ -1053,13 +1190,17 @@ describe("SC4009: contract sidecar refusals", () => {
   });
 
   test("an env channel targeting a non-bytes arm refuses", async () => {
-    const diags = await sidecarRefusal(REFUSAL_BASE + `export const envMsgs = [{ env: "APP_X", msg: "tick" }];\n`);
+    const diags = await sidecarRefusal(
+      REFUSAL_BASE + `export const envMsgs = [{ env: "APP_X", msg: "tick" }];\n`,
+    );
     expect(diags[0]!.code).toBe("SC4009");
     expect(diags[0]!.message).toContain("bytes");
   });
 
   test("a helper without a return annotation refuses", async () => {
-    const diags = await sidecarRefusal(REFUSAL_BASE + `export function peek(m: Model) { return m.count; }\n`);
+    const diags = await sidecarRefusal(
+      REFUSAL_BASE + `export function peek(m: Model) { return m.count; }\n`,
+    );
     expect(diags[0]!.code).toBe("SC4009");
     expect(diags[0]!.message).toContain("peek");
   });

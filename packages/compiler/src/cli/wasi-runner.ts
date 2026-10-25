@@ -32,8 +32,5 @@ const wasi = new WASI({
   preopens: wasiPreopens(cwd, hostTmp),
   returnOnExit: true,
 });
-const instantiated = await WebAssembly.instantiate(
-  await readFile(binary),
-  wasi.getImportObject(),
-);
+const instantiated = await WebAssembly.instantiate(await readFile(binary), wasi.getImportObject());
 process.exitCode = wasi.start(instantiated.instance);

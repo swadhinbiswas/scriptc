@@ -315,7 +315,9 @@ function oneStreamTrace(rng: XorShift32, trace: number): string {
     if (!state.locked) {
       if (rng.pick(3) === 0) {
         lines.push(`await trace${trace}Stream.cancel("random-cancel-${trace}-${step}");`);
-        lines.push(`console.log("trace ${trace} random stream cancel ${step}:", trace${trace}Stream.locked);`);
+        lines.push(
+          `console.log("trace ${trace} random stream cancel ${step}:", trace${trace}Stream.locked);`,
+        );
         state.terminal = true;
       } else {
         acquireReader(lines, trace, state);
@@ -333,7 +335,9 @@ function oneStreamTrace(rng: XorShift32, trace: number): string {
         break;
       default:
         lines.push(`await ${state.reader}.cancel("random-reader-cancel-${trace}-${step}");`);
-        lines.push(`console.log("trace ${trace} random reader cancel ${step}:", trace${trace}Stream.locked);`);
+        lines.push(
+          `console.log("trace ${trace} random reader cancel ${step}:", trace${trace}Stream.locked);`,
+        );
         state.terminal = true;
         break;
     }
@@ -398,23 +402,23 @@ try {
   return traces.join("\n");
 }
 
-const SCENARIO_GENERATORS: Record<
-  GeneratedScenario,
-  (seed: number, traceCount: number) => string
-> = {
-  "abort-events": () => abortEvents(),
-  "stream-traces": (seed, traceCount) => streamTraces(seed, traceCount),
-  "webidl-operations": () => webIdlOperations(),
-};
+const SCENARIO_GENERATORS: Record<GeneratedScenario, (seed: number, traceCount: number) => string> =
+  {
+    "abort-events": () => abortEvents(),
+    "stream-traces": (seed, traceCount) => streamTraces(seed, traceCount),
+    "webidl-operations": () => webIdlOperations(),
+  };
 
 export function generatedScenarioIds(profile: FetchCompatProfile): string[] {
-  return [...new Set(
-    profile.operations.flatMap((operation) =>
-      operation.evidence.flatMap((item) =>
-        item.generated === undefined ? [] : [item.generated]
-      )
+  return [
+    ...new Set(
+      profile.operations.flatMap((operation) =>
+        operation.evidence.flatMap((item) =>
+          item.generated === undefined ? [] : [item.generated],
+        ),
+      ),
     ),
-  )].sort();
+  ].sort();
 }
 
 export function generateFetchConformanceProgram(
@@ -425,16 +429,14 @@ export function generateFetchConformanceProgram(
   const traceCount = options.traceCount ?? 12;
   const scenarios = generatedScenarioIds(profile);
   const sections: string[] = [
-    `// Generated from NODE24_FETCH_COMPAT_PROFILE. Seed: 0x${seed.toString(16)}.`,
+    `// Generated from node24FetchCompatProfile(). Seed: 0x${seed.toString(16)}.`,
   ];
   for (const scenario of scenarios) {
     if (!Object.hasOwn(SCENARIO_GENERATORS, scenario)) {
       throw new Error(`unknown generated fetch conformance scenario: ${scenario}`);
     }
     sections.push(`// scenario: ${scenario}`);
-    sections.push(
-      SCENARIO_GENERATORS[scenario as GeneratedScenario](seed, traceCount),
-    );
+    sections.push(SCENARIO_GENERATORS[scenario as GeneratedScenario](seed, traceCount));
   }
   sections.push("export {};", "");
   return sections.join("\n");

@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2032-cjs-export-assigned-class-expression/anon.cjs",
+  "<repo>/tests/corpus/2032-cjs-export-assigned-class-expression/widget.cjs",
+  "<repo>/tests/corpus/2032-cjs-export-assigned-class-expression/main.cjs"
+ ],
+ "diags": []
+}

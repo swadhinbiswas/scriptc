@@ -1,11 +1,9 @@
-json-shape/main.ts:5:8 - error SC2011: values of type '{ name: string; deprecated: null; }' have no static representation but run in the embedded dynamic engine, which this build does not include
+json-shape/main.ts:5:8 - error SC1110: comptime evaluation failed: expected 'number' at $.limit, got Infinity (only finite numbers can be written as literals)
 
-  4 |  * engine) and uses of the binding poison. */
+  4 |  * field bakes as null.) */
   5 | import bad from "./nulled.json" with { type: "json" };
     |        ^~~
   6 | 
-
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
 
 json-shape/main.ts:7:13 - error SC1090: the reference to 'bad' (a binding form with no lowering) is not supported yet
 

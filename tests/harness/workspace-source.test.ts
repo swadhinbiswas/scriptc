@@ -23,7 +23,11 @@ test.for(["llvm"] as const)(
       sanitize,
     });
     if (!result.ok) {
-      throw new Error(result.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("\n"));
+      throw new Error(
+        result.diagnostics
+          .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+          .join("\n"),
+      );
     }
 
     const { stdout } = await execFileAsync(result.binaryPath, [], { encoding: "utf8" });

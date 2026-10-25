@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5323-dyn-numeric-index-reads.ts"
+ ],
+ "diags": []
+}

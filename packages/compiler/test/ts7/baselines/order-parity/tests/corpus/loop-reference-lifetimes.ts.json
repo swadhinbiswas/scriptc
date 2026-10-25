@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/loop-reference-lifetimes.ts"
+ ],
+ "diags": []
+}

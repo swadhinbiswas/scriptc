@@ -1,4 +1,3 @@
-// @dynamic
 // The rest-forwarding idiom under --dynamic: the `(...args)` binding is
 // the ENGINE's own arguments array (islandRest), so the forward rides
 // jsOp callSpread — the island prelude's real `f(...pre, ...s)` with

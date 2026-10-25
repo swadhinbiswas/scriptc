@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5613-readable-from-iterable-timing.cjs"
+ ],
+ "diags": []
+}

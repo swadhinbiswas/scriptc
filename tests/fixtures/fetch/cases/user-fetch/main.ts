@@ -1,12 +1,4 @@
-// @dynamic
-// USER-code fetch — the island-backed ambient in the program's OWN
-// TypeScript (no npm package in sight): `await fetch(url)` bridges the
-// engine promise to a static one, the Response is an island handle whose
-// members are engine ops (ok/status/statusText probe reads, json() through
-// a checked cast, text() into a string slot), init literals build natively
-// in the island (method/headers/body/signal), AbortSignal.timeout cancels,
-// and network failure rejects catchably. Byte-exact vs Node.
-
+// Typed native fetch, request/response streaming, redirects, and cancellation.
 async function requestStream(baseUrl: string): Promise<ReadableStream<Uint8Array>> {
   const response = await fetch(`${baseUrl}/chunked`);
   if (response.body === null) throw new Error("missing response body");
@@ -14,7 +6,7 @@ async function requestStream(baseUrl: string): Promise<ReadableStream<Uint8Array
 }
 
 async function main(baseUrl: string, refusedUrl: string): Promise<void> {
-  const constructed = new Response("island response", {
+  const constructed = new Response("native response", {
     status: 202,
     statusText: "Accepted",
     headers: { "x-constructed": "yes" },
@@ -31,13 +23,13 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     constructedBody,
   );
 
-  // ok + status through the handle; json() exits through a checked cast.
+  // Response fields and JSON use native checked values.
   const r = await fetch(`${baseUrl}/json`);
   console.log("ok:", r.ok ? "yes" : "no", "status:", `${r.status}`);
   const j = (await r.json()) as { n: number; s: string; arr: (number | string)[] };
   console.log("json:", j.n, j.s, j.arr.length);
 
-  // text() lands in a string slot through the validated exit.
+  // text() returns a native string.
   const t = await fetch(`${baseUrl}/text`);
   const body: string = await t.text();
   console.log("text:", body);
@@ -55,7 +47,7 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     console.log("nf-body:", nfBody);
   }
 
-  // POST with an init literal: method, headers, body cross the boundary.
+  // POST with a typed init literal.
   const echoed = await fetch(`${baseUrl}/post-echo`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-user-tag": "native" },
@@ -68,8 +60,7 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   };
   console.log("post:", ej.method, ej.contentType ?? "none", ej.body);
 
-  // A request ReadableStream crosses the island incrementally instead of
-  // being silently discarded.
+  // A response ReadableStream becomes an upload with live backpressure.
   const streamed = await fetch(`${baseUrl}/post-echo`, {
     method: "POST",
     body: await requestStream(baseUrl),
@@ -112,7 +103,7 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     }
   }
 
-  // All three redirect policies are implemented by the dynamic bridge.
+  // All three redirect policies use the native transport.
   const manual = await fetch(`${baseUrl}/redirect`, { redirect: "manual" });
   console.log(
     "manual redirect:",
@@ -180,8 +171,7 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     if (e instanceof Error) console.log("timeout:", e.name, e.message);
   }
 
-  // Typed user code can also cancel imperatively under --dynamic; this
-  // exercises the compiler bridge into the island's AbortController.
+  // Typed user code can also cancel imperatively.
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 20);
   try {

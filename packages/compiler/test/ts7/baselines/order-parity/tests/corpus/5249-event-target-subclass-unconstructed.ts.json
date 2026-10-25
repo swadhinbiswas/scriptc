@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5249-event-target-subclass-unconstructed.ts"
+ ],
+ "diags": []
+}

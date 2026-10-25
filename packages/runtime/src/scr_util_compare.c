@@ -121,10 +121,7 @@ static bool util_deep_equal(const ScrDyn *a, const ScrDyn *b, bool skip,
   if (scr_dyn_same_value(a, b)) return true;
   if (a->kind == SCR_DYN_PROXY || b->kind == SCR_DYN_PROXY)
     return util_deep_refused("native Proxy values");
-  if (a->kind == SCR_DYN_JSVAL || b->kind == SCR_DYN_JSVAL) {
-    scr_dyn_isl_fence(a->kind == SCR_DYN_JSVAL ? a : b, "util.isDeepStrictEqual");
-    return false;
-  }
+
   if (a->kind == SCR_DYN_TYPED_REF || b->kind == SCR_DYN_TYPED_REF) {
     const ScrDyn *inputs[] = { a, b };
     for (size_t i = 0; i < 2; i++) {
@@ -184,6 +181,8 @@ static bool util_deep_equal(const ScrDyn *a, const ScrDyn *b, bool skip,
   if (a->kind == SCR_DYN_BYTES) {
     const ScrBytes *x = a->v.bytes, *y = b->v.bytes;
     if (x->elem != y->elem || x->len != y->len) return false;
+    SCR_BYTES_SNAPSHOT(x);
+    SCR_BYTES_SNAPSHOT(y);
     size_t length = x->len * scr_bytes_elem_size(x->elem);
     if (length && memcmp(x->data, y->data, length)) return false;
   }

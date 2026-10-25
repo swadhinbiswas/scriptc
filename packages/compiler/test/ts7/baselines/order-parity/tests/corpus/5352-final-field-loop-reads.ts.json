@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5352-final-field-loop-reads.ts"
+ ],
+ "diags": []
+}

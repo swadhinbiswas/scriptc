@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5424-stream-write-buffer-encoding.ts"
+ ],
+ "diags": []
+}

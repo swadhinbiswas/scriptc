@@ -8,7 +8,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { loadLibraryProfile, profileRemediation, profileTeaching } from "@scriptc/compiler";
+import {
+  loadLibraryProfile,
+  profileRemediation,
+  profileTeaching,
+  resolveLibraryFences,
+} from "@scriptc/compiler";
 
 const dir = mkdtempSync(join(tmpdir(), "scriptc-lib-profile-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -49,7 +54,9 @@ function expectSc4001(json: unknown, fragment: string): void {
 
 describe("library profile validation", () => {
   test("explicit npm source attempts accept package names only", () => {
-    const result = loadLibraryProfile(writeProfile({ ...good, npm_static: ["three", "@scope/pkg", "three"] }));
+    const result = loadLibraryProfile(
+      writeProfile({ ...good, npm_static: ["three", "@scope/pkg", "three"] }),
+    );
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.profile.npmStatic).toEqual(["three", "@scope/pkg"]);
     for (const npm_static of [null, "three", [null], [""], ["three/src/math"], ["../three"]]) {
@@ -78,7 +85,9 @@ describe("library profile validation", () => {
     const r = loadLibraryProfile(
       writeProfile({
         ...good,
-        determinism: { teachings: { async: "use kx_schedule instead", SC4004: "wrap it in a sync facade" } },
+        determinism: {
+          teachings: { async: "use kx_schedule instead", SC4004: "wrap it in a sync facade" },
+        },
       }),
     );
     expect(r.ok).toBe(true);
@@ -94,7 +103,10 @@ describe("library profile validation", () => {
         ...good,
         determinism: {
           teachings: { NS1207: "the host and this core disagree about the contract" },
-          remediations: { NS1207: "rebuild the app from one build", SC4012: "pass the true byte length" },
+          remediations: {
+            NS1207: "rebuild the app from one build",
+            SC4012: "pass the true byte length",
+          },
         },
       }),
     );
@@ -102,7 +114,9 @@ describe("library profile validation", () => {
     if (!r.ok) return;
     // Embedder-prefixed codes are validated only as tokens free of the
     // reserved bytes — never for registry membership.
-    expect(profileTeaching(r.profile, "NS1207")).toBe("the host and this core disagree about the contract");
+    expect(profileTeaching(r.profile, "NS1207")).toBe(
+      "the host and this core disagree about the contract",
+    );
     expect(profileRemediation(r.profile, "NS1207")).toBe("rebuild the app from one build");
     expect(profileRemediation(r.profile, "SC4012")).toBe("pass the true byte length");
     expect(profileRemediation(r.profile, "SC4004")).toBeUndefined();
@@ -151,7 +165,56 @@ describe("library profile validation", () => {
   });
 
   test("parse error", () => expectSc4001("{ not json", "not valid JSON"));
-  test("wrong format", () => expectSc4001({ ...good, profile_format: 2 }, "profile_format"));
+  test("wrong format", () => expectSc4001({ ...good, profile_format: 3 }, "profile_format"));
+  test("the cstring class requires profile_format 2", () => {
+    const cstringExport = {
+      export: "greet",
+      symbol: "kx_greet",
+      params: ["cstring"],
+      returns: "cstring",
+    };
+    const v2 = loadLibraryProfile(
+      writeProfile({ ...good, profile_format: 2, exports: [...good.exports, cstringExport] }),
+    );
+    expect(v2.ok).toBe(true);
+    if (v2.ok) {
+      expect(v2.profile.profileFormat).toBe(2);
+      expect(v2.profile.exports.at(-1)).toMatchObject({ params: ["cstring"], returns: "cstring" });
+    }
+    expectSc4001(
+      { ...good, exports: [...good.exports, cstringExport] },
+      "'exports[2].params[0]' class 'cstring' requires profile_format 2",
+    );
+    expectSc4001(
+      { ...good, exports: [...good.exports, { ...cstringExport, params: [] }] },
+      "'exports[2].returns' class 'cstring' requires profile_format 2",
+    );
+    const callbackAbi = { ...good.abi, callback_register_symbol: "kx_set_callback" };
+    const cstringCallback = { name: "log", params: ["cstring"], returns: "void" };
+    expect(
+      loadLibraryProfile(
+        writeProfile({
+          ...good,
+          profile_format: 2,
+          abi: callbackAbi,
+          callbacks: [cstringCallback],
+        }),
+      ).ok,
+    ).toBe(true);
+    expectSc4001(
+      { ...good, abi: callbackAbi, callbacks: [cstringCallback] },
+      "'callbacks[0].params[0]' class 'cstring' requires profile_format 2",
+    );
+    expectSc4001(
+      {
+        ...good,
+        profile_format: 2,
+        abi: callbackAbi,
+        callbacks: [{ name: "log", params: [], returns: "cstring" }],
+      },
+      "a callback return stays scalar",
+    );
+  });
   test("missing name", () => {
     const { name: _drop, ...rest } = good;
     expectSc4001(rest, "'name'");
@@ -272,17 +335,29 @@ describe("library profile sidecar section", () => {
   test("unknown field inside sidecar refuses", () =>
     expectSc4001({ ...good, sidecar: { ...goodSidecar, extra: 1 } }, "sidecar.extra"));
   test("getter symbol without the prefix refuses", () =>
-    expectSc4001({ ...good, sidecar: { ...goodSidecar, build_id_symbol: "zz_build_id" } }, "sidecar.build_id_symbol"));
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, build_id_symbol: "zz_build_id" } },
+      "sidecar.build_id_symbol",
+    ));
   test("a getter symbol colliding with a mode symbol refuses", () =>
-    expectSc4001({ ...good, sidecar: { ...goodSidecar, build_id_symbol: "kx_init" } }, "declared twice"));
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, build_id_symbol: "kx_init" } },
+      "declared twice",
+    ));
   test("model and msg must differ", () =>
     expectSc4001({ ...good, sidecar: { ...goodSidecar, msg: "Model" } }, "differ"));
   test("an unknown source_hash contract refuses", () =>
     expectSc4001({ ...good, sidecar: { ...goodSidecar, source_hash: "sha256" } }, "module-graph"));
   test("a non-integer version constant refuses", () =>
-    expectSc4001({ ...good, sidecar: { ...goodSidecar, wire_version: 1.5 } }, "sidecar.wire_version"));
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, wire_version: 1.5 } },
+      "sidecar.wire_version",
+    ));
   test("an absolute sidecar path refuses", () =>
-    expectSc4001({ ...good, sidecar: { ...goodSidecar, path: "/tmp/contract.json" } }, "sidecar.path"));
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, path: "/tmp/contract.json" } },
+      "sidecar.path",
+    ));
 
   /* ── ask 4: the declared integer boundary surface ─────────────────── */
 
@@ -322,7 +397,10 @@ describe("library profile sidecar section", () => {
 
   test("an integer_slots class outside i64/u64 refuses", () =>
     expectSc4001(
-      { ...good, sidecar: { ...goodSidecar, integer_slots: [{ slot: "Msg.count", class: "u32" }] } },
+      {
+        ...good,
+        sidecar: { ...goodSidecar, integer_slots: [{ slot: "Msg.count", class: "u32" }] },
+      },
       "integer_slots[0].class",
     ));
   test("a repeated integer_slots path refuses", () =>
@@ -341,17 +419,22 @@ describe("library profile sidecar section", () => {
     ));
   test("an unknown field inside an integer_slots entry refuses", () =>
     expectSc4001(
-      { ...good, sidecar: { ...goodSidecar, integer_slots: [{ slot: "Msg.count", class: "i64", sign: true }] } },
+      {
+        ...good,
+        sidecar: {
+          ...goodSidecar,
+          integer_slots: [{ slot: "Msg.count", class: "i64", sign: true }],
+        },
+      },
       "integer_slots[0].sign",
     ));
 });
-
 
 /* ── the ask-5 fences array ────────────────────────────────────────────────
  * Selector strictness is RATIFIED: fence profiles pin per compiler
  * release, so an id or prefix matching nothing in this release's surface
  * manifest refuses SC4001 at load — there is no forward-compatible
- * acceptance of unknown selectors, and no silently-inert fence. Static
+ * acceptance of unknown selectors, and no fence that loads as a no-op. Static
  * surfaces no detector can police refuse the same way, with the reason
  * named (folded constants, desugared methods). */
 
@@ -362,9 +445,17 @@ describe("library profile fences", () => {
         ...good,
         determinism: {
           fences: [
-            { id: "stdlib.math.random", teaching: "randomness is an effect", remediation: "ask the host" },
+            {
+              id: "stdlib.math.random",
+              teaching: "randomness is an effect",
+              remediation: "ask the host",
+            },
             { prefix: "node-builtin.fs.", teaching: "files are effects" },
-            { id: "stdlib.math.acos", teaching: "trig is host math", remediation: "request it as an effect" },
+            {
+              id: "stdlib.math.acos",
+              teaching: "trig is host math",
+              remediation: "request it as an effect",
+            },
           ],
         },
       }),
@@ -389,14 +480,21 @@ describe("library profile fences", () => {
   });
 
   test("a fence remediation feeds the trap-remediation lookup through covered codes", () => {
+    // A crypto member that still refuses with SC2020, read from the
+    // manifest: members leave that set as they gain lowerings.
+    const builtins = resolveLibraryFences([{ path: "fences[0]", prefix: "node-builtin.crypto." }]);
+    expect(builtins.ok).toBe(true);
+    if (!builtins.ok) return;
+    const unlowered = builtins.fences[0]!.surfaces.find((s) => s.code === "SC2020");
+    expect(unlowered).toBeDefined();
     const r = loadLibraryProfile(
       writeProfile({
         ...good,
         determinism: {
           remediations: { SC2012: "the explicit map key wins" },
           fences: [
-            { id: "stdlib.number.toPrecision", remediation: "request it as an effect" },
-            { id: "node-builtin.crypto.createCipheriv", remediation: "ciphers come from the host" },
+            { id: "diagnostic.sc2012", remediation: "request it as an effect" },
+            { id: unlowered!.id, remediation: "the host provides it" },
           ],
         },
       }),
@@ -406,9 +504,9 @@ describe("library profile fences", () => {
     // Explicit remediations keys win over fence-supplied text.
     expect(profileRemediation(r.profile, "SC2012")).toBe("the explicit map key wins");
     // A fence's remediation answers for its covered entries' codes
-    // (crypto.createCipheriv is SC2020) — spec §3's "in a fence entry or a
-    // remediations map", one lookup either way.
-    expect(profileRemediation(r.profile, "SC2020")).toBe("ciphers come from the host");
+    // (SC2020 here) — spec §3's "in a fence entry or a remediations map",
+    // one lookup either way.
+    expect(profileRemediation(r.profile, "SC2020")).toBe("the host provides it");
     expect(profileRemediation(r.profile, "SC4014")).toBeUndefined();
   });
 
@@ -465,7 +563,12 @@ describe("library profile fences", () => {
       "stdlib.date.getUTCSeconds",
       "stdlib.date.now",
       "stdlib.date.parse",
+      "stdlib.date.setters",
+      "stdlib.date.toDateString",
       "stdlib.date.toISOString",
+      "stdlib.date.toString",
+      "stdlib.date.toTimeString",
+      "stdlib.date.toUTCString",
       "stdlib.date.valueOf",
     ]);
     expect(r.profile.fences[0]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
@@ -478,7 +581,20 @@ describe("library profile fences", () => {
     expect(processIds).toContain("node-builtin.process.cpuUsage");
     expect(processIds).toContain("node-builtin.process.isTTY");
     expect(r.profile.fences[1]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
-    expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual(["node-builtin.perf_hooks.performance.now"]);
+    // The user-timing timeline reads the same clock (mark() and measure()
+    // default to performance.now()), and so do the event-loop metrics, so
+    // they join the perf_hooks family.
+    expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual([
+      "node-builtin.perf_hooks.monitorEventLoopDelay",
+      "node-builtin.perf_hooks.performance.clearMarks",
+      "node-builtin.perf_hooks.performance.clearMeasures",
+      "node-builtin.perf_hooks.performance.eventLoopUtilization",
+      "node-builtin.perf_hooks.performance.getEntries",
+      "node-builtin.perf_hooks.performance.mark",
+      "node-builtin.perf_hooks.performance.measure",
+      "node-builtin.perf_hooks.performance.now",
+    ]);
+    expect(r.profile.fences[2]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
   });
 
   test("Date getTime and valueOf fences keep distinct IR witnesses", () => {
@@ -509,7 +625,10 @@ describe("library profile fences", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.profile.fences[0]!.surfaces[0]!.detector?.libFns).toEqual(["date.parse"]);
-    expect(r.profile.fences[1]!.surfaces[0]!.detector?.libFns).toEqual(["date.getTime", "date.parseGetTime"]);
+    expect(r.profile.fences[1]!.surfaces[0]!.detector?.libFns).toEqual([
+      "date.getTime",
+      "date.parseGetTime",
+    ]);
   });
 
   test("a prefix matching nothing refuses — the spec's illustrative spelling included", () => {
@@ -524,7 +643,10 @@ describe("library profile fences", () => {
 
   test("exactly one of id/prefix per fence", () => {
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.math.random", prefix: "node-builtin.fs." }] } },
+      {
+        ...good,
+        determinism: { fences: [{ id: "stdlib.math.random", prefix: "node-builtin.fs." }] },
+      },
       "exactly one of 'id' or 'prefix'",
     );
     expectSc4001(
@@ -533,7 +655,7 @@ describe("library profile fences", () => {
     );
   });
 
-  test("unknown fields inside a fence entry refuse (a typo silently disarms a denial)", () => {
+  test("unknown fields inside a fence entry refuse (a typo would disarm a denial without a diagnostic)", () => {
     expectSc4001(
       { ...good, determinism: { fences: [{ id: "stdlib.math.random", teachng: "typo" }] } },
       "unknown field 'determinism.fences[0].teachng'",
@@ -542,11 +664,17 @@ describe("library profile fences", () => {
 
   test("fence teaching/remediation strings share the reserved-byte and 512-byte rules", () => {
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.math.random", teaching: "bad \u0001 marker" }] } },
+      {
+        ...good,
+        determinism: { fences: [{ id: "stdlib.math.random", teaching: "bad \u0001 marker" }] },
+      },
       "determinism.fences[0].teaching",
     );
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.math.random", remediation: "x".repeat(513) }] } },
+      {
+        ...good,
+        determinism: { fences: [{ id: "stdlib.math.random", remediation: "x".repeat(513) }] },
+      },
       "determinism.fences[0].remediation",
     );
   });
@@ -554,10 +682,7 @@ describe("library profile fences", () => {
   test("a compile-time-folded constant cannot be id-fenced; a prefix exempts it", () => {
     // os.EOL folds to a per-binary literal: nothing at runtime reads it,
     // so an id fence naming it would be a lie — refused with the reason.
-    expectSc4001(
-      { ...good, determinism: { fences: [{ id: "node-builtin.os.EOL" }] } },
-      "fold",
-    );
+    expectSc4001({ ...good, determinism: { fences: [{ id: "node-builtin.os.EOL" }] } }, "fold");
     // The family sweep stays usable: the prefix covers the os members and
     // exempts the folded constant.
     const r = loadLibraryProfile(
@@ -570,10 +695,7 @@ describe("library profile fences", () => {
 
     // Math.PI is the same kind of per-binary numeric literal. An exact fence
     // must refuse because there is no runtime read to deny.
-    expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.math.PI" }] } },
-      "fold",
-    );
+    expectSc4001({ ...good, determinism: { fences: [{ id: "stdlib.math.PI" }] } }, "fold");
     const math = loadLibraryProfile(
       writeProfile({ ...good, determinism: { fences: [{ prefix: "stdlib.math." }] } }),
     );
@@ -586,10 +708,7 @@ describe("library profile fences", () => {
   });
 
   test("a desugared surface no detector can police refuses, id and prefix alike", () => {
-    expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.array.map" }] } },
-      "desugars",
-    );
+    expectSc4001({ ...good, determinism: { fences: [{ id: "stdlib.array.map" }] } }, "desugars");
     expectSc4001(
       { ...good, determinism: { fences: [{ prefix: "stdlib.array." }] } },
       "cannot be fenced",
@@ -688,7 +807,10 @@ describe("library profile host-callback channels", () => {
 
   test("unknown fields inside a channel entry refuse", () =>
     expectSc4001(
-      { ...withCallbacks, callbacks: [{ name: "x", params: [], returns: "void", lifetime: "call" }] },
+      {
+        ...withCallbacks,
+        callbacks: [{ name: "x", params: [], returns: "void", lifetime: "call" }],
+      },
       "callbacks[0].lifetime",
     ));
 
@@ -702,7 +824,11 @@ describe("library profile host-callback channels", () => {
     expectSc4001(
       {
         ...withCallbacks,
-        callbacks: Array.from({ length: 33 }, (_, i) => ({ name: `c${i}`, params: [], returns: "void" })),
+        callbacks: Array.from({ length: 33 }, (_, i) => ({
+          name: `c${i}`,
+          params: [],
+          returns: "void",
+        })),
       },
       "slot capacity is 32",
     ));

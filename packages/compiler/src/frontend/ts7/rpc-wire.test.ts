@@ -17,7 +17,9 @@ function memory(bytes: Uint8Array = new Uint8Array(), readSize = Infinity, write
       output.push(...buffer.subarray(offset, offset + size));
       return size;
     },
-    close() { closes++; },
+    close() {
+      closes++;
+    },
   };
   return { io, output, closes: () => closes };
 }
@@ -29,7 +31,11 @@ describe("TypeScript MessagePack wire framing", () => {
   test.each([1, 2, 3, 7, 65536])("decodes fragmented reads of %i bytes", (readSize) => {
     const io = memory(echo, readSize);
     const wire = new Ts7Wire(io.io);
-    expect(wire.read()).toEqual({ kind: 4, method: "echo", payload: Uint8Array.from([0, 128, 255]) });
+    expect(wire.read()).toEqual({
+      kind: 4,
+      method: "echo",
+      payload: Uint8Array.from([0, 128, 255]),
+    });
     expect(io.closes()).toBe(0);
   });
 
@@ -51,14 +57,34 @@ describe("TypeScript MessagePack wire framing", () => {
     expect(io.closes()).toBe(1);
   });
 
+  test("coalesces small frames and keeps large payloads on the direct path", () => {
+    const channel = memory();
+    const transfer = channel.io.write;
+    const lengths: number[] = [];
+    channel.io.write = (buffer, offset, length) => {
+      lengths.push(length);
+      return transfer(buffer, offset, length);
+    };
+    const wire = new Ts7Wire(channel.io);
+    const payloads = [new Uint8Array([7, 8]), new Uint8Array(5000).fill(9), new Uint8Array([10])];
+    for (const payload of payloads) wire.write(4, "echo", payload);
+    expect(lengths).toEqual([12, 11, 5000, 11]);
+    const reader = new Ts7Wire(memory(Uint8Array.from(channel.output)).io);
+    for (const payload of payloads)
+      expect(reader.read()).toEqual({ kind: 4, method: "echo", payload });
+  });
+
   test("accepts uint8 message kind encoding and an empty method/payload", () => {
     const io = memory(Uint8Array.from([0x93, 0xcc, 6, 0xc4, 0, 0xc4, 0]));
     expect(new Ts7Wire(io.io).read()).toEqual({ kind: 6, method: "", payload: new Uint8Array() });
   });
 
   test.each([
-    [0, [0xc4, 0]], [255, [0xc4, 255]], [256, [0xc5, 1, 0]],
-    [65535, [0xc5, 255, 255]], [65536, [0xc6, 0, 1, 0, 0]],
+    [0, [0xc4, 0]],
+    [255, [0xc4, 255]],
+    [256, [0xc5, 1, 0]],
+    [65535, [0xc5, 255, 255]],
+    [65536, [0xc6, 0, 1, 0, 0]],
     [140000, [0xc6, 0, 2, 34, 224]],
   ] as const)("encodes and decodes bin length %i", (length, header) => {
     const bytes = new Uint8Array(length);
@@ -78,7 +104,9 @@ describe("TypeScript MessagePack wire framing", () => {
       const encoded = Buffer.from(name);
       const headerSize = encoded.length < 256 ? 2 : encoded.length < 65536 ? 3 : 5;
       expect(written.output[2]).toBe(headerSize === 2 ? 0xc4 : headerSize === 3 ? 0xc5 : 0xc6);
-      expect(written.output.slice(2 + headerSize, 2 + headerSize + encoded.length)).toEqual(Array.from(encoded));
+      expect(written.output.slice(2 + headerSize, 2 + headerSize + encoded.length)).toEqual(
+        Array.from(encoded),
+      );
       expect(new Ts7Wire(memory(Uint8Array.from(written.output), 257).io).read().method).toBe(name);
     }
   });
@@ -151,15 +179,21 @@ describe("TypeScript MessagePack wire framing", () => {
   test.each([-1, 0, 0.5, NaN, Infinity, 1000])("rejects invalid write count %s", (count) => {
     const io = memory();
     io.io.write = () => count;
-    expect(() => new Ts7Wire(io.io).write(1, "echo", new Uint8Array())).toThrow("invalid write count");
+    expect(() => new Ts7Wire(io.io).write(1, "echo", new Uint8Array())).toThrow(
+      "invalid write count",
+    );
     expect(io.closes()).toBe(1);
   });
 
   test("a failed cleanup does not replace the framing or I/O error", () => {
     const failure = new Error("read failed");
     const io = memory();
-    io.io.read = () => { throw failure; };
-    io.io.close = () => { throw new Error("cleanup failed"); };
+    io.io.read = () => {
+      throw failure;
+    };
+    io.io.close = () => {
+      throw new Error("cleanup failed");
+    };
     const wire = new Ts7Wire(io.io);
     expect(() => wire.read()).toThrow(failure);
     expect(() => wire.read()).toThrow(Ts7ProtocolError);

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1613-cjs-esm-proxy-named/table.cjs",
+  "<repo>/tests/corpus/1613-cjs-esm-proxy-named/main.mjs"
+ ],
+ "diags": []
+}

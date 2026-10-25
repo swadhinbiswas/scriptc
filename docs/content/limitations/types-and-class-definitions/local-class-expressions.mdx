@@ -1,0 +1,7 @@
+- **Local class expressions:** Static fields and static blocks in TypeScript files, decorators, private brands, and generic members are unsupported.
+  Static methods read the enclosing function's bindings and are inherited by subclasses.
+  A named class expression's methods and static members can refer to the class by its name.
+  Supported expressions preserve fresh constructor identity and shared captures across constructors, methods, accessors, and arrow fields.
+  Local inheritance requires a compiled base class.
+  Constructors retain identity, `typeof`, `name`, and `length` through `unknown`; cast back to their exact type before construction.
+  Construction and static-member access directly through `unknown` are unsupported.

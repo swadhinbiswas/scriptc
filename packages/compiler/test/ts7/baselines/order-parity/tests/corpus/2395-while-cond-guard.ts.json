@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2395-while-cond-guard.ts"
+ ],
+ "diags": []
+}

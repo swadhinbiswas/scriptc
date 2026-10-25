@@ -8,7 +8,9 @@ test("checked class arrays reject unbranded and differently branded elements", a
   const dir = mkdtempSync("/tmp/scriptc-class-arrays-");
   try {
     const entry = join(dir, "main.ts");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
 class Item { value = 1; }
 class Child extends Item { extra = 2; }
 class Sibling extends Item { extra = 3; }
@@ -35,19 +37,29 @@ checkChild(new Child());
 checkChild(new Item());
 checkChild(new Sibling());
 checkChild({ value: 1, extra: 2 });
-`);
+`,
+    );
     const result = await compile(entry, {
-      dynamic: false, outDir: dir, outPath: join(dir, "program"),
+      outDir: dir,
+      outPath: join(dir, "program"),
       sanitize: process.env["SCRIPTC_SAN"] === "1",
     });
     if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
-    const child = spawnSync(result.binaryPath, [], {encoding: "utf8", timeout: 30_000});
+    const child = spawnSync(result.binaryPath, [], { encoding: "utf8", timeout: 30_000 });
     expect(child.error).toBeUndefined();
-    expect({status: child.status, signal: child.signal, stdout: child.stdout, stderr: child.stderr}).toEqual({
-      status: 0, signal: null, stderr: "",
-      stdout: "accepted 1\naccepted 1\nrejected true\nrejected true\nrejected true\nrejected true\nrejected true\naccepted 0\nchild 2\nwrong child true\nwrong child true\nwrong child true\n",
+    expect({
+      status: child.status,
+      signal: child.signal,
+      stdout: child.stdout,
+      stderr: child.stderr,
+    }).toEqual({
+      status: 0,
+      signal: null,
+      stderr: "",
+      stdout:
+        "accepted 1\naccepted 1\nrejected true\nrejected true\nrejected true\nrejected true\nrejected true\naccepted 0\nchild 2\nwrong child true\nwrong child true\nwrong child true\n",
     });
   } finally {
-    rmSync(dir, {recursive: true, force: true});
+    rmSync(dir, { recursive: true, force: true });
   }
 });

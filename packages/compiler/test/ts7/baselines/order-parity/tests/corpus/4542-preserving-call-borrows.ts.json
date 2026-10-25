@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4542-preserving-call-borrows.ts"
+ ],
+ "diags": []
+}

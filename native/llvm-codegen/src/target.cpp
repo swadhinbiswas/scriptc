@@ -14,6 +14,7 @@ void LLVMInitializeAArch64TargetInfo();
 void LLVMInitializeAArch64Target();
 void LLVMInitializeAArch64TargetMC();
 void LLVMInitializeAArch64AsmPrinter();
+void LLVMInitializeAArch64AsmParser();
 }
 #endif
 #if defined(SCRIPTC_ENABLE_X86)
@@ -22,6 +23,7 @@ void LLVMInitializeX86TargetInfo();
 void LLVMInitializeX86Target();
 void LLVMInitializeX86TargetMC();
 void LLVMInitializeX86AsmPrinter();
+void LLVMInitializeX86AsmParser();
 }
 #endif
 #if defined(SCRIPTC_ENABLE_WEBASSEMBLY)
@@ -30,34 +32,45 @@ void LLVMInitializeWebAssemblyTargetInfo();
 void LLVMInitializeWebAssemblyTarget();
 void LLVMInitializeWebAssemblyTargetMC();
 void LLVMInitializeWebAssemblyAsmPrinter();
+void LLVMInitializeWebAssemblyAsmParser();
 }
 #endif
 
 namespace scriptc {
 
-void initializeTargets() {
-  static bool Initialized = false;
-  if (Initialized)
-    return;
+static bool registerTargets() {
 #if defined(SCRIPTC_ENABLE_AARCH64)
   LLVMInitializeAArch64TargetInfo();
   LLVMInitializeAArch64Target();
   LLVMInitializeAArch64TargetMC();
   LLVMInitializeAArch64AsmPrinter();
+  // Runtime units may contain inline assembly (runtime-unit emission).
+  LLVMInitializeAArch64AsmParser();
 #endif
 #if defined(SCRIPTC_ENABLE_X86)
   LLVMInitializeX86TargetInfo();
   LLVMInitializeX86Target();
   LLVMInitializeX86TargetMC();
   LLVMInitializeX86AsmPrinter();
+  // Runtime units may contain inline assembly (runtime-unit emission).
+  LLVMInitializeX86AsmParser();
 #endif
 #if defined(SCRIPTC_ENABLE_WEBASSEMBLY)
   LLVMInitializeWebAssemblyTargetInfo();
   LLVMInitializeWebAssemblyTarget();
   LLVMInitializeWebAssemblyTargetMC();
   LLVMInitializeWebAssemblyAsmPrinter();
+  // Runtime units may contain inline assembly (runtime-unit emission).
+  LLVMInitializeWebAssemblyAsmParser();
 #endif
-  Initialized = true;
+  return true;
+}
+
+// Partitions create target machines on several threads; the registry must be
+// populated exactly once before any lookup.
+void initializeTargets() {
+  static const bool Registered = registerTargets();
+  (void)Registered;
 }
 
 bool supportsTarget(StringRef TripleName) {
@@ -95,7 +108,7 @@ bool supportsTarget(StringRef TripleName) {
   }
 }
 
-static CodeGenOptLevel codeGenLevel(StringRef Level) {
+CodeGenOptLevel codeGenLevel(StringRef Level) {
   if (Level == "0")
     return CodeGenOptLevel::None;
   if (Level == "1")
@@ -105,11 +118,20 @@ static CodeGenOptLevel codeGenLevel(StringRef Level) {
   return CodeGenOptLevel::Default;
 }
 
+TargetOptions targetOptions(const Triple &TargetTriple) {
+  TargetOptions Options;
+  // The Android API 26 runtime pack uses the NDK's emulated TLS ABI.
+  // Program globals and runtime thread instances must use the same ABI.
+  Options.EmulatedTLS = TargetTriple.isAndroid();
+  return Options;
+}
+
 std::unique_ptr<TargetMachine> createTargetMachine(StringRef TripleName,
                                                    StringRef OptLevel,
-                                                   std::string &Error) {
+                                                   std::string &Error,
+                                                   bool RequireAllowed) {
   initializeTargets();
-  if (!supportsTarget(TripleName)) {
+  if (RequireAllowed && !supportsTarget(TripleName)) {
     Error = (Twine("target '") + TripleName + "' was not compiled into this helper").str();
     return nullptr;
   }
@@ -117,13 +139,9 @@ std::unique_ptr<TargetMachine> createTargetMachine(StringRef TripleName,
   const Target *Definition = TargetRegistry::lookupTarget(TargetTriple, Error);
   if (Definition == nullptr)
     return nullptr;
-  TargetOptions Options;
-  // The Android API 26 runtime pack uses the NDK's emulated TLS ABI.
-  // Program globals and runtime thread instances must use the same ABI.
-  Options.EmulatedTLS = TargetTriple.isAndroid();
   return std::unique_ptr<TargetMachine>(Definition->createTargetMachine(
-      TargetTriple, "generic", "", Options, Reloc::PIC_, CodeModel::Small,
-      codeGenLevel(OptLevel)));
+      TargetTriple, "generic", "", targetOptions(TargetTriple), Reloc::PIC_,
+      CodeModel::Small, codeGenLevel(OptLevel)));
 }
 
 } // namespace scriptc

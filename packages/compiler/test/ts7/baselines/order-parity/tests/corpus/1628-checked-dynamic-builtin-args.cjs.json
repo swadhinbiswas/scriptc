@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1628-checked-dynamic-builtin-args.cjs"
+ ],
+ "diags": []
+}

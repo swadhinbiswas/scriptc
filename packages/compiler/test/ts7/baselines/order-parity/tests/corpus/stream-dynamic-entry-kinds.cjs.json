@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/stream-dynamic-entry-kinds.cjs"
+ ],
+ "diags": []
+}

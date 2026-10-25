@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1302-errors-typed-catch.ts"
+ ],
+ "diags": []
+}

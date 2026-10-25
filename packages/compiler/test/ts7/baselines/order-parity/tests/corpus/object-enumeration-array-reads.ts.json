@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/object-enumeration-array-reads.ts"
+ ],
+ "diags": []
+}

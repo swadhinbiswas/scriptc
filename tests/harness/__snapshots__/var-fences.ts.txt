@@ -1,6 +1,0 @@
-var-fences.ts:5:30 - error SC1030: the reference to 'n' above its 'var' declaration (a read there would be 'undefined', which the binding's type cannot hold — annotate it '| undefined' or move the declaration up) is not supported yet
-
-  4 | function forwardCapture(): void {
-  5 |   const read = (): number => n; // captures n before its statement
-    |                              ^
-  6 |   console.log(read());

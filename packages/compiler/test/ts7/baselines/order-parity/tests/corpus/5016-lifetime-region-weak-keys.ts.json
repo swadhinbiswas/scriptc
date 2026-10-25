@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5016-lifetime-region-weak-keys.ts"
+ ],
+ "diags": []
+}

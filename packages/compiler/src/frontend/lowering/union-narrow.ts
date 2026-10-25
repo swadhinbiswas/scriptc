@@ -1,6 +1,19 @@
 import { BOOL, STRING, isUnitType, typeEquals } from "../../ir/ir.js";
 import type { IrExpr, IrFunction, IrStmt, IrType, IrUnionDef, SrcLoc } from "../../ir/ir.js";
 
+/** The TypeError message for a checked extraction that finds `arm`. */
+export function unionNarrowFailureMessage(
+  arm: IrType,
+  formatType: (type: IrType) => string,
+): string {
+  const what = isUnitType(arm)
+    ? arm.kind === "undefinedT"
+      ? "undefined"
+      : "null"
+    : `a '${formatType(arm)}' value`;
+  return `${what} is not representable in the target union (a value narrowed or asserted past it still held it)`;
+}
+
 /** Build checked extraction from a union's actual storage. Successful reads
  * retain reference payloads through unionNarrow; every other valid tag
  * throws before the payload can be interpreted as the target type.
@@ -21,7 +34,11 @@ export function buildUnionNarrow(
   if (targetTag < 0) return null;
   if (undefinedDefault !== null) {
     if (target.kind !== "bool" && target.kind !== "f64") return null;
-    if (!typeEquals(undefinedDefault.type, target) || !from.arms.some((arm) => arm.kind === "undefinedT")) return null;
+    if (
+      !typeEquals(undefinedDefault.type, target) ||
+      !from.arms.some((arm) => arm.kind === "undefinedT")
+    )
+      return null;
   }
   const inputType: IrType = { kind: "union", unionId: from.id };
   const input: IrExpr = { kind: "varRef", localId: "u.0", type: inputType, loc };
@@ -30,32 +47,69 @@ export function buildUnionNarrow(
     const arm = from.arms[tag]!;
     let branch: IrStmt[];
     if (tag === targetTag) {
-      branch = [{
-        kind: "return", value: { kind: "unionNarrow", unionId: from.id, tag, value: input, type: target, loc }, loc,
-      }];
+      branch = [
+        {
+          kind: "return",
+          value: { kind: "unionNarrow", unionId: from.id, tag, value: input, type: target, loc },
+          loc,
+        },
+      ];
     } else if (arm.kind === "undefinedT" && undefinedDefault !== null) {
       branch = [{ kind: "return", value: undefinedDefault, loc }];
     } else {
-      const what = isUnitType(arm) ? (arm.kind === "undefinedT" ? "undefined" : "null") : `a '${formatType(arm)}' value`;
-      branch = [{
-        kind: "throw",
-        value: {
-          kind: "libCall", fn: "error.new",
-          args: [{ kind: "strLit", value: `${what} is not representable in the target union (a value narrowed or asserted past it still held it)`, type: STRING, loc }],
-          type: { kind: "object", className: "%TypeError" }, loc,
-        }, loc,
-      }];
+      branch = [
+        {
+          kind: "throw",
+          value: {
+            kind: "libCall",
+            fn: "error.new",
+            args: [
+              {
+                kind: "strLit",
+                value: unionNarrowFailureMessage(arm, formatType),
+                type: STRING,
+                loc,
+              },
+            ],
+            type: { kind: "object", className: "%TypeError" },
+            loc,
+          },
+          loc,
+        },
+      ];
     }
     body.push({
-      kind: "if", cond: { kind: "unionIsTag", unionId: from.id, tag, negated: false, value: input, type: BOOL, loc },
-      then: branch, else_: null, loc,
+      kind: "if",
+      cond: {
+        kind: "unionIsTag",
+        unionId: from.id,
+        tag,
+        negated: false,
+        value: input,
+        type: BOOL,
+        loc,
+      },
+      then: branch,
+      else_: null,
+      loc,
     });
   }
   body.push({
-    kind: "throw", value: { kind: "strLit", value: "scriptc: internal error: invalid union tag", type: STRING, loc }, loc,
+    kind: "throw",
+    value: {
+      kind: "strLit",
+      value: "scriptc: internal error: invalid union tag",
+      type: STRING,
+      loc,
+    },
+    loc,
   });
   return {
-    name, params: [{ localId: "u.0", name: "u", type: inputType }], returnType: target,
-    locals: [{ id: "u.0", name: "u", type: inputType, mutable: false }], body, loc,
+    name,
+    params: [{ localId: "u.0", name: "u", type: inputType }],
+    returnType: target,
+    locals: [{ id: "u.0", name: "u", type: inputType, mutable: false }],
+    body,
+    loc,
   };
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import { observeSourceText } from "./ts7/ast-node.js";
 
 /**
  * Filesystem observations made while constructing and lowering one frontend
@@ -11,12 +12,16 @@ import { basename, dirname, resolve } from "node:path";
  * behind an old resolution answer.
  */
 export type FrontendInputProbe =
-  | { op: "file"; path: string; digest: string }
+  /** `identity` (fileIdentity) lets a later check skip hashing the file. */
+  | { op: "file"; path: string; digest: string; identity?: string }
   | { op: "read-error"; path: string }
   | { op: "kind"; path: string; kind: "file" | "directory" | "other" | "missing" }
   | { op: "entries"; path: string; files: string[]; directories: string[] }
   | { op: "entries-error"; path: string }
-  | { op: "realpath"; path: string; target: string | null };
+  | { op: "realpath"; path: string; target: string | null }
+  /** The frontend's output depends on the file's raw text or line
+   * positions, not only on its tokens (observeSourceText). */
+  | { op: "text"; path: string };
 
 export interface FrontendInputSnapshot {
   version: 1;
@@ -49,14 +54,40 @@ function frontendSourceDigest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+/** How long a file must have been unchanged before a read for its identity
+ * to stand for its content: a later write then gets a newer change time
+ * even on file systems whose timestamps tick once a second or every two. */
+const IDENTITY_SETTLE_MS = 2000;
+
+/** The device, inode, size, modification time and change time of `path`. A
+ * write changes the change time, which no tool can set back, so an equal
+ * identity means the content is the one hashed with it. */
+function fileIdentity(path: string): string | null {
+  try {
+    const info = statSync(path);
+    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+/** The text of `path` with its identity when the identity was the same before
+ * and after the read and the file had been unchanged for IDENTITY_SETTLE_MS. */
+function readWithIdentity(path: string): { text: string; identity: string | null } {
+  const readAt = Date.now();
+  const before = statSync(path);
+  const text = readFileSync(path, "utf8");
+  const after = fileIdentity(path);
+  const identity = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`;
+  const settled =
+    before.mtimeMs <= readAt - IDENTITY_SETTLE_MS && before.ctimeMs <= readAt - IDENTITY_SETTLE_MS;
+  return { text, identity: settled && after === identity ? identity : null };
+}
+
 function pathKind(path: string): Extract<FrontendInputProbe, { op: "kind" }>["kind"] {
   try {
     const info = statSync(path);
-    return info.isFile()
-      ? "file"
-      : info.isDirectory()
-        ? "directory"
-        : "other";
+    return info.isFile() ? "file" : info.isDirectory() ? "directory" : "other";
   } catch {
     return "missing";
   }
@@ -96,8 +127,9 @@ export class FrontendInputTracker {
     // Install the active tracker so filesystem callbacks can record probes.
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     synchronousTracker = this;
-    try { return fn(); }
-    finally {
+    try {
+      return fn();
+    } finally {
       synchronousTracker = parent;
       if (parent !== undefined && parent !== this) {
         for (const probe of this.probes.values()) parent.record(probe);
@@ -108,6 +140,7 @@ export class FrontendInputTracker {
 
   record(probe: FrontendInputProbe): void {
     const key = `${probe.op}\0${probe.path}`;
+    if (probe.op === "text" && this.probes.has(key)) return;
     const previous = this.probes.get(key);
     if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(probe)) {
       // An input changed while this frontend was running.  The build may
@@ -150,7 +183,7 @@ export class FrontendInputTracker {
     return {
       version: 1,
       probes: [...this.probes.values()].sort((a, b) =>
-        a.path === b.path ? a.op.localeCompare(b.op) : a.path.localeCompare(b.path)
+        a.path === b.path ? a.op.localeCompare(b.op) : a.path.localeCompare(b.path),
       ),
       stable: this.stable,
     };
@@ -161,17 +194,47 @@ function record(probe: FrontendInputProbe): void {
   (synchronousTracker ?? activeTracker.getStore())?.record(probe);
 }
 
+// Source text the frontend reads raw (call-site text in messages, comptime
+// callbacks, line numbers) changes with edits that keep the tokens.
+observeSourceText((fileName) => {
+  const tracker = synchronousTracker ?? activeTracker.getStore();
+  if (tracker !== undefined) tracker.record({ op: "text", path: resolve(fileName) });
+});
+
 /** Mark the active frontend as unsafe to persist because an exact host query
  * bypassed the tracked filesystem wrappers. No-op outside a frontend run. */
 export function markFrontendInputsUnstable(): void {
   (synchronousTracker ?? activeTracker.getStore())?.markUnstable();
 }
 
+/** Compiler-synthesized module sources (a bundle's CommonJS chunks split
+ * into sibling modules, npm-static-bundled-chunks.ts). They answer like
+ * regular files but are never recorded: each derives from the content of
+ * a recorded bundle read, which already keys every cache that sees it. */
+const virtualSources = new Map<string, string>();
+
+export function setVirtualSource(path: string, text: string): void {
+  virtualSources.set(resolve(path), text);
+}
+
+export function isVirtualSource(path: string): boolean {
+  return virtualSources.has(resolve(path));
+}
+
+export function clearVirtualSources(): void {
+  virtualSources.clear();
+}
+
 export function trackedReadFile(path: string): string | null {
   path = resolve(path);
+  const virtual = virtualSources.get(path);
+  if (virtual !== undefined) return virtual;
   try {
-    const text = readFileSync(path, "utf8");
-    record({ op: "file", path, digest: frontendSourceDigest(text) });
+    const { text, identity } = readWithIdentity(path);
+    const digest = frontendSourceDigest(text);
+    record(
+      identity === null ? { op: "file", path, digest } : { op: "file", path, digest, identity },
+    );
     return text;
   } catch {
     record({ op: "read-error", path });
@@ -181,6 +244,7 @@ export function trackedReadFile(path: string): string | null {
 
 export function trackedFileExists(path: string): boolean {
   path = resolve(path);
+  if (virtualSources.has(path)) return true;
   const kind = pathKind(path);
   record({ op: "kind", path, kind });
   return kind === "file";
@@ -188,6 +252,7 @@ export function trackedFileExists(path: string): boolean {
 
 export function trackedDirectoryExists(path: string): boolean {
   path = resolve(path);
+  if (virtualSources.has(path)) return false;
   const kind = pathKind(path);
   record({ op: "kind", path, kind });
   return kind === "directory";
@@ -195,6 +260,7 @@ export function trackedDirectoryExists(path: string): boolean {
 
 export function trackedExists(path: string): boolean {
   path = resolve(path);
+  if (virtualSources.has(path)) return true;
   const kind = pathKind(path);
   record({ op: "kind", path, kind });
   return kind !== "missing";
@@ -202,6 +268,7 @@ export function trackedExists(path: string): boolean {
 
 export function trackedRealpath(path: string): string | null {
   path = resolve(path);
+  if (virtualSources.has(path)) return path;
   try {
     const target = systemRealpath(path);
     record({ op: "realpath", path, target });
@@ -226,9 +293,13 @@ export function trackedAccessibleEntries(
     }
     files.sort();
     directories.sort();
-    const answer = { files, directories };
-    record({ op: "entries", path, files, directories });
-    return answer;
+    record({ op: "entries", path, files: [...files], directories });
+    for (const virtual of virtualSources.keys()) {
+      if (dirname(virtual) === path && !files.includes(basename(virtual)))
+        files.push(basename(virtual));
+    }
+    files.sort();
+    return { files, directories };
   } catch {
     // Enumeration can fail even while the path remains a directory. Preserve
     // the failed operation itself so a permission/ACL repair invalidates the
@@ -300,6 +371,9 @@ export function frontendInputsStillMatch(
     }
     switch (probe.op) {
       case "file": {
+        // An unchanged identity stands for the content hashed with it.
+        if (probe.identity !== undefined && fileIdentity(probe.path) === probe.identity)
+          return true;
         try {
           return frontendSourceDigest(readFileSync(probe.path, "utf8")) === probe.digest;
         } catch {
@@ -344,10 +418,12 @@ export function frontendInputsStillMatch(
           }
           files.sort();
           directories.sort();
-          return JSON.stringify(files.filter((name) => !ignored.has(name))) ===
+          return (
+            JSON.stringify(files.filter((name) => !ignored.has(name))) ===
               JSON.stringify(probe.files.filter((name) => !ignored.has(name))) &&
             JSON.stringify(directories.filter((name) => !ignored.has(name))) ===
-              JSON.stringify(probe.directories.filter((name) => !ignored.has(name)));
+              JSON.stringify(probe.directories.filter((name) => !ignored.has(name)))
+          );
         } catch {
           return false;
         }
@@ -367,6 +443,9 @@ export function frontendInputsStillMatch(
           return probe.target === null;
         }
       }
+      case "text":
+        // The file probe of the same path checks its content.
+        return true;
     }
   });
 }
@@ -383,36 +462,49 @@ export function frontendInputsSemanticallyMatch(
   exclusions: FrontendInputExclusions = {},
 ): FrontendSemanticMatch | null {
   if (!validFrontendInputSnapshot(snapshot)) return null;
-  const sourceProbes = new Map(
-    snapshot.probes
-      .filter((probe): probe is Extract<FrontendInputProbe, { op: "file" }> => probe.op === "file")
-      .map((probe) => [probe.path, probe]),
-  );
+  const sourceProbes = new Map<string, Extract<FrontendInputProbe, { op: "file" }>>();
+  const rawText = new Set<string>();
+  for (const probe of snapshot.probes) {
+    if (probe.op === "file") sourceProbes.set(probe.path, probe);
+    else if (probe.op === "text") rawText.add(probe.path);
+  }
   for (const [path, previous] of previousSources) {
     if (sourceProbes.get(path)?.digest !== frontendSourceDigest(previous)) return null;
   }
   const changed: FrontendSemanticChange[] = [];
   const currentSources = new Map<string, string>();
-  const adjusted: FrontendInputSnapshot = {
-    ...snapshot,
-    probes: snapshot.probes.map((probe) => {
-      if (probe.op !== "file") return probe;
-      const previous = previousSources.get(probe.path);
-      if (previous === undefined || frontendSourceDigest(previous) !== probe.digest) return probe;
-      let current: string;
-      try {
-        current = readFileSync(probe.path, "utf8");
-      } catch {
-        return probe;
-      }
-      const currentDigest = frontendSourceDigest(current);
-      currentSources.set(probe.path, current);
-      if (currentDigest === probe.digest) return probe;
-      if (!isSemanticEquivalent(probe.path, previous, current)) return probe;
-      changed.push({ path: probe.path, previous, current });
-      return { ...probe, digest: currentDigest };
-    }),
-  };
+  const probes: FrontendInputProbe[] = [];
+  for (const probe of snapshot.probes) {
+    const previous = probe.op === "file" ? previousSources.get(probe.path) : undefined;
+    if (probe.op !== "file" || previous === undefined) {
+      probes.push(probe);
+      continue;
+    }
+    if (probe.identity !== undefined && fileIdentity(probe.path) === probe.identity) {
+      currentSources.set(probe.path, previous);
+      probes.push(probe);
+      continue;
+    }
+    let current: string;
+    try {
+      current = readFileSync(probe.path, "utf8");
+    } catch {
+      return null;
+    }
+    const currentDigest = frontendSourceDigest(current);
+    currentSources.set(probe.path, current);
+    if (currentDigest === probe.digest) {
+      probes.push(probe);
+      continue;
+    }
+    // One edit that is not equivalent already rules out the match, and so
+    // does any edit of a file whose raw text the frontend read.
+    if (rawText.has(probe.path) || !isSemanticEquivalent(probe.path, previous, current))
+      return null;
+    changed.push({ path: probe.path, previous, current });
+    probes.push({ op: "file", path: probe.path, digest: currentDigest });
+  }
+  const adjusted: FrontendInputSnapshot = { ...snapshot, probes };
   if (!frontendInputsStillMatch(adjusted, exclusions)) return null;
   for (const [path, previous] of previousSources) {
     if (!currentSources.has(path)) {
@@ -430,26 +522,41 @@ export function frontendInputsSemanticallyMatch(
 export function validFrontendInputSnapshot(snapshot: unknown): snapshot is FrontendInputSnapshot {
   if (snapshot === null || typeof snapshot !== "object") return false;
   const candidate = snapshot as { version?: unknown; stable?: unknown; probes?: unknown };
-  if (candidate.version !== 1 || candidate.stable !== true || !Array.isArray(candidate.probes)) return false;
+  if (candidate.version !== 1 || candidate.stable !== true || !Array.isArray(candidate.probes))
+    return false;
   return candidate.probes.every((probe) => {
     if (probe === null || typeof probe !== "object") return false;
     const value = probe as Record<string, unknown>;
     if (typeof value.path !== "string" || typeof value.op !== "string") return false;
     switch (value.op) {
       case "file":
-        return typeof value.digest === "string" && /^[0-9a-f]{64}$/.test(value.digest);
+        return (
+          typeof value.digest === "string" &&
+          /^[0-9a-f]{64}$/.test(value.digest) &&
+          (value.identity === undefined || typeof value.identity === "string")
+        );
       case "read-error":
         return true;
       case "kind":
-        return value.kind === "file" || value.kind === "directory" || value.kind === "other" ||
-          value.kind === "missing";
+        return (
+          value.kind === "file" ||
+          value.kind === "directory" ||
+          value.kind === "other" ||
+          value.kind === "missing"
+        );
       case "entries":
-        return Array.isArray(value.files) && value.files.every((entry) => typeof entry === "string") &&
-          Array.isArray(value.directories) && value.directories.every((entry) => typeof entry === "string");
+        return (
+          Array.isArray(value.files) &&
+          value.files.every((entry) => typeof entry === "string") &&
+          Array.isArray(value.directories) &&
+          value.directories.every((entry) => typeof entry === "string")
+        );
       case "entries-error":
         return true;
       case "realpath":
         return value.target === null || typeof value.target === "string";
+      case "text":
+        return true;
       default:
         return false;
     }

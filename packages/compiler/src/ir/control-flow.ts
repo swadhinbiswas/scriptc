@@ -1,7 +1,10 @@
 import type { IrStmt, IrUnionDef } from "./ir.js";
 
 /** Conservative "all paths return" — mirrors what tsc already guarantees. */
-export function alwaysReturns(stmts: readonly IrStmt[], unions: ReadonlyMap<string, IrUnionDef>): boolean {
+export function alwaysReturns(
+  stmts: readonly IrStmt[],
+  unions: ReadonlyMap<string, IrUnionDef>,
+): boolean {
   for (const s of stmts) {
     switch (s.kind) {
       case "return":
@@ -81,7 +84,10 @@ export function alwaysReturns(stmts: readonly IrStmt[], unions: ReadonlyMap<stri
         let literalCount = 0;
         for (const clause of s.cases) {
           const test = clause.test;
-          if (test !== null && (test.kind === "numLit" || test.kind === "strLit" || test.kind === "boolLit")) {
+          if (
+            test !== null &&
+            (test.kind === "numLit" || test.kind === "strLit" || test.kind === "boolLit")
+          ) {
             literalCount++;
             distinct.add(`${test.kind}:${String(test.value)}`);
           }

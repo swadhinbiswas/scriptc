@@ -1,4 +1,3 @@
-// @dynamic
 // `??` over checked-dynamic values, UNFENCED for the whole dyn family
 // (lane dyn-routing-ops — a win beyond the jsval crossing): the deciding
 // test is the runtime kind (only undefined/null take the default — 0,

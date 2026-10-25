@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1797-dyn-handle-socket.cjs"
+ ],
+ "diags": []
+}

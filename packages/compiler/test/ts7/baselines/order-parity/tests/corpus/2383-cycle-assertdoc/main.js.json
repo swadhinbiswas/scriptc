@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2383-cycle-assertdoc/assert-doc.js",
+  "<repo>/tests/corpus/2383-cycle-assertdoc/builders.js",
+  "<repo>/tests/corpus/2383-cycle-assertdoc/index.js",
+  "<repo>/tests/corpus/2383-cycle-assertdoc/main.js"
+ ],
+ "diags": []
+}

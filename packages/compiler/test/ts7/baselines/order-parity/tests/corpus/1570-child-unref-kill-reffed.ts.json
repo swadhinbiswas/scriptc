@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1570-child-unref-kill-reffed.ts"
+ ],
+ "diags": []
+}

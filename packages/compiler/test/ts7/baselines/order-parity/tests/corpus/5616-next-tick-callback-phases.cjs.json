@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5616-next-tick-callback-phases.cjs"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2875-evolving-let-read-before-write.js"
+ ],
+ "diags": []
+}

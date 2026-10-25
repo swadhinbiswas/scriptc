@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2653-top-level-await-rejection-stops-loop.ts"
+ ],
+ "diags": []
+}

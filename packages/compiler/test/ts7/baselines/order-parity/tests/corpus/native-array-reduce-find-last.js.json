@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/native-array-reduce-find-last.js"
+ ],
+ "diags": []
+}

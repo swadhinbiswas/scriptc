@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4941-async-return-adoption-try.ts"
+ ],
+ "diags": []
+}

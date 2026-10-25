@@ -1,40 +1,3 @@
-/* The Linux differential lane — env-gated (SCRIPTC_LINUX=1), skipped everywhere
- * else so the macOS lanes never see it. The workflow (docs/linux-port.md):
- * corpus programs are CROSS-COMPILED on the host via `zig cc`
- * (SCRIPTC_CC=zigcc, SCRIPTC_TARGET=<linux triple>) and both sides run
- * inside one Linux container — the binary, and a LINUX Node as the oracle.
- * GNU targets use node:<.node-version>-bookworm (whose glibc matches the
- * triple's pin); <arch>-linux-musl uses the matching Alpine Node image.
- * Same contract as differential.test.ts: stdout byte-equal, stderr
- * byte-equal for exit-0 programs, exit codes agree with the `// @exit:`
- * directive.
- *
- * Scope: the whole corpus plus the LISTENING harnesses — `// @dynamic`
- * programs included (the engine archive cross-builds per target). NO
- * feature is cross-gated to Linux anymore (fetch, the last one, links
- * through the vendored curl headers + soname stub and binds the
- * container's system libcurl at load time); the compile-time skip arm
- * below stays as the honest surface for any future gate. Everything runs
- * for real: the loop-portable surfaces (timers/async, signals/stdin,
- * process/fs, child_process), the dynamic island (per-target libqjs.a),
- * regex (per-target libregexp objects),
- * zlib (per-target vendored objects), fs.watch (the inotify arm), the
- * net/http/tls and dgram/dns fixtures (tests/fixtures/{server,dgram},
- * mbedTLS built per target), three legs compared byte-exactly with BOTH
- * lanes and the per-case driver all running inside the container
- * (server.test.ts's contract), the fetch fixtures
- * (tests/fixtures/fetch) — the identical servers.mjs routes running
- * standalone in the container, both lanes under the poisoned proxy env,
- * fetch.test.ts's whole contract including the NODE_USE_ENV_PROXY
- * opt-in's relay count — the npm differential (npm-cases.ts: the
- * resolution matrix plus the commander acceptance CLI), the node:test
- * differential (node-test-normalize.ts's documented scrub), and the
- * piped-stdin differential (event-loop-cases.ts's scripts through
- * docker exec -i). macOS's known flake classes apply here
- * too (event-loop
- * timing, child reap-order — 1466 has been seen swapping exit order
- * under the Linux reap poll). SCRIPTC_LINUX_FILTER=<regex> narrows a run
- * to matching corpus/fixture names for triage. */
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, globSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -46,6 +9,7 @@ import { compile } from "@scriptc/compiler";
 import { npmCases } from "./npm-cases.js";
 import { normalizeNodeTestOutput } from "./node-test-normalize.js";
 import { eventLoopCases, type StdinScript } from "./event-loop-cases.js";
+import { tscJsxOracleEntry, wantsTscJsx } from "./jsx-oracle.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.env["SCRIPTC_LINUX"] === "1";
@@ -64,21 +28,10 @@ const muslTarget = target.includes("linux-musl");
 const mountPoint = repoRoot;
 const containerName = `scr-linux-lane-${process.pid}`;
 
-// The lane attempts the WHOLE corpus — `// @dynamic` programs included
-// (the engine archive cross-builds per target since
-// buildEngineArchiveCross). Nothing in the corpus is cross-gated to
-// Linux today (fetch, the last gate, lifted with the curl soname stub);
-// the compile-time skip arm below is the visible surface any FUTURE gate
-// would take. Everything must PASS against the Linux Node oracle.
+// The lane compiles the whole corpus natively and compares it with the
+// Linux Node oracle. Any future target capability refusal is visible below.
 function directiveHead(file: string): string[] {
   return readFileSync(file, "utf8").split("\n", 2);
-}
-
-/** `// @dynamic` (differential.test.ts's directive): compile with the
- * island engine embedded. The Node side needs no flag — the island shim
- * covers the surface. */
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
 }
 
 /** `// @transform-types` (differential.test.ts's directive): the Node
@@ -101,15 +54,21 @@ function wantsTscDecorators(file: string): boolean {
 
 /** The file the Node oracle executes: the program itself, or (decorator
  * programs) its deterministic ES2022 downlevel — differential.test.ts's
- * nodeOracleFile, byte for byte the same transform and cache key. */
+ * nodeOracleFile, with the identical transform and cache key. */
 function nodeOracleFile(file: string): string {
+  if (wantsTscJsx(directiveHead(file))) return tscJsxOracleEntry(file, cacheDir);
   if (!wantsTscDecorators(file)) return file;
   const src = readFileSync(file, "utf8");
   const out = ts5.transpileModule(src, {
     compilerOptions: { target: ts5.ScriptTarget.ES2022, module: ts5.ModuleKind.ESNext },
     fileName: file,
   }).outputText;
-  const key = createHash("sha256").update(ts5.version).update("\0").update(src).digest("hex").slice(0, 16);
+  const key = createHash("sha256")
+    .update(ts5.version)
+    .update("\0")
+    .update(src)
+    .digest("hex")
+    .slice(0, 16);
   const path = join(cacheDir, `dec-oracle-${key}.mjs`);
   mkdirSync(cacheDir, { recursive: true });
   // Atomic publish: concurrent suites (the other flavor's full run, or
@@ -153,7 +112,9 @@ const ROSETTA_SPAWN_SKIPS = new Set([
   "1657-spawn-async-neutral.ts",
 ]);
 const emulatedX64 =
-  process.platform === "darwin" && process.arch === "arm64" && /^x86_64/.test(process.env["SCRIPTC_LINUX_TARGET"] ?? "");
+  process.platform === "darwin" &&
+  process.arch === "arm64" &&
+  (process.env["SCRIPTC_LINUX_TARGET"] ?? "").startsWith("x86_64");
 
 const filter = process.env["SCRIPTC_LINUX_FILTER"];
 const ENTRY_EXTS = ["ts", "js", "mjs", "cjs"];
@@ -192,13 +153,22 @@ function expectedExitCode(file: string): number {
  * immediately (differential.test.ts's contract: fd-0 readers see an empty
  * closed stream), cwd = the mounted repo root, the harness env marker set.
  * `env` adds per-run variables (the fetch legs' proxy poison / opt-in). */
-async function runInContainer(argv: string[], env: Record<string, string> = {}): Promise<RunResult> {
+async function runInContainer(
+  argv: string[],
+  env: Record<string, string> = {},
+): Promise<RunResult> {
   const pending = execFileAsync(
     "docker",
     [
-      "exec", "-i", "-w", mountPoint, "-e", "SCRIPTC_TEST_ENV=from-harness",
+      "exec",
+      "-i",
+      "-w",
+      mountPoint,
+      "-e",
+      "SCRIPTC_TEST_ENV=from-harness",
       ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-      containerName, ...argv,
+      containerName,
+      ...argv,
     ],
     { encoding: "buffer" },
   );
@@ -231,10 +201,12 @@ async function runLinuxNode(file: string): Promise<RunResult> {
     ...(directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l))
       ? ["--no-deprecation"]
       : []),
-    ...(directiveHead(file).includes("// @no-node-shims") ? [] : [
-      "--import", inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")),
-      "--import", inContainer(join(repoRoot, "tests/harness/island-shim.mjs")),
-    ]),
+    ...(directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l))
+      ? ["--disallow-code-generation-from-strings"]
+      : []),
+    ...(directiveHead(file).includes("// @no-node-shims")
+      ? []
+      : ["--import", inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")), "--import"]),
     inContainer(nodeOracleFile(file)),
   ]);
 }
@@ -242,7 +214,7 @@ async function runLinuxNode(file: string): Promise<RunResult> {
 function programInputs(file: string): string[] {
   if (!/\/main\.(ts|js|mjs|cjs)$/.test(file)) return [file];
   return [
-    ...ENTRY_EXTS.flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
+    ...[...ENTRY_EXTS, "tsx", "jsx"].flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
     ...globSync(join(file, "../**/tsconfig.json")),
     ...globSync(join(file, "../**/package.json")),
   ].sort();
@@ -254,7 +226,11 @@ async function crossCompileAndRun(file: string): Promise<RunResult> {
   const key = hash.update("linux\0").update(target).digest("hex").slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
-  const result = await compile(file, { outPath: join(outDir, "program"), outDir, dynamic: wantsDynamic(file), backend: "llvm" });
+  const result = await compile(file, {
+    outPath: join(outDir, "program"),
+    outDir,
+    backend: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "corpus program failed to cross-compile:\n" +
@@ -341,7 +317,11 @@ async function crossCompileFixture(entry: string): Promise<string> {
   const key = hash.update("linux\0").update(target).digest("hex").slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
-  const result = await compile(entry, { outPath: join(outDir, "program"), outDir, backend: "llvm" });
+  const result = await compile(entry, {
+    outPath: join(outDir, "program"),
+    outDir,
+    backend: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "fixture failed to cross-compile:\n" +
@@ -366,28 +346,8 @@ function fixtureCases(root: string): { name: string; entry: string; driver: stri
 const serverCases = fixtureCases(join(repoRoot, "tests/fixtures/server"));
 const dgramCases = fixtureCases(join(repoRoot, "tests/fixtures/dgram"));
 
-/* ── the fetch fixtures (tests/fixtures/fetch) — fetch.test.ts's contract
- * with everything in the container: servers.mjs runs standalone under the
- * container's Node (the IDENTICAL routes the macOS harness runs
- * in-process) and prints BASE/REFUSED/PROXY on stderr; each case then runs
- * under the container's Node AND cross-compiled --dynamic, both lanes
- * inheriting the POISONED proxy env that Node's fetch and libcurl-backed
- * fetch must BOTH ignore (fetch.test.ts's parity regression — libcurl's
- * default is to honor it); stdout byte-equal, exit codes agree. The
- * proxy-optin case opts in with NODE_USE_ENV_PROXY=1 pointing at the
- * counting proxy and must relay exactly one request per lane (the count
- * read over the wire via the proxy's /__count query). */
-
 const fetchCases = fixtureCases(join(repoRoot, "tests/fixtures/fetch"));
 const fetchServersScript = join(repoRoot, "tests/fixtures/fetch/servers.mjs");
-
-/* ── the npm differential (tests/harness/npm-cases.ts — npm.test.ts's
- * exact case table: the embedded-npm resolution matrix plus the commander
- * acceptance CLI with its argv lists). No servers, no drivers: each argv
- * runs under the container's Node (resolving the committed fixture
- * node_modules from the repo mount) and cross-compiled --dynamic (the
- * package sources embedded at build time); stdout byte-equal, exit codes
- * agree. */
 
 const linuxNpmCases = enabled
   ? npmCases(join(repoRoot, "tests/fixtures")).filter(
@@ -417,16 +377,30 @@ const nodeTestCases = enabled
 
 const linuxStdinCases = enabled
   ? eventLoopCases.filter(
-      (c) => filter === undefined || new RegExp(filter).test(join(repoRoot, "tests/fixtures/event-loop", c.fixture)),
+      (c) =>
+        filter === undefined ||
+        new RegExp(filter).test(join(repoRoot, "tests/fixtures/event-loop", c.fixture)),
     )
   : [];
 
 /** Runs one lane with a scripted stdin through docker exec -i. */
-function runWithStdinInContainer(argv: string[], script: StdinScript): Promise<{ stdout: string; exitCode: number }> {
+function runWithStdinInContainer(
+  argv: string[],
+  script: StdinScript,
+): Promise<{ stdout: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "docker",
-      ["exec", "-i", "-w", mountPoint, "-e", "SCRIPTC_TEST_ENV=from-harness", containerName, ...argv],
+      [
+        "exec",
+        "-i",
+        "-w",
+        mountPoint,
+        "-e",
+        "SCRIPTC_TEST_ENV=from-harness",
+        containerName,
+        ...argv,
+      ],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
     const out: Buffer[] = [];
@@ -456,8 +430,6 @@ function runWithStdinInContainer(argv: string[], script: StdinScript): Promise<{
   });
 }
 
-/** Cross-compiles one npm case — npm.test.ts's build(): always --dynamic,
- * the cache key hashing the program and its fixture packages. */
 async function crossCompileNpmCase(entry: string): Promise<string> {
   const hash = createHash("sha256");
   const fixtureDir = join(entry, "../..");
@@ -469,7 +441,11 @@ async function crossCompileNpmCase(entry: string): Promise<string> {
   const key = hash.update("linux\0").update(target).digest("hex").slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
-  const result = await compile(entry, { outPath: join(outDir, "program"), outDir, dynamic: true, backend: "llvm" });
+  const result = await compile(entry, {
+    outPath: join(outDir, "program"),
+    outDir,
+    backend: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "npm case failed to cross-compile:\n" +
@@ -479,20 +455,23 @@ async function crossCompileNpmCase(entry: string): Promise<string> {
   return result.binaryPath;
 }
 
-/** Cross-compiles one fetch fixture — fetch.test.ts's build(): always
- * --dynamic (the ambient fetch is island-backed), the cache key covering
- * the fixture-tree node_modules the embedded npm graphs resolve from. */
 async function crossCompileFetchFixture(entry: string): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
     entry,
-    ...globSync(join(repoRoot, "tests/fixtures/fetch/node_modules/**/*.{js,mjs,cjs,json,d.ts}")).sort(),
+    ...globSync(
+      join(repoRoot, "tests/fixtures/fetch/node_modules/**/*.{js,mjs,cjs,json,d.ts}"),
+    ).sort(),
   ];
   for (const f of inputs) hash.update(f).update(readFileSync(f));
   const key = hash.update("linux\0").update(target).digest("hex").slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
-  const result = await compile(entry, { outPath: join(outDir, "program"), outDir, dynamic: true, backend: "llvm" });
+  const result = await compile(entry, {
+    outPath: join(outDir, "program"),
+    outDir,
+    backend: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "fetch fixture failed to cross-compile:\n" +
@@ -504,9 +483,11 @@ async function crossCompileFetchFixture(entry: string): Promise<string> {
 
 describe.skipIf(!enabled)(`linux differential (${target})`, () => {
   beforeAll(async () => {
-    // Fail loudly, not skip: SCRIPTC_LINUX=1 promises a Linux verdict.
+    // Fail instead of skipping: SCRIPTC_LINUX=1 promises a Linux verdict.
     await execFileAsync("zig", ["version"]).catch(() => {
-      throw new Error("SCRIPTC_LINUX=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.");
+      throw new Error(
+        "SCRIPTC_LINUX=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.",
+      );
     });
     await execFileAsync("docker", ["info"]).catch(() => {
       throw new Error("SCRIPTC_LINUX=1 needs the Docker daemon running (`open -a Docker`).");
@@ -514,18 +495,24 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
     const nodeVersion = readFileSync(join(repoRoot, ".node-version"), "utf8").trim();
     const image = `node:${nodeVersion}-${muslTarget ? "alpine" : "bookworm"}`;
     await execFileAsync("docker", [
-      "run", "-d", "--rm",
+      "run",
+      "-d",
+      "--rm",
       // The container's CPU arch follows the TARGET triple, so
       // SCRIPTC_LINUX_TARGET selects the container architecture from the
       // triple: x86_64 targets run the whole lane under linux/amd64
       // (Rosetta/qemu on Apple-silicon Docker), while AArch64 targets use
       // linux/arm64. The oracle Node and cross binaries always share it.
-      "--platform", target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
-      "--name", containerName,
-      "-v", `${repoRoot}:${mountPoint}`,
+      "--platform",
+      target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
+      "--name",
+      containerName,
+      "-v",
+      `${repoRoot}:${mountPoint}`,
       "--init",
       image,
-      "sleep", "infinity",
+      "sleep",
+      "infinity",
     ]);
   }, 300_000);
 
@@ -548,7 +535,9 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
           // see native-toolchain.ts) SKIP with the gate's reason: they are follow-up
           // scope, not Linux failures. Everything else is a real failure.
           if (err instanceof Error && err.message.includes("not supported under a cross target")) {
-            ctx.skip(err.message.split("\n").find((l) => l.includes("not supported")) ?? err.message);
+            ctx.skip(
+              err.message.split("\n").find((l) => l.includes("not supported")) ?? err.message,
+            );
           }
           throw err;
         }
@@ -584,8 +573,13 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
           } catch (err) {
             // A case needing a still-gated feature skips with the gate's
             // reason (nothing in these fixture sets does today).
-            if (err instanceof Error && err.message.includes("not supported under a cross target")) {
-              ctx.skip(err.message.split("\n").find((l) => l.includes("not supported")) ?? err.message);
+            if (
+              err instanceof Error &&
+              err.message.includes("not supported under a cross target")
+            ) {
+              ctx.skip(
+                err.message.split("\n").find((l) => l.includes("not supported")) ?? err.message,
+              );
             }
             throw err;
           }
@@ -613,7 +607,8 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
     let proxyBase = "";
     /** The poisoned proxy env every fetch child inherits (fetch.test.ts's
      * stance: both fetches must IGNORE it without the opt-in — any that
-     * consulted it would fail loudly against the refused port). */
+     * consulted it would fail with a connection error against the refused
+     * port). */
     const poison = (): Record<string, string> => ({
       http_proxy: refused,
       https_proxy: refused,
@@ -662,7 +657,8 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
      * a relative-path request the counting branch never counts). */
     async function proxiedCount(): Promise<number> {
       const res = await runInContainer([
-        "node", "-e",
+        "node",
+        "-e",
         'fetch(process.argv[1] + "/__count").then((r) => r.text()).then((t) => process.stdout.write(t))',
         proxyBase,
       ]);
@@ -725,62 +721,73 @@ describe.skipIf(!enabled)(`linux differential (${target})`, () => {
     );
   });
 
-  describe.skipIf(linuxNpmCases.length === 0)(`npm differential (${linuxNpmCases.length} programs)`, () => {
-    test.for(linuxNpmCases.map((c) => [c.name, c] as const))(
-      "%s",
-      async ([, c]) => {
-        const binary = await crossCompileNpmCase(c.entry);
-        for (const argv of c.argvs ?? [[]]) {
-          const [nodeRes, nativeRes] = await Promise.all([
-            runInContainer(["node", inContainer(c.entry), ...argv]),
-            runInContainer([inContainer(binary), ...argv]),
-          ]);
-          const label = argv.join(" ");
-          if (!nodeRes.stdout.equals(nativeRes.stdout)) {
-            expect(nativeRes.stdout.toString("utf8"), label).toBe(nodeRes.stdout.toString("utf8"));
-            expect.unreachable("stdout differed at byte level but not after utf8 decode");
+  describe.skipIf(linuxNpmCases.length === 0)(
+    `npm differential (${linuxNpmCases.length} programs)`,
+    () => {
+      test.for(linuxNpmCases.map((c) => [c.name, c] as const))(
+        "%s",
+        async ([, c]) => {
+          const binary = await crossCompileNpmCase(c.entry);
+          for (const argv of c.argvs ?? [[]]) {
+            const [nodeRes, nativeRes] = await Promise.all([
+              runInContainer(["node", inContainer(c.entry), ...argv]),
+              runInContainer([inContainer(binary), ...argv]),
+            ]);
+            const label = argv.join(" ");
+            if (!nodeRes.stdout.equals(nativeRes.stdout)) {
+              expect(nativeRes.stdout.toString("utf8"), label).toBe(
+                nodeRes.stdout.toString("utf8"),
+              );
+              expect.unreachable("stdout differed at byte level but not after utf8 decode");
+            }
+            expect(nativeRes.exitCode, label).toBe(nodeRes.exitCode);
           }
-          expect(nativeRes.exitCode, label).toBe(nodeRes.exitCode);
-        }
-      },
-      120_000,
-    );
-  });
+        },
+        120_000,
+      );
+    },
+  );
 
-  describe.skipIf(nodeTestCases.length === 0)(`node:test differential (${nodeTestCases.length} programs)`, () => {
-    test.for(nodeTestCases.map((c) => [c.name, c] as const))(
-      "%s",
-      async ([, c]) => {
-        const binary = await crossCompileFixture(c.entry);
-        const [nodeRes, nativeRes] = await Promise.all([
-          runInContainer(["node", inContainer(c.entry)]),
-          runInContainer([inContainer(binary)]),
-        ]);
-        expect(normalizeNodeTestOutput(nativeRes.stdout.toString("utf8"))).toBe(
-          normalizeNodeTestOutput(nodeRes.stdout.toString("utf8")),
-        );
-        const wanted = expectedExitCode(c.entry);
-        expect(nodeRes.exitCode).toBe(wanted); // keeps `// @exit:` honest
-        expect(nativeRes.exitCode).toBe(wanted);
-      },
-      120_000,
-    );
-  });
+  describe.skipIf(nodeTestCases.length === 0)(
+    `node:test differential (${nodeTestCases.length} programs)`,
+    () => {
+      test.for(nodeTestCases.map((c) => [c.name, c] as const))(
+        "%s",
+        async ([, c]) => {
+          const binary = await crossCompileFixture(c.entry);
+          const [nodeRes, nativeRes] = await Promise.all([
+            runInContainer(["node", inContainer(c.entry)]),
+            runInContainer([inContainer(binary)]),
+          ]);
+          expect(normalizeNodeTestOutput(nativeRes.stdout.toString("utf8"))).toBe(
+            normalizeNodeTestOutput(nodeRes.stdout.toString("utf8")),
+          );
+          const wanted = expectedExitCode(c.entry);
+          expect(nodeRes.exitCode).toBe(wanted); // keeps `// @exit:` honest
+          expect(nativeRes.exitCode).toBe(wanted);
+        },
+        120_000,
+      );
+    },
+  );
 
-  describe.skipIf(linuxStdinCases.length === 0)(`piped stdin (${linuxStdinCases.length} cases)`, () => {
-    test.for(linuxStdinCases.map((c) => [c.title, c] as const))(
-      "%s",
-      async ([, c]) => {
-        const entry = join(repoRoot, "tests/fixtures/event-loop", c.fixture);
-        const binary = await crossCompileFixture(entry);
-        const [nodeRes, nativeRes] = await Promise.all([
-          runWithStdinInContainer(["node", inContainer(entry)], c.script),
-          runWithStdinInContainer([inContainer(binary)], c.script),
-        ]);
-        expect(nativeRes.stdout).toBe(nodeRes.stdout);
-        expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
-      },
-      120_000,
-    );
-  });
+  describe.skipIf(linuxStdinCases.length === 0)(
+    `piped stdin (${linuxStdinCases.length} cases)`,
+    () => {
+      test.for(linuxStdinCases.map((c) => [c.title, c] as const))(
+        "%s",
+        async ([, c]) => {
+          const entry = join(repoRoot, "tests/fixtures/event-loop", c.fixture);
+          const binary = await crossCompileFixture(entry);
+          const [nodeRes, nativeRes] = await Promise.all([
+            runWithStdinInContainer(["node", inContainer(entry)], c.script),
+            runWithStdinInContainer([inContainer(binary)], c.script),
+          ]);
+          expect(nativeRes.stdout).toBe(nodeRes.stdout);
+          expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+        },
+        120_000,
+      );
+    },
+  );
 });

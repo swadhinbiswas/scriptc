@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4821-callback-lent-arguments.ts"
+ ],
+ "diags": []
+}

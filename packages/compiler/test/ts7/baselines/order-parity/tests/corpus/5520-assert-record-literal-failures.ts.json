@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5520-assert-record-literal-failures.ts"
+ ],
+ "diags": []
+}

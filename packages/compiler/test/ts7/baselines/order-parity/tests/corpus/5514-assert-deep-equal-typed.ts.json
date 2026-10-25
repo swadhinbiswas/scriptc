@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5514-assert-deep-equal-typed.ts"
+ ],
+ "diags": []
+}

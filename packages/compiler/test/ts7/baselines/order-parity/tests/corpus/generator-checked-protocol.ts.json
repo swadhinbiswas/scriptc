@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/generator-checked-protocol.ts"
+ ],
+ "diags": []
+}

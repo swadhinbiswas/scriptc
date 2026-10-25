@@ -1,6 +1,12 @@
 import {
-  TS7_CALLBACK, TS7_CALLBACK_ERROR, TS7_CALLBACK_RESPONSE, TS7_ERROR,
-  TS7_REQUEST, TS7_RESPONSE, Ts7ProtocolError, Ts7Wire,
+  TS7_CALLBACK,
+  TS7_CALLBACK_ERROR,
+  TS7_CALLBACK_RESPONSE,
+  TS7_ERROR,
+  TS7_REQUEST,
+  TS7_RESPONSE,
+  Ts7ProtocolError,
+  Ts7Wire,
 } from "./rpc-wire.js";
 
 export interface Ts7RpcTiming {
@@ -12,6 +18,10 @@ export interface Ts7RpcTiming {
 
 interface Ts7Callback {
   invoke: (payload: string) => string;
+}
+
+function responseText(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8");
 }
 
 /** The wire protocol is strictly synchronous and has no request ids. A
@@ -35,7 +45,12 @@ export class Ts7RpcClient {
   }
 
   timing(): Ts7RpcTiming {
-    return { requests: this.requests, bytesSent: this.bytesSent, bytesReceived: this.bytesReceived, callbacks: this.callbackCount };
+    return {
+      requests: this.requests,
+      bytesSent: this.bytesSent,
+      bytesReceived: this.bytesReceived,
+      callbacks: this.callbackCount,
+    };
   }
 
   close(): void {
@@ -55,7 +70,7 @@ export class Ts7RpcClient {
     this.callbackCount++;
     let response: string;
     try {
-      response = callback.invoke(Buffer.from(payload).toString("utf8"));
+      response = callback.invoke(responseText(payload));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.wire.write(TS7_CALLBACK_ERROR, method, Buffer.from(message, "utf8"));
@@ -82,20 +97,26 @@ export class Ts7RpcClient {
           throw new Ts7ProtocolError(`unexpected server message ${message.kind}`);
         }
         if (message.method !== method) {
-          throw new Ts7ProtocolError(`response method mismatch: expected ${method}, received ${message.method}`);
+          throw new Ts7ProtocolError(
+            `response method mismatch: expected ${method}, received ${message.method}`,
+          );
         }
         this.bytesReceived += message.payload.length;
         if (message.kind === TS7_ERROR) {
           // A server error is a complete response. Keep this channel usable
           // for panic-fenced checker batches and subsequent valid requests.
           this.requesting = false;
-          throw new Error(Buffer.from(message.payload).toString("utf8"));
+          throw new Error(responseText(message.payload));
         }
         return message.payload;
       }
     } catch (error) {
       if (this.requesting) {
-        try { this.close(); } catch { /* preserve the request failure */ }
+        try {
+          this.close();
+        } catch {
+          /* preserve the request failure */
+        }
       }
       throw error;
     } finally {
@@ -104,6 +125,6 @@ export class Ts7RpcClient {
   }
 
   requestText(method: string, payload: string): string {
-    return Buffer.from(this.requestBytes(method, Buffer.from(payload, "utf8"))).toString("utf8");
+    return responseText(this.requestBytes(method, Buffer.from(payload, "utf8")));
   }
 }

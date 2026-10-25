@@ -27,14 +27,21 @@ test.runIf(process.platform === "darwin").each(["llvm"] as const)(
         const result = await compile(entry, options);
         expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics) : "").toBe(true);
         if (!result.ok) return;
-        expect((await stat(`${outPath}.dSYM/Contents/Resources/DWARF/program`)).size).toBeGreaterThan(0);
+        expect(
+          (await stat(`${outPath}.dSYM/Contents/Resources/DWARF/program`)).size,
+        ).toBeGreaterThan(0);
         const native = await exec(outPath);
         expect(native.stdout).toBe(oracle.stdout);
         expect(native.stderr).toBe(oracle.stderr);
-        const debug = await exec("lldb", ["--batch", outPath,
-          "-o", "breakpoint set --file main.ts --line 4 --move-to-nearest-code false",
-          "-o", "breakpoint set --file helper.ts --line 4 --move-to-nearest-code false",
-          "-o", "breakpoint list",
+        const debug = await exec("lldb", [
+          "--batch",
+          outPath,
+          "-o",
+          "breakpoint set --file main.ts --line 4 --move-to-nearest-code false",
+          "-o",
+          "breakpoint set --file helper.ts --line 4 --move-to-nearest-code false",
+          "-o",
+          "breakpoint list",
         ]);
         expect(debug.stdout).not.toContain("pending");
         expect(debug.stdout).toContain("main.ts:4");
@@ -61,31 +68,39 @@ test.runIf(process.platform === "darwin").each(["llvm"] as const)(
   },
 );
 
-test.runIf(process.platform === "darwin")("dev LLVM object and assembly outputs carry source locations", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "scriptc-debug-object-"));
-  try {
-    for (const outputKind of ["obj", "asm"] as const) {
-      const outPath = join(dir, `program.${outputKind}`);
-      const result = await compile(join(corpus, "main.ts"), { outDir: dir, outPath, outputKind, optimization: "dev" });
-      expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics) : "").toBe(true);
-      if (!result.ok) continue;
-      if (outputKind === "obj") {
-        const { stdout } = await exec("dwarfdump", ["--debug-line", outPath]);
-        expect(stdout).toContain("main.ts");
-        expect(stdout).toContain("helper.ts");
-        const info = await exec("dwarfdump", ["--debug-info", outPath]);
-        expect(info.stdout).toContain("DW_TAG_variable");
-        expect(info.stdout).toContain("DW_TAG_formal_parameter");
-      } else {
-        const assembly = await readFile(outPath, "utf8");
-        expect(assembly).toContain(".loc");
-        expect(assembly).toContain("helper.ts");
+test.runIf(process.platform === "darwin")(
+  "dev LLVM object and assembly outputs carry source locations",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-debug-object-"));
+    try {
+      for (const outputKind of ["obj", "asm"] as const) {
+        const outPath = join(dir, `program.${outputKind}`);
+        const result = await compile(join(corpus, "main.ts"), {
+          outDir: dir,
+          outPath,
+          outputKind,
+          optimization: "dev",
+        });
+        expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics) : "").toBe(true);
+        if (!result.ok) continue;
+        if (outputKind === "obj") {
+          const { stdout } = await exec("dwarfdump", ["--debug-line", outPath]);
+          expect(stdout).toContain("main.ts");
+          expect(stdout).toContain("helper.ts");
+          const info = await exec("dwarfdump", ["--debug-info", outPath]);
+          expect(info.stdout).toContain("DW_TAG_variable");
+          expect(info.stdout).toContain("DW_TAG_formal_parameter");
+        } else {
+          const assembly = await readFile(outPath, "utf8");
+          expect(assembly).toContain(".loc");
+          expect(assembly).toContain("helper.ts");
+        }
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test.each([
   "800-switch-basics.ts",
@@ -100,13 +115,22 @@ test.each([
     const node = await exec(process.execPath, [entry]);
     for (const backend of ["llvm"] as const) {
       const outPath = join(dir, process.platform === "win32" ? `${backend}.exe` : backend);
-      const built = await compile(entry, { outDir: dir, outPath, backend, optimization: "dev", sanitize });
+      const built = await compile(entry, {
+        outDir: dir,
+        outPath,
+        backend,
+        optimization: "dev",
+        sanitize,
+      });
       expect(built.ok, !built.ok ? JSON.stringify(built.diagnostics) : "").toBe(true);
       if (!built.ok) continue;
       const native = await exec(outPath);
       expect(native.stdout).toBe(node.stdout);
       const stderr = sanitize
-        ? native.stderr.replace(/^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext functions and may produce false positives in some cases!\n/gm, "")
+        ? native.stderr.replace(
+            /^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext functions and may produce false positives in some cases!\n/gm,
+            "",
+          )
         : native.stderr;
       expect(stderr).toBe(node.stderr);
     }

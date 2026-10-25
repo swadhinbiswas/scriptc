@@ -1,5 +1,14 @@
 import { expect, test } from "vitest";
-import { F64, VOID, type IrExpr, type IrModule, type IrStmt } from "../../ir/ir.js";
+import {
+  BOOL,
+  BYTES_U8,
+  F64,
+  STRING,
+  VOID,
+  type IrExpr,
+  type IrModule,
+  type IrStmt,
+} from "../../ir/ir.js";
 import { emitLlvmModule } from "./emitter.js";
 
 const loc = { file: "bitwise-emission.ts", start: 0, end: 0 };
@@ -17,7 +26,7 @@ function fixture(): IrModule {
     loc,
   });
   return {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals: [], body, loc }],
@@ -37,4 +46,336 @@ test("LLVM emits bitwise number operators as native i32 instructions", () => {
   expect(llvm).toMatch(/ = xor i32 .*?, -1$/m);
   expect(llvm).toMatch(/ = uitofp i32 .*? to double$/m);
   expect(llvm).toMatch(/ = sitofp i32 .*? to double$/m);
+});
+
+test.each([32, 64] as const)(
+  "string zero-length comparisons use the %i-bit byte count only",
+  (bits) => {
+    const receiver: IrExpr = { kind: "varRef", localId: "text", type: STRING, loc };
+    const length: IrExpr = {
+      kind: "strIntrinsic",
+      method: "length",
+      receiver,
+      args: [],
+      type: F64,
+      loc,
+    };
+    const mod = fixture();
+    mod.functions = [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      ...([0, 1] as const).map((number) => ({
+        name: `length_${number}`,
+        params: [{ name: "text", localId: "text", type: STRING }],
+        returnType: BOOL,
+        locals: [{ id: "text", name: "text", type: STRING, mutable: false }],
+        loc,
+        body: [
+          {
+            kind: "return" as const,
+            loc,
+            value: {
+              kind: "bin" as const,
+              op: "===" as const,
+              left: length,
+              right: { kind: "numLit" as const, value: number, type: F64, loc },
+              type: BOOL,
+              loc,
+            },
+          },
+        ],
+      })),
+    ];
+    const llvm = emitLlvmModule(mod, { pointerBits: bits });
+    const zero = /^define internal [^\n]*@sc_[bf]+_length_0(?:\.i32)?\([^]*?^}/m.exec(llvm)![0];
+    const one = /^define internal [^\n]*@sc_[bf]+_length_1(?:\.i32)?\([^]*?^}/m.exec(llvm)![0];
+    expect(zero).toContain(`getelementptr inbounds i${bits}`);
+    expect(zero).not.toContain("_str_utf16_len");
+    expect(one).toContain("@sc_str_utf16_len");
+  },
+);
+
+test("reference identity and instanceof borrow their operands", () => {
+  const node = { kind: "object" as const, className: "Node" };
+  const a: IrExpr = { kind: "varRef", localId: "a", type: node, loc };
+  const b: IrExpr = { kind: "varRef", localId: "b", type: node, loc };
+  const next: IrExpr = {
+    kind: "fieldGet",
+    obj: b,
+    className: "Node",
+    field: "next",
+    type: node,
+    loc,
+  };
+  const fn = (name: string, value: IrExpr) => ({
+    name,
+    params: [
+      { name: "a", localId: "a", type: node },
+      { name: "b", localId: "b", type: node },
+    ],
+    returnType: BOOL,
+    locals: [
+      { id: "a", name: "a", type: node, mutable: false },
+      { id: "b", name: "b", type: node, mutable: false },
+    ],
+    loc,
+    body: [{ kind: "return" as const, value, loc }],
+  });
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    classes: [
+      { name: "Node", fields: [{ name: "next", type: node }], methods: [], loc },
+      { name: "Leaf", base: "Node", fields: [{ name: "next", type: node }], methods: [], loc },
+    ],
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      fn("same", { kind: "bin", op: "===", left: a, right: next, type: BOOL, loc }),
+      fn("leaf", { kind: "instanceOf", value: next, className: "Leaf", type: BOOL, loc }),
+    ],
+  };
+  const llvm = emitLlvmModule(mod);
+  for (const name of ["same", "leaf"]) {
+    const body = new RegExp(
+      `^define internal [^\\n]*@sc_bf_${name}(?:\\.i32)?\\([^]*?^}`,
+      "m",
+    ).exec(llvm)?.[0];
+    expect(body, name).toBeDefined();
+    expect(body, name).not.toMatch(/call ptr @sc_retain_Node/);
+    expect(body, name).not.toMatch(/call void @sc_release_Node/);
+  }
+});
+
+test("identity bitwise forms over a proven int32 return the operand's number", () => {
+  const text: IrExpr = { kind: "varRef", localId: "text", type: STRING, loc };
+  const length: IrExpr = {
+    kind: "strIntrinsic",
+    method: "length",
+    receiver: text,
+    args: [],
+    type: F64,
+    loc,
+  };
+  const x: IrExpr = { kind: "varRef", localId: "x", type: F64, loc };
+  const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc };
+  const returning = (name: string, value: IrExpr) => ({
+    name,
+    params: [
+      { name: "text", localId: "text", type: STRING },
+      { name: "x", localId: "x", type: F64 },
+    ],
+    returnType: F64,
+    locals: [
+      { id: "text", name: "text", type: STRING, mutable: false },
+      { id: "x", name: "x", type: F64, mutable: false },
+    ],
+    loc,
+    body: [{ kind: "return" as const, loc, value }],
+  });
+  const bin = (op: "|" | ">>>" | "&", left: IrExpr, right: IrExpr): IrExpr => ({
+    kind: "bin",
+    op,
+    left,
+    right,
+    type: F64,
+    loc,
+  });
+  const mod = fixture();
+  mod.functions = [
+    { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+    returning("length_or", bin("|", length, zero)),
+    returning("length_ushr", bin(">>>", length, zero)),
+    returning("unknown_or", bin("|", x, zero)),
+    returning("length_and", bin("&", length, { kind: "numLit", value: 255, type: F64, loc })),
+  ];
+  const llvm = emitLlvmModule(mod);
+  const body = (name: string): string =>
+    new RegExp(`^define internal [^\\n]*@sc_[bf]+_${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(
+      llvm,
+    )![0];
+  for (const name of ["length_or", "length_ushr"]) {
+    expect(body(name)).not.toMatch(/ = (or|lshr) i32 /);
+    expect(body(name)).not.toMatch(/ = [su]itofp i32 /);
+    expect(body(name)).not.toContain("uint32.coerce");
+  }
+  // Unproven operands keep the full ToInt32; other operators still compute.
+  expect(body("unknown_or")).toContain("uint32.coerce.slow");
+  // The i64 conversion covers every magnitude below 2^63; only NaN, the
+  // infinities and larger magnitudes take the slow block.
+  expect(body("unknown_or")).toMatch(/ = fcmp oge double %\S+, 0xC3E0000000000000$/m);
+  expect(body("unknown_or")).toMatch(/ = fcmp olt double %\S+, 0x43E0000000000000$/m);
+  expect(body("length_and")).toMatch(/ = and i32 .*, 255$/m);
+});
+
+test("sums that only feed a bitwise conversion of int32 operands add in 32 bits", () => {
+  const ref = (localId: string, type = F64): IrExpr => ({ kind: "varRef", localId, type, loc });
+  const length: IrExpr = {
+    kind: "strIntrinsic",
+    method: "length",
+    receiver: ref("text", STRING),
+    args: [],
+    type: F64,
+    loc,
+  };
+  const read = (localId: string): IrExpr => ({
+    kind: "bytesIntrinsic",
+    method: "get",
+    receiver: ref(localId, localId === "floats" ? { kind: "bytes", elem: "f64" } : BYTES_U8),
+    args: [ref("x")],
+    type: F64,
+    loc,
+    invalidNaN: true,
+  });
+  const bin = (op: "+" | "-" | "*" | "|" | ">>>", left: IrExpr, right: IrExpr): IrExpr => ({
+    kind: "bin",
+    op,
+    left,
+    right,
+    type: F64,
+    loc,
+  });
+  const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc };
+  const params = [
+    { name: "text", localId: "text", type: STRING },
+    { name: "x", localId: "x", type: F64 },
+    { name: "bytes", localId: "bytes", type: BYTES_U8 },
+    { name: "floats", localId: "floats", type: { kind: "bytes", elem: "f64" } as const },
+  ];
+  const returning = (name: string, value: IrExpr) => ({
+    name,
+    params,
+    returnType: F64,
+    locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+    loc,
+    body: [{ kind: "return" as const, loc, value }],
+  });
+  const mod = fixture();
+  mod.functions = [
+    { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+    returning("proven_add", bin("|", bin("+", length, length), zero)),
+    returning("proven_sub", bin(">>>", bin("-", zero, bin("+", length, length)), zero)),
+    returning("read_add", bin("|", bin("+", length, read("bytes")), zero)),
+    returning(
+      "read_chain",
+      bin("|", bin("-", bin("+", read("bytes"), length), read("bytes")), zero),
+    ),
+    returning(
+      "code_add",
+      bin(
+        "|",
+        bin("+", length, {
+          kind: "strIntrinsic",
+          method: "charCodeAt",
+          receiver: ref("text", STRING),
+          args: [ref("x")],
+          type: F64,
+          loc,
+        }),
+        zero,
+      ),
+    ),
+    returning("unknown_add", bin("|", bin("+", length, ref("x")), zero)),
+    returning("float_read_add", bin("|", bin("+", length, read("floats")), zero)),
+    returning("product", bin("|", bin("*", length, length), zero)),
+    returning("number_add", bin("+", length, read("bytes"))),
+  ];
+  const llvm = emitLlvmModule(mod);
+  const body = (name: string): string =>
+    new RegExp(`^define internal [^\\n]*@sc_[bf]+_${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(
+      llvm,
+    )![0];
+  // Wrapping 32-bit arithmetic, never `nsw`: the exact sum may leave int32.
+  expect(body("proven_add")).toMatch(/ = add i32 /);
+  expect(body("proven_sub")).toMatch(/ = sub i32 /);
+  for (const name of ["proven_add", "proven_sub", "read_add", "read_chain", "code_add"]) {
+    expect(body(name), name).not.toMatch(/ = (add|sub) nsw i32 /);
+    expect(body(name), name).not.toContain("uint32.coerce");
+  }
+  // A NaN-coded read converts to 0 through the sum: the result selects 0
+  // unless every NaN-coded operand is ordered.
+  expect(body("read_add")).toMatch(/ = fcmp ord double .*, 0\.0$/m);
+  expect(body("read_add")).toMatch(/ = add i32 /);
+  expect(body("read_add")).toMatch(/ = select i1 .*, i32 .*, i32 0$/m);
+  expect(body("read_chain")).toMatch(/ = and i1 /);
+  expect(body("read_chain")).toMatch(/ = sub i32 /);
+  // A code unit without an integer view converts once, behind the same test.
+  expect(body("code_add")).toMatch(/ = fcmp ord double .*, 0\.0$/m);
+  expect(body("code_add")).toMatch(/ = fptosi double .* to i32$/m);
+  expect(body("code_add")).toMatch(/ = select i1 .*, i32 .*, i32 0$/m);
+  // Unproven, fractional-capable and multiplied operands keep the double
+  // arithmetic and the full ToInt32; a sum used as a number adds nothing.
+  for (const name of ["unknown_add", "float_read_add", "product"]) {
+    expect(body(name), name).toContain("uint32.coerce.slow");
+    expect(body(name), name).not.toMatch(/ = (add|mul) i32 /);
+  }
+  expect(body("number_add")).not.toMatch(/ = add i32 |fcmp ord/);
+});
+
+test.each([32, 64] as const)(
+  "tagged-template string arrays keep 8-byte slots without states on %i-bit targets",
+  (bits) => {
+    const strings: IrExpr = {
+      kind: "templateStrings",
+      key: "site",
+      cooked: ["a", "b", "c"],
+      type: { kind: "array", elem: STRING },
+      loc,
+    };
+    const mod = fixture();
+    mod.functions[0]!.body = [{ kind: "exprStmt", expr: strings, loc }];
+    const llvm = emitLlvmModule(mod, { pointerBits: bits });
+    const data = /^@sc_tsa_0_data = internal constant .*$/m.exec(llvm)![0];
+    // The runtime reads each slot as 8 bytes; an array without states
+    // (`spare` 0 in its header) has no state bytes after them.
+    if (bits === 64) expect(data).toMatch(/^\S+ = internal constant \[3 x ptr\] /);
+    else {
+      expect(data).toMatch(/^\S+ = internal constant \[3 x <\{ ptr, i32 \}>\] /);
+      expect(data.match(/<\{ ptr @\S+, i32 0 \}>/g)).toHaveLength(3);
+    }
+    expect(data).not.toContain("x i8]");
+    expect(llvm).toMatch(
+      /^@sc_tsa_0 = internal global %ScrArr \{ i\d+ -1, i32 3, i32 3, i8 2, i8 0, i16 0, i32 3, /m,
+    );
+  },
+);
+
+test("string reads of a scan receiver load it inline where emitted code can address it", () => {
+  const receiver: IrExpr = { kind: "varRef", localId: "text", type: STRING, loc };
+  const mod = fixture();
+  mod.functions = [
+    { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+    {
+      name: "units",
+      params: [{ name: "text", localId: "text", type: STRING }],
+      returnType: F64,
+      locals: [{ id: "text", name: "text", type: STRING, mutable: false }],
+      loc,
+      body: [
+        {
+          kind: "return",
+          loc,
+          value: { kind: "strIntrinsic", method: "length", receiver, args: [], type: F64, loc },
+        },
+      ],
+    },
+  ];
+  const helper = (llvm: string): string =>
+    /^define internal double @sc_str_utf16_len\([^]*?^}/m.exec(llvm)![0];
+  const plain = emitLlvmModule(mod);
+  expect(plain).toContain("@scr_str_scan = external global");
+  expect(helper(plain)).toContain("%scan.same");
+  // ELF worker executables keep the receiver in the thread's static TLS block.
+  const elf = emitLlvmModule(
+    { ...mod, workers: true },
+    { targetTriple: "x86_64-unknown-linux-gnu" },
+  );
+  expect(elf).toContain("@scr_str_scan = external thread_local(localexec) global");
+  expect(helper(elf)).toContain("%scan.same");
+  // Darwin worker executables leave every non-ASCII read to the runtime.
+  const darwin = emitLlvmModule(
+    { ...mod, workers: true },
+    { targetTriple: "arm64-apple-macosx14.0.0" },
+  );
+  expect(darwin).not.toContain("@scr_str_scan");
+  expect(helper(darwin)).not.toContain("%scan.same");
 });

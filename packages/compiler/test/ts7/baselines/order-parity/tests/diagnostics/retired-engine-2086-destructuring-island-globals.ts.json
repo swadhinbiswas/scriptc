@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/retired-engine-2086-destructuring-island-globals.ts"
+ ],
+ "diags": []
+}

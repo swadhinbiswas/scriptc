@@ -42,9 +42,12 @@ class Ts7ProcessIo implements Ts7WireIo {
     });
     // A failed spawn emits asynchronously even when descriptor validation
     // below has already thrown. Always consume that event.
-    this.child.on("error", (error: Error) => { this.spawnError = error; });
+    this.child.on("error", (error: Error) => {
+      this.spawnError = error;
+    });
     try {
-      if (this.child.pid === undefined) throw new Error(`Unable to start TypeScript server: ${executable}`);
+      if (this.child.pid === undefined)
+        throw new Error(`Unable to start TypeScript server: ${executable}`);
       if (windows) {
         for (let attempt = 0; attempt < 500; attempt++) {
           try {
@@ -56,7 +59,8 @@ class Ts7ProcessIo implements Ts7WireIo {
             Atomics.wait(sleepBuffer, 0, 0, 10);
           }
         }
-        if (this.pipeFd === -1) throw new Error("TypeScript server: timed out connecting to named pipe");
+        if (this.pipeFd === -1)
+          throw new Error("TypeScript server: timed out connecting to named pipe");
         this.readFd = this.pipeFd;
         this.writeFd = this.pipeFd;
       } else {
@@ -64,10 +68,18 @@ class Ts7ProcessIo implements Ts7WireIo {
         const stdin = this.child.stdin as PipeStream | null;
         const readHandle = stdout?._handle;
         const writeHandle = stdin?._handle;
-        if (!stdout || !stdin || !readHandle || !writeHandle ||
-            !Number.isInteger(readHandle.fd) || readHandle.fd < 0 ||
-            !Number.isInteger(writeHandle.fd) || writeHandle.fd < 0 ||
-            typeof readHandle.setBlocking !== "function" || typeof writeHandle.setBlocking !== "function") {
+        if (
+          !stdout ||
+          !stdin ||
+          !readHandle ||
+          !writeHandle ||
+          !Number.isInteger(readHandle.fd) ||
+          readHandle.fd < 0 ||
+          !Number.isInteger(writeHandle.fd) ||
+          writeHandle.fd < 0 ||
+          typeof readHandle.setBlocking !== "function" ||
+          typeof writeHandle.setBlocking !== "function"
+        ) {
           throw new Error("TypeScript server: Node synchronous pipe handles are unavailable");
         }
         readHandle.setBlocking(true);
@@ -91,8 +103,9 @@ class Ts7ProcessIo implements Ts7WireIo {
     if (this.spawnError) throw this.spawnError;
     if (this.closed) throw new Error("TypeScript server transport is closed");
     for (;;) {
-      try { return readSync(this.readFd, buffer, offset, length, null); }
-      catch (error) {
+      try {
+        return readSync(this.readFd, buffer, offset, length, null);
+      } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "EINTR") continue;
         if (code !== "EAGAIN") throw error;
@@ -105,8 +118,9 @@ class Ts7ProcessIo implements Ts7WireIo {
     if (this.spawnError) throw this.spawnError;
     if (this.closed) throw new Error("TypeScript server transport is closed");
     for (;;) {
-      try { return writeSync(this.writeFd, buffer, offset, length, null); }
-      catch (error) {
+      try {
+        return writeSync(this.writeFd, buffer, offset, length, null);
+      } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "EINTR") continue;
         if (code !== "EAGAIN") throw error;
@@ -121,7 +135,11 @@ class Ts7ProcessIo implements Ts7WireIo {
     liveTransports.delete(this);
     if (liveTransports.size === 0) process.removeListener("exit", closeLiveTransports);
     if (this.pipeFd !== -1) {
-      try { closeSync(this.pipeFd); } catch { /* still close the child */ }
+      try {
+        closeSync(this.pipeFd);
+      } catch {
+        /* still close the child */
+      }
       this.pipeFd = -1;
     }
     this.readFd = -1;

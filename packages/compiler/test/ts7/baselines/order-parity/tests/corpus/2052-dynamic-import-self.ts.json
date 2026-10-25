@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2052-dynamic-import-self.ts"
+ ],
+ "diags": []
+}

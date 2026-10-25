@@ -7,11 +7,9 @@
   <a href="https://www.npmjs.com/package/scriptc"><img alt="npm downloads per month: scriptc" src="https://img.shields.io/npm/dm/scriptc.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
 </p>
 
-scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code to native instructions. Static builds run without Node.js or a JavaScript engine.
+scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses the types checked by the TypeScript compiler to generate machine code, and the output runs without Node.js installed. npm packages your program imports compile along with it. Code scriptc can't compile is reported at build time with a diagnostic and, where available, a rewrite hint.
 
-For npm dependencies and `any`-typed code, enable `--dynamic` to include the embedded [quickjs-ng](https://github.com/quickjs-ng/quickjs) engine. Dependency JavaScript is included at build time.
-
-scriptc is experimental and supports a subset of JavaScript, TypeScript, and Node.js APIs. See the [limitations](https://scriptc.dev/docs/limitations) and [Node.js compatibility reference](https://scriptc.dev/compatibility) before using it for an existing project.
+scriptc is experimental and supports a subset of JavaScript, TypeScript, and Node.js APIs. Run `scriptc coverage` on an existing program to see how much of it compiles, and see the [limitations](https://scriptc.dev/docs/limitations) and [Node.js compatibility reference](https://scriptc.dev/compatibility) for details.
 
 ## Installation
 
@@ -21,9 +19,9 @@ Install with Node.js 24 or later and npm:
 $ npm install -g scriptc
 ```
 
-The installed compiler runs natively on supported macOS, Linux, and Windows hosts. Native compilation and execution do not require Node.js. Standalone compiler archives are also available from [GitHub Releases](https://github.com/vercel-labs/scriptc/releases).
+The installed compiler runs natively on macOS, Linux, and Windows. Node.js is needed only to install it and to run WASI modules with `scriptc run`. Standalone compiler archives are also available from [GitHub Releases](https://github.com/vercel-labs/scriptc/releases).
 
-Executable builds require a platform linker and SDK/sysroot. See the [quickstart](https://scriptc.dev/docs/quickstart) for prerequisites and [platform support](https://scriptc.dev/docs/platforms) for host requirements, cross-compilation, and WebAssembly.
+Building executables requires a linker and the platform SDK or sysroot. See the [quickstart](https://scriptc.dev/docs/quickstart) for prerequisites and [platform support](https://scriptc.dev/docs/platforms) for host requirements, cross-compilation, and WebAssembly.
 
 ## Build a program
 
@@ -34,24 +32,24 @@ const who = process.argv.length > 2 ? process.argv[2] : "world";
 console.log(`hello, ${who}`);
 ```
 
-Compile and run it in one step:
+`scriptc run` compiles the file and runs the result:
 
 ```console
 $ scriptc run hello.ts
 hello, world
 ```
 
-Or write a standalone executable:
+`scriptc build` writes an executable:
 
 ```console
-$ scriptc build hello.ts -o hello
+$ scriptc build hello.ts -o hello >/dev/null
 $ ./hello scriptc
 hello, scriptc
 ```
 
 These examples use POSIX shell syntax. On Windows, build `hello.exe` and run it with `.\hello.exe`.
 
-Use `scriptc coverage hello.ts` to check which operations compile statically, require dynamic execution, or are unsupported. See [coverage reports](https://scriptc.dev/docs/coverage) for details.
+Use `scriptc coverage hello.ts` to check what compiles before you build. See [coverage reports](https://scriptc.dev/docs/coverage) for details.
 
 ## Use Node APIs
 
@@ -71,14 +69,14 @@ server.listen(8080, () => {
 ```
 
 ```console
-$ scriptc build server.ts -o server
+$ scriptc build server.ts -o server >/dev/null
 $ ./server
 listening on http://localhost:8080
 ```
 
 ## Use npm packages
 
-Pass `--dynamic` to embed an npm package's JavaScript in the executable. The result does not read `node_modules` at runtime.
+npm packages compile into the executable with your code, so it doesn't read `node_modules` at runtime.
 
 Create `cli.ts`:
 
@@ -90,16 +88,19 @@ console.log(pc.green("hello from scriptc"));
 
 ```console
 $ npm install picocolors
-$ scriptc build cli.ts --dynamic -o cli
+$ scriptc build cli.ts -o cli >/dev/null
 $ ./cli
 hello from scriptc
 ```
 
-Enabling `--dynamic` does not add support for unsupported statically typed calls. See [npm dependencies](https://scriptc.dev/docs/dependencies) for package resolution and the boundary between static and dynamic code.
+Package support is partial. See [npm dependencies](https://scriptc.dev/docs/dependencies) for which packages compile and how to check them.
 
 ## Documentation
 
+- [Introduction](https://scriptc.dev/docs): what scriptc is and what you can build.
 - [Quickstart](https://scriptc.dev/docs/quickstart): installation and your first executable.
+- [Coverage reports](https://scriptc.dev/docs/coverage): check whether an existing program compiles.
+- [Platform support](https://scriptc.dev/docs/platforms): cross-compilation and WebAssembly.
 - [CLI reference](https://scriptc.dev/docs/cli): commands, options, and output formats.
 - [Native program objects](https://scriptc.dev/docs/native-objects): use compiler output in external builds.
 - [Native FFI](https://scriptc.dev/docs/ffi): call C ABI functions from compiled programs.

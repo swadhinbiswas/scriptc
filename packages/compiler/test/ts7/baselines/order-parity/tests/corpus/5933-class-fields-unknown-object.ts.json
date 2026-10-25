@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5933-class-fields-unknown-object.ts"
+ ],
+ "diags": []
+}

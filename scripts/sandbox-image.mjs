@@ -34,14 +34,16 @@ function run(command, args, { capture = false } = {}) {
     child.on("error", reject);
     child.on("exit", (code, signal) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(`${command} exited ${signal ?? code}${stderr ? `\n${stderr.trim()}` : ""}`));
+      else
+        reject(
+          new Error(`${command} exited ${signal ?? code}${stderr ? `\n${stderr.trim()}` : ""}`),
+        );
     });
   });
 }
 
 console.log(
-  `Authenticating Docker with ${vcrConfig.authSource} ` +
-    `(scope: ${vcrConfig.scopeSource})...`,
+  `Authenticating Docker with ${vcrConfig.authSource} ` + `(scope: ${vcrConfig.scopeSource})...`,
 );
 await run("vercel", ["vcr", "login", "docker", ...scopeArgs]);
 
@@ -61,11 +63,9 @@ await run("docker", [
 ]);
 
 const inspection = JSON.parse(
-  await run(
-    "docker",
-    ["buildx", "imagetools", "inspect", image, "--format", "{{json .}}"],
-    { capture: true },
-  ),
+  await run("docker", ["buildx", "imagetools", "inspect", image, "--format", "{{json .}}"], {
+    capture: true,
+  }),
 );
 let amd64Digest;
 try {
@@ -80,11 +80,9 @@ console.log("Waiting for VCR to prepare the image for Sandbox...");
 const deadline = Date.now() + 5 * 60_000;
 while (Date.now() < deadline) {
   const listing = JSON.parse(
-    await run(
-      "vercel",
-      ["vcr", "image", "ls", repository, "--format", "json", ...scopeArgs],
-      { capture: true },
-    ),
+    await run("vercel", ["vcr", "image", "ls", repository, "--format", "json", ...scopeArgs], {
+      capture: true,
+    }),
   );
   const manifest = listing.images?.find((candidate) => candidate.manifestDigest === amd64Digest);
   if (manifest?.status === "ready") {

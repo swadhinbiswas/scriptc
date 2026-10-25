@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4044-adapted-callback-modules/registry.ts",
+  "<repo>/tests/corpus/4044-adapted-callback-modules/main.ts"
+ ],
+ "diags": []
+}

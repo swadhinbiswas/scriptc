@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2781-array-missing-value-escape.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3096-json-callback-nonfinite.ts"
+ ],
+ "diags": []
+}

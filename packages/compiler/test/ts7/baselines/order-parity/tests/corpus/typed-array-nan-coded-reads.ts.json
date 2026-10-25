@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
+ ],
+ "diags": []
+}

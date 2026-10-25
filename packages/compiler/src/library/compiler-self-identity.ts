@@ -82,15 +82,21 @@ export async function compilerImplementationIdentity(
   const hash = createHash("sha256").update("scriptc-frontend-implementation-v1\0");
   const batchSize = 64;
   for (let start = 0; start < entries.length; start += batchSize) {
-    const batch = await Promise.all(entries.slice(start, start + batchSize).map(async (entry) => {
-      if (entry.directory !== undefined) return { ...entry, info: entry.directory, bytes: null };
-      const info = captureDependencies ? dependency(entry.path, await lstat(entry.path)) : null;
-      return { ...entry, info, bytes: await readFile(entry.path) };
-    }));
+    const batch = await Promise.all(
+      entries.slice(start, start + batchSize).map(async (entry) => {
+        if (entry.directory !== undefined) return { ...entry, info: entry.directory, bytes: null };
+        const info = captureDependencies ? dependency(entry.path, await lstat(entry.path)) : null;
+        return { ...entry, info, bytes: await readFile(entry.path) };
+      }),
+    );
     for (const entry of batch) {
       if (entry.info !== null) dependencies.push(entry.info);
       if (entry.bytes !== null) {
-        hash.update(relative(implementationRoot, entry.path)).update("\0").update(entry.bytes).update("\0");
+        hash
+          .update(relative(implementationRoot, entry.path))
+          .update("\0")
+          .update(entry.bytes)
+          .update("\0");
       }
     }
   }
@@ -100,22 +106,28 @@ export async function compilerImplementationIdentity(
 function validDependency(value: unknown): value is CompilerImplementationDependency {
   if (value === null || typeof value !== "object") return false;
   const item = value as Partial<CompilerImplementationDependency>;
-  return typeof item.path === "string" &&
+  return (
+    typeof item.path === "string" &&
     (item.kind === "file" || item.kind === "directory") &&
-    typeof item.dev === "number" && typeof item.ino === "number" &&
-    typeof item.size === "number" && typeof item.mtimeMs === "number" &&
-    typeof item.ctimeMs === "number";
+    typeof item.dev === "number" &&
+    typeof item.ino === "number" &&
+    typeof item.size === "number" &&
+    typeof item.mtimeMs === "number" &&
+    typeof item.ctimeMs === "number"
+  );
 }
 
 export async function compilerImplementationDependenciesStillMatch(
   dependencies: readonly CompilerImplementationDependency[],
 ): Promise<boolean> {
   if (!Array.isArray(dependencies) || !dependencies.every(validDependency)) return false;
-  const current = await Promise.all(dependencies.map(async (expected) => {
-    const info = await lstat(expected.path).catch(() => null);
-    if (info === null) return false;
-    const observed = dependency(expected.path, info);
-    return observed !== null && JSON.stringify(observed) === JSON.stringify(expected);
-  }));
+  const current = await Promise.all(
+    dependencies.map(async (expected) => {
+      const info = await lstat(expected.path).catch(() => null);
+      if (info === null) return false;
+      const observed = dependency(expected.path, info);
+      return observed !== null && JSON.stringify(observed) === JSON.stringify(expected);
+    }),
+  );
   return current.every(Boolean);
 }

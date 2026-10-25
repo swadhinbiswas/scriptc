@@ -1,0 +1,27 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/default-export.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Export assignment cannot be used when targeting ECMAScript modules. Consider using 'export default' or another module format instead.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/default-export.ts",
+    "start": 439,
+    "end": 456
+   }
+  },
+  {
+   "code": "SC1012",
+   "message": "export = assignments are not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/default-export.ts",
+    "start": 439,
+    "end": 456
+   },
+   "milestone": "later",
+   "hint": "use named exports: export function f() {} / import { f } from \"./m\""
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4563-array-read-projection-receivers.ts"
+ ],
+ "diags": []
+}

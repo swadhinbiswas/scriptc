@@ -2,9 +2,24 @@
 title: "Introduction"
 ---
 
-scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code directly to native instructions. Static builds run without Node.js or a JavaScript engine.
+scriptc is a compiler that turns TypeScript and JavaScript into native executables and WebAssembly modules. It uses the types checked by the TypeScript compiler to generate machine code, and the output runs without Node.js installed.
 
-For npm dependencies and `any`-typed code, enable `--dynamic` to include an embedded JavaScript engine. Use [coverage reports](/docs/coverage) to check which parts of a program compile statically, require the engine, or are unsupported.
+scriptc is experimental. It supports a subset of JavaScript, TypeScript, and the Node.js APIs, and it tells you at build time when a program uses something outside that subset.
+
+## Features
+
+- **Native output.** `scriptc build` produces an executable for macOS, Linux, or Windows, or a WebAssembly module.
+- **Standard TypeScript.** Programs are type-checked by the TypeScript compiler using your `tsconfig.json`. No annotations or language extensions are required.
+- **npm dependencies.** Packages your program imports compile to native code together with your own code.
+- **Coverage reports.** [`scriptc coverage`](/docs/coverage) shows what compiles and explains anything that doesn't, with a diagnostic code, a source location, and usually a rewrite hint.
+
+## What you can build
+
+- Command-line tools and scripts.
+- HTTP and TCP servers built on `node:http`, `node:net`, and TLS, and clients that use `fetch`.
+- Parallel programs with [worker threads](/docs/threads).
+- [WebAssembly modules](/docs/wasm) that a web or native application calls.
+- [Static libraries](/docs/platforms#ios-and-android-arm64-library-mode) for iOS and Android apps, and programs that [call C libraries](/docs/ffi).
 
 ## Compile a program
 
@@ -17,14 +32,14 @@ function fib(n: number): number {
 console.log(fib(30));
 ```
 
-Compile and run it:
+`scriptc run` compiles the file and runs the result:
 
 ```console
 $ scriptc run fib.ts
 832040
 ```
 
-To create an executable you can run separately, use `scriptc build`:
+`scriptc build` writes an executable:
 
 ```console
 $ scriptc build fib.ts -o fib >/dev/null
@@ -32,53 +47,28 @@ $ ./fib
 832040
 ```
 
-See [Quickstart](/docs/quickstart) for installation and platform requirements.
+The [Quickstart](/docs/quickstart) covers installation and a first build.
 
-## Compilation modes
+<span id="compilation-modes" />
 
-scriptc classifies operations into three tiers:
+## How it works
 
-<table>
-  <thead>
-    <tr>
-      <th>Tier</th>
-      <th>Behavior</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>Static</td>
-      <td>Compiles to native code. This is the default mode.</td>
-    </tr>
-    <tr>
-      <td>Dynamic</td>
-      <td>Runs in the embedded quickjs-ng engine when <code>--dynamic</code> is enabled. This includes npm packages' shipped JavaScript and supported uses of <code>any</code>.</td>
-    </tr>
-    <tr>
-      <td>Rejected</td>
-      <td>Produces a compilation diagnostic with an <code>SC</code> code, source location, and rewrite hint where available.</td>
-    </tr>
-  </tbody>
-</table>
-
-Enabling `--dynamic` does not add support for unsupported statically typed calls. The [npm dependencies guide](/docs/dependencies) explains package execution and the boundary between static and dynamic code.
+scriptc type-checks your program with TypeScript, uses the checked types to choose a native representation for every value, and generates machine code with LLVM. The executable links a native runtime that provides memory management, the event loop, and the Node.js APIs your program uses. [How It Works](/docs/how-it-works) describes each stage.
 
 ## Language and API support
 
-Static compilation includes supported forms of:
+scriptc compiles supported forms of:
 
 - Classes, inheritance, closures, generics, discriminated unions, destructuring, and spread.
 - `async`/`await`, promises, exceptions, iterators, and resource disposal.
 - Strings, BigInts, arrays, Maps, Sets, JSON, Math, typed arrays, and Buffers.
 - Node.js filesystem, path, process, child-process, crypto, timer, and networking APIs.
 
-These features have API-specific restrictions. The [Node.js compatibility reference](/compatibility) lists static and dynamic API support, and [Limitations](/docs/limitations) describes compilation restrictions and runtime differences from Node.js.
-
-Programs are checked against the `es2025` standard library and scriptc's ambient declarations. Project declarations such as `@types/node` participate when available, and `tsconfig.json` controls checker strictness.
+Programs are checked against the `es2025` standard library, scriptc's own declarations, and your project's declarations such as `@types/node`. The [Node.js compatibility reference](/compatibility) lists API-level support, and [Limitations](/docs/limitations) describes the remaining restrictions and the places where compiled programs behave differently from Node.js.
 
 ## Runtime type checks
 
-Conversions from dynamic values to static types validate the data at runtime. For example, a JSON value must match the target type before it can be used as that type:
+Compiled code relies on types, so scriptc checks a value whose type is only known at runtime before using it as a specific type. For example, parsed JSON must match the type you cast it to:
 
 ```ts:cast.ts
 type Config = { port: number };
@@ -96,11 +86,11 @@ $ scriptc run cast.ts
 expected number at $.port, got string
 ```
 
-This validation differs from TypeScript assertions under Node.js. See [runtime type checks](/docs/limitations#runtime-type-checks) for details.
+Under Node.js, the same `as Config` assertion performs no check. See [runtime type checks](/docs/limitations#runtime-type-checks) for details.
 
 ## Build-time evaluation
 
-`comptime(() => ...)` evaluates a TypeScript function in an isolated VM during compilation and embeds its result as a literal:
+`comptime(() => ...)` runs a function while the program compiles and embeds its result as a constant:
 
 ```ts:label.ts
 const label = comptime(() => "hello".toUpperCase());
@@ -114,8 +104,8 @@ HELLO
 
 ## Next steps
 
-- [Quickstart](/docs/quickstart): install the CLI and build an executable.
-- [CLI Reference](/docs/cli): commands and compiler options.
-- [Coverage Reports](/docs/coverage): identify dynamic operations and compilation blockers.
+- [Quickstart](/docs/quickstart): install scriptc and build your first executable.
+- [Coverage Reports](/docs/coverage): check whether an existing program compiles.
 - [npm Dependencies](/docs/dependencies): use packages in compiled programs.
-- [How It Works](/docs/how-it-works): compiler stages, runtime, and testing.
+- [Platform Support](/docs/platforms): build for other operating systems and WebAssembly.
+- [CLI Reference](/docs/cli): every command and option.

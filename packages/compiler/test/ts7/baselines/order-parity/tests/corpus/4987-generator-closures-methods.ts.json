@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4987-generator-closures-methods.ts"
+ ],
+ "diags": []
+}

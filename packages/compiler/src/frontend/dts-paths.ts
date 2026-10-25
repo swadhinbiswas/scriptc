@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { npmPackageNameOf } from "./workspace-registry.js";
 import { tsgoPath } from "./ts7/session-path.js";
 
@@ -9,18 +9,58 @@ const require = createRequire(import.meta.url);
 let installedDeclarationRoot: string | null = null;
 
 /** A native distribution supplies its relocatable declaration directory. */
-export function setDeclarationRoot(root: string): void { installedDeclarationRoot = root; }
+export function setDeclarationRoot(root: string): void {
+  installedDeclarationRoot = root;
+}
 
 function declarationPath(name: string): string {
-  return tsgoPath(installedDeclarationRoot === null
-    ? name === "scriptc.d.ts" ? require.resolve("@scriptc/compiler/scriptc.d.ts")
-      : name === "scriptc-overrides.d.ts" ? require.resolve("@scriptc/compiler/scriptc-overrides.d.ts")
-      : require.resolve("@scriptc/compiler/scriptc-node-fallback.d.ts")
-    : join(installedDeclarationRoot, name));
+  return tsgoPath(
+    installedDeclarationRoot === null
+      ? name === "scriptc.d.ts"
+        ? require.resolve("@scriptc/compiler/scriptc.d.ts")
+        : name === "scriptc-overrides.d.ts"
+          ? require.resolve("@scriptc/compiler/scriptc-overrides.d.ts")
+          : require.resolve("@scriptc/compiler/scriptc-node-fallback.d.ts")
+      : join(installedDeclarationRoot, name),
+  );
+}
+
+/** Directory of the shipped package shims (packages/compiler/shims): the
+ * implementation modules package-shims.ts maps npm packages to. A native
+ * distribution ships them beside its declarations. */
+export function packageShimRoot(): string {
+  return installedDeclarationRoot === null
+    ? join(dirname(require.resolve("@scriptc/compiler/scriptc.d.ts")), "..", "shims")
+    : join(installedDeclarationRoot, "shims");
+}
+
+/** The directories of files scriptc itself ships, each with the prefix
+ * that names its files independently of where scriptc is installed
+ * (compilerOwnedFileName). IR artifacts spell source locations in them this
+ * way (serializeModuleParts). */
+export function compilerOwnedFileRoots(): readonly { from: string; to: string }[] {
+  return [{ from: tsgoPath(packageShimRoot()) + "/", to: "scriptc:shims/" }];
+}
+
+/** The name of a file scriptc itself ships (a package shim or one of the
+ * shipped declaration files) that does not depend on where scriptc is
+ * installed: `scriptc:shims/<path below the shim root>` or
+ * `scriptc:<declaration file name>`. Null for every other file. Names and
+ * artifacts that would otherwise spell the installation's absolute path use
+ * it, so two installations of one compiler emit the same output. */
+export function compilerOwnedFileName(file: string): string | null {
+  const path = tsgoPath(file);
+  for (const { from, to } of compilerOwnedFileRoots()) {
+    if (path.startsWith(from)) return to + path.slice(from.length);
+  }
+  for (const declaration of [ambientDtsPath(), overridesDtsPath(), fallbackDtsPath()]) {
+    if (path === declaration) return `scriptc:${path.slice(path.lastIndexOf("/") + 1)}`;
+  }
+  return null;
 }
 
 /** Path of the shipped ambient declarations — the always-shipped CORE
- * (comptime/__island_eval, setTimeout). Part of EVERY program scriptc
+ * (comptime, setTimeout). Part of EVERY program scriptc
  * builds, the project-world preflight program included. */
 export function ambientDtsPath(): string {
   return declarationPath("scriptc.d.ts");

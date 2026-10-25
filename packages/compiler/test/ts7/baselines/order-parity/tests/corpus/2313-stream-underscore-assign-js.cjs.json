@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2313-stream-underscore-assign-js.cjs"
+ ],
+ "diags": []
+}

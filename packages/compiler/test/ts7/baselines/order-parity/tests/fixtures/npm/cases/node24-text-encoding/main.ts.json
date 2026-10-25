@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/node24-text-encoding/main.ts"
+ ],
+ "diags": []
+}

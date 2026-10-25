@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5115-regex-replace-compiled.ts"
+ ],
+ "diags": []
+}

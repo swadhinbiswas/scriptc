@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3132-child-generic-stream-completion.ts"
+ ],
+ "diags": []
+}

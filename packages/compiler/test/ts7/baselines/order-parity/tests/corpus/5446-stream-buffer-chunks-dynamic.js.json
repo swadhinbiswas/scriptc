@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5446-stream-buffer-chunks-dynamic.js"
+ ],
+ "diags": []
+}

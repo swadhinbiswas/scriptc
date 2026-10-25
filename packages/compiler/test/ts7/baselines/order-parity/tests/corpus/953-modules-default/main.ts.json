@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/953-modules-default/colors.ts",
+  "<repo>/tests/corpus/953-modules-default/side.ts",
+  "<repo>/tests/corpus/953-modules-default/answer.ts",
+  "<repo>/tests/corpus/953-modules-default/main.ts"
+ ],
+ "diags": []
+}

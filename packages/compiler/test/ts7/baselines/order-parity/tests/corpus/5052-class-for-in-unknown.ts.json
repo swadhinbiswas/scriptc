@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5052-class-for-in-unknown.ts"
+ ],
+ "diags": []
+}

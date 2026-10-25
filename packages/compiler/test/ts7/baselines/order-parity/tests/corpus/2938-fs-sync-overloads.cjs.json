@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2938-fs-sync-overloads.cjs"
+ ],
+ "diags": []
+}

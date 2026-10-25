@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2897-child-stdin-destroy.ts"
+ ],
+ "diags": []
+}

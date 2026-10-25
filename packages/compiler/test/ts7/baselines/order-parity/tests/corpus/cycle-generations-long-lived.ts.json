@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/cycle-generations-long-lived.ts"
+ ],
+ "diags": []
+}

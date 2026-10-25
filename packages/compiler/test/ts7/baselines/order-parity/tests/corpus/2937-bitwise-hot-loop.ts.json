@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2937-bitwise-hot-loop.ts"
+ ],
+ "diags": []
+}

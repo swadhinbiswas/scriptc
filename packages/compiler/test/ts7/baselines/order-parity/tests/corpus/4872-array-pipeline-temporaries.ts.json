@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4872-array-pipeline-temporaries.ts"
+ ],
+ "diags": []
+}

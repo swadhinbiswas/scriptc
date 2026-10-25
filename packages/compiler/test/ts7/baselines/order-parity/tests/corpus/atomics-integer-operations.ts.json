@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/atomics-integer-operations.ts"
+ ],
+ "diags": []
+}

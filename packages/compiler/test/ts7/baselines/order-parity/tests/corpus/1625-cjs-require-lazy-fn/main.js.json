@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1625-cjs-require-lazy-fn/lazy.js",
+  "<repo>/tests/corpus/1625-cjs-require-lazy-fn/never.js",
+  "<repo>/tests/corpus/1625-cjs-require-lazy-fn/main.js"
+ ],
+ "diags": []
+}

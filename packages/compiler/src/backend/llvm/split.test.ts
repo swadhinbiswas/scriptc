@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "vitest";
-import { splitLlvmLibraryProgram, splitLlvmProgram } from "./split.js";
+import { splitLlvmLibraryProgram, splitLlvmProgram, splitLlvmProgramFile } from "./split.js";
 import { LlvmDebugInfo } from "./debug-info.js";
 import { VOID } from "../../ir/ir.js";
 
@@ -61,38 +61,224 @@ test("splits generated LLVM functions and promotes only private cross-shard defi
   expect(actual!.promotedSymbols).not.toContain("public_entry");
   expect(actual!.publicSymbols).toEqual(["public_value", "public_entry"]);
   expect(actual!.shards[0]!.name).toBe("program-globals.ll");
-  expect(actual!.shards[0]!.source).toContain("@hidden_value = hidden global i64 7");
-  expect(actual!.shards.slice(1).every((shard) =>
-    shard.source.includes("@hidden_value = external hidden global i64")
-  )).toBe(true);
-  expect(actual!.shards.some((shard) =>
-    !shard.source.includes("define hidden i64 @right() #0") &&
-    shard.source.includes("declare hidden i64 @right() #0")
-  )).toBe(true);
+  expect(actual!.shards[0]!.source()).toContain("@hidden_value = hidden global i64 7");
+  expect(
+    actual!.shards
+      .slice(1)
+      .every((shard) => shard.source().includes("@hidden_value = external hidden global i64")),
+  ).toBe(true);
+  expect(
+    actual!.shards.some(
+      (shard) =>
+        !shard.source().includes("define hidden i64 @right() #0") &&
+        shard.source().includes("declare hidden i64 @right() #0"),
+    ),
+  ).toBe(true);
 });
 
-test("thread-local program state conservatively keeps the single-TU path", () => {
+test("thread-local definitions and declarations preserve their storage model across shards", () => {
   const tls = SAMPLE.replace(
     "@hidden_value = internal global i64 7",
     "@hidden_value = internal thread_local global i64 7",
   );
-  expect(splitLlvmProgram(tls, { minimumBytes: 0, targetBytes: 64 * 1024 })).toBeNull();
+  const split = splitLlvmProgram(tls, { minimumBytes: 0, targetBytes: 64 * 1024 })!;
+  expect(split.shards[0]!.source()).toContain("@hidden_value = hidden thread_local global i64 7");
+  for (const shard of split.shards.slice(1)) {
+    expect(shard.source()).toContain("@hidden_value = external hidden thread_local global i64");
+  }
 });
+
+const PADDING = Array.from(
+  { length: 80 },
+  (_, i) =>
+    `define internal i64 @pad_${i}() #0 {\nentry:\n  ; ${"x".repeat(2048)}\n  ret i64 ${i}\n}\n`,
+).join("\n");
+
+/** SAMPLE with more globals after @public_value and enough functions to
+ * split into several shards. */
+function withGlobals(globals: string, tail = ""): string {
+  return `${SAMPLE.replace(
+    "@public_value = constant i64 11",
+    `@public_value = constant i64 11\n${globals}`,
+  ).replace("define i64 @public_entry", `${PADDING}\ndefine i64 @public_entry`)}${tail}`;
+}
+
+/** Writes each shard and compiles it with clang. */
+async function compileShards(
+  shards: readonly { name: string; source: () => string }[],
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-llvm-split-shards-"));
+  scratch.push(dir);
+  for (const shard of shards) {
+    const source = join(dir, shard.name);
+    await writeFile(source, shard.source());
+    execFileSync("clang", ["-Wno-override-module", "-c", source, "-o", `${source}.o`]);
+  }
+}
+
+test("private unnamed_addr lookup tables are promoted like internal globals", async () => {
+  const split = splitLlvmProgram(
+    withGlobals('@table = private unnamed_addr constant [2 x i8] c"\\01\\02"'),
+    { minimumBytes: 0, targetBytes: 64 * 1024 },
+  )!;
+  expect(split).not.toBeNull();
+  const [globals, ...functions] = split.shards;
+  expect(globals!.source()).toContain('@table = hidden unnamed_addr constant [2 x i8] c"\\01\\02"');
+  for (const shard of functions)
+    expect(shard.source()).toContain("@table = external hidden constant [2 x i8]");
+  expect(split.promotedSymbols).toContain("table");
+  await compileShards(split.shards);
+});
+
+test("aggregate initializers over several lines stay whole in the globals shard", async () => {
+  // The regex global's comment holds unbalanced brackets.
+  const split = splitLlvmProgram(
+    withGlobals(`@regex = internal global { ptr, i64 } { ptr @left, i64 0 } ; /(a|[b/
+@vt = internal constant [2 x { i64, ptr }] [
+  { i64, ptr } { i64 1, ptr @left },
+  { i64, ptr } { i64 2, ptr @right }
+]`),
+    { minimumBytes: 0, targetBytes: 64 * 1024 },
+  )!;
+  expect(split).not.toBeNull();
+  const [globals, ...functions] = split.shards;
+  expect(globals!.source()).toContain(
+    "@vt = hidden constant [2 x { i64, ptr }] [\n  { i64, ptr } { i64 1, ptr @left },\n  { i64, ptr } { i64 2, ptr @right }\n]",
+  );
+  for (const shard of functions) {
+    expect(shard.source()).toContain("@vt = external hidden constant [2 x { i64, ptr }]");
+    expect(shard.source()).not.toContain("{ i64, ptr } { i64 1");
+  }
+  expect(split.promotedSymbols).toEqual(expect.arrayContaining(["regex", "vt"]));
+  await compileShards(split.shards);
+});
+
+test("globals after the attributes and metadata join the globals shard", async () => {
+  const split = splitLlvmProgram(withGlobals("", "@flag = internal constant i1 true\n"), {
+    minimumBytes: 0,
+    targetBytes: 64 * 1024,
+  })!;
+  expect(split).not.toBeNull();
+  const [globals, ...functions] = split.shards;
+  expect(globals!.source()).toContain("@flag = hidden constant i1 true");
+  for (const shard of functions)
+    expect(shard.source()).toContain("@flag = external hidden constant i1");
+  await compileShards(split.shards);
+});
+
+test("a module split from its file has the shards of the same module split in memory", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-llvm-split-file-"));
+  scratch.push(dir);
+  const options = { minimumBytes: 0, targetBytes: 64 * 1024 };
+  const storage = withGlobals(
+    `@table = private unnamed_addr constant [2 x i8] c"\\01\\02"
+@vt = internal constant [2 x { i64, ptr }] [
+  { i64, ptr } { i64 1, ptr @left },
+  { i64, ptr } { i64 2, ptr @right }
+]`,
+    "@flag = internal constant i1 true\n",
+  );
+  for (const [name, source] of [
+    ["sample.ll", withGlobals("")],
+    ["storage.ll", storage],
+  ] as const) {
+    const path = join(dir, name);
+    await writeFile(path, source);
+    const fromFile = splitLlvmProgramFile(path, options)!;
+    expect(fromFile).not.toBeNull();
+    const materialize = (split: NonNullable<typeof fromFile>) => ({
+      ...split,
+      shards: split.shards.map((shard) => ({ name: shard.name, source: shard.source() })),
+    });
+    expect(materialize(fromFile)).toEqual(materialize(splitLlvmProgram(source, options)!));
+  }
+});
+
+test.skipIf(process.platform === "win32")(
+  "split and merged native modules keep globals independent on concurrent threads",
+  async () => {
+    const source = `%State = type { i64, i64 }
+@state = internal thread_local global %State { i64 7, i64 0 }
+@foreign = external thread_local global i64
+
+define void @set_owner(i64 %owner) {
+entry:
+  store i64 %owner, ptr getelementptr inbounds (%State, ptr @state, i64 0, i32 1)
+  ret void
+}
+
+define i64 @get_owner() {
+entry:
+  %owner = load i64, ptr getelementptr inbounds (%State, ptr @state, i64 0, i32 1)
+  ret i64 %owner
+}
+
+define i64 @next_value() {
+entry:
+  %current = load i64, ptr @state
+  %next = add i64 %current, 1
+  store i64 %next, ptr @state
+  %other = load i64, ptr @foreign
+  %after = add i64 %other, 1
+  store i64 %after, ptr @foreign
+  %result = add i64 %current, %other
+  ret i64 %result
+}
+`;
+    const split = splitLlvmProgram(source, { minimumBytes: 0, targetBytes: 64 * 1024 })!;
+    expect(split.shards.length).toBeGreaterThan(2);
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-llvm-thread-state-"));
+    scratch.push(dir);
+    const objects: string[] = [];
+    for (const shard of split.shards) {
+      const path = join(dir, shard.name);
+      const object = `${path}.o`;
+      await writeFile(path, shard.source());
+      execFileSync("clang", ["-Wno-override-module", "-O2", "-c", path, "-o", object]);
+      objects.push(object);
+    }
+    const combined = join(dir, "combined.o");
+    execFileSync("ld", ["-r", ...objects, "-o", combined]);
+    if (process.platform === "linux") {
+      const keep = join(dir, "keep.txt");
+      await writeFile(keep, "set_owner\nget_owner\nnext_value\n");
+      execFileSync("objcopy", [`--keep-global-symbols=${keep}`, combined]);
+    }
+    const binary = join(dir, "thread-state");
+    execFileSync("clang", [
+      "-std=c11",
+      "-O2",
+      "-pthread",
+      join(import.meta.dirname, "split-thread-state.test.c"),
+      combined,
+      "-o",
+      binary,
+    ]);
+    expect(execFileSync(binary, { encoding: "utf8", timeout: 10000 })).toBe(
+      "thread state stays isolated across compiled partitions\n",
+    );
+  },
+);
 
 test("shared metadata bounds shard growth while preserving every definition", () => {
   const names = Array.from({ length: 120 }, (_, i) => `metadata_pad_${i}`);
-  const body = names.map((name) =>
-    `define internal i64 @${name}() #0 {\nentry:\n  ; ${"x".repeat(32 * 1024)}\n  ret i64 1\n}\n`,
-  ).join("\n");
-  const source = SAMPLE.replace("define i64 @public_entry", `${body}\ndefine i64 @public_entry`) +
+  const body = names
+    .map(
+      (name) =>
+        `define internal i64 @${name}() #0 {\nentry:\n  ; ${"x".repeat(32 * 1024)}\n  ret i64 1\n}\n`,
+    )
+    .join("\n");
+  const source =
+    SAMPLE.replace("define i64 @public_entry", `${body}\ndefine i64 @public_entry`) +
     `!0 = !{!"${"x".repeat(256 * 1024)}"}\n`;
   const split = splitLlvmProgram(source, { minimumBytes: 0, targetBytes: 64 * 1024 });
   expect(split).not.toBeNull();
   expect(split!.shards.length).toBeGreaterThan(1);
-  expect(split!.shards.reduce((bytes, shard) => bytes + Buffer.byteLength(shard.source), 0))
-    .toBeLessThanOrEqual(2 * Buffer.byteLength(source));
+  expect(
+    split!.shards.reduce((bytes, shard) => bytes + Buffer.byteLength(shard.source()), 0),
+  ).toBeLessThanOrEqual(2 * Buffer.byteLength(source));
   const definitions = split!.shards.flatMap((shard) =>
-    [...shard.source.matchAll(/^define (?:hidden )?i64 @(\w+)\(/gm)].map((match) => match[1]),
+    [...shard.source().matchAll(/^define (?:hidden )?i64 @(\w+)\(/gm)].map((match) => match[1]),
   );
   expect(definitions.sort()).toEqual([...names, "left", "right", "public_entry"].sort());
   expect(split!.publicSymbols).toEqual(["public_value", "public_entry"]);
@@ -103,14 +289,22 @@ test("shared metadata bounds shard growth while preserving every definition", ()
 });
 
 test("debug metadata stays on definitions when splitting LLVM modules", async () => {
-  const debug = new LlvmDebugInfo("/source/main.ts", new Map([["/source/main.ts", "console.log(1);\n"]]));
+  const debug = new LlvmDebugInfo(
+    "/source/main.ts",
+    new Map([["/source/main.ts", "console.log(1);\n"]]),
+  );
   let source = SAMPLE;
   for (const name of ["left", "right", "public_entry"]) {
     const loc = { file: "/source/main.ts", start: 0, end: 1 };
     const scope = debug.function({ name, loc, params: [], locals: [], body: [], returnType: VOID });
     const location = debug.location(loc, scope);
-    source = source.replace(new RegExp(`(@${name}\\(\\) #0) \\{([\\s\\S]*?)\\n\\}`), (_, header: string, body: string) =>
-      `${header} !dbg ${scope} {${body.split("\n").map((line) => line.startsWith("  ") ? `${line}, !dbg ${location}` : line).join("\n")}\n}`,
+    source = source.replace(
+      new RegExp(`(@${name}\\(\\) #0) \\{([\\s\\S]*?)\\n\\}`),
+      (_, header: string, body: string) =>
+        `${header} !dbg ${scope} {${body
+          .split("\n")
+          .map((line) => (line.startsWith("  ") ? `${line}, !dbg ${location}` : line))
+          .join("\n")}\n}`,
     );
   }
   source += debug.render();
@@ -119,18 +313,22 @@ test("debug metadata stays on definitions when splitting LLVM modules", async ()
   const dir = await mkdtemp(join(tmpdir(), "scriptc-debug-split-"));
   scratch.push(dir);
   for (const shard of split!.shards) {
-    expect(shard.source).not.toMatch(/^declare.*!dbg/m);
+    expect(shard.source()).not.toMatch(/^declare.*!dbg/m);
     const path = join(dir, shard.name);
-    await writeFile(path, shard.source);
-    const result = spawnSync("clang", ["-Wno-override-module", "-c", path, "-o", `${path}.o`], { encoding: "utf8" });
+    await writeFile(path, shard.source());
+    const result = spawnSync("clang", ["-Wno-override-module", "-c", path, "-o", `${path}.o`], {
+      encoding: "utf8",
+    });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toBe("");
   }
 });
 
 test("dev libraries split at the measured 2MB crossover while executables retain 4MB", () => {
-  const body = Array.from({ length: 700 }, (_, i) =>
-    `define internal i64 @library_pad_${i}() #0 {\nentry:\n  ; ${"x".repeat(3072)}\n  ret i64 ${i}\n}\n`,
+  const body = Array.from(
+    { length: 700 },
+    (_, i) =>
+      `define internal i64 @library_pad_${i}() #0 {\nentry:\n  ; ${"x".repeat(3072)}\n  ret i64 ${i}\n}\n`,
   ).join("\n");
   const source = SAMPLE.replace("define i64 @public_entry", `${body}\ndefine i64 @public_entry`);
   expect(Buffer.byteLength(source)).toBeGreaterThan(2 * 1024 * 1024);
@@ -143,8 +341,10 @@ test("dev libraries split at the measured 2MB crossover while executables retain
 });
 
 test("every shard compiles and its merged object exposes only canonical public definitions", async () => {
-  const body = Array.from({ length: 120 }, (_, i) =>
-    `define internal i64 @pad_${i}() #0 {\nentry:\n  ; ${"x".repeat(2048)}\n  ret i64 ${i}\n}\n`,
+  const body = Array.from(
+    { length: 120 },
+    (_, i) =>
+      `define internal i64 @pad_${i}() #0 {\nentry:\n  ; ${"x".repeat(2048)}\n  ret i64 ${i}\n}\n`,
   ).join("\n");
   const split = splitLlvmProgram(
     SAMPLE.replace("define i64 @public_entry", `${body}\ndefine i64 @public_entry`),
@@ -156,7 +356,7 @@ test("every shard compiles and its merged object exposes only canonical public d
   for (const shard of split.shards) {
     const source = join(dir, shard.name);
     const object = `${source}.o`;
-    await writeFile(source, shard.source);
+    await writeFile(source, shard.source());
     execFileSync("clang", ["-Wno-override-module", "-c", source, "-o", object]);
     objects.push(object);
   }

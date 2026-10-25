@@ -2,13 +2,13 @@
 title: "Coverage Reports"
 ---
 
-`scriptc coverage` analyzes a program without building an executable. It reports how many executable statements compile statically, which operations require the embedded JavaScript engine, and which operations are unsupported.
+`scriptc coverage` tells you how much of a program compiles before you build it. Use it when you bring an existing Node.js program to scriptc, add a dependency, or want CI to catch unsupported code early. It analyzes the program without producing an executable, counts the statements that compile, and groups anything unsupported by diagnostic code with a location and a hint.
 
-The counts apply to the program being analyzed, not to JavaScript or Node.js support in general. Dependency implementation statements are excluded from these totals.
+<span id="static-programs" />
 
-## Static programs
+## Run a report
 
-The following program compiles entirely to native code:
+Pass the program's entry file:
 
 ```console
 $ cat hello.ts
@@ -20,34 +20,154 @@ $ scriptc coverage hello.ts
   statements analyzed   2
   compile statically    2  (100%)
 
-  fully static — this program has no dynamic remainder.
+  fully static — all analyzed statements compile to native code.
 ```
 
-A static executable does not include a JavaScript engine.
+Every statement in this program compiles, so `scriptc build` will succeed. The counts describe this program only, not JavaScript or Node.js support in general.
 
-## Programs that require dynamic execution
+<span id="report-fields" />
 
-This program imports an npm package whose JavaScript requires the embedded engine:
+## Reading the report
+
+When a program has unsupported operations, the report adds a group for each root cause. A group shows the diagnostic code, the reason, the first few sites in source order, and a hint. A generic declaration that fails for several type arguments appears once.
+
+<table>
+  <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>statements analyzed</code></td><td>Executable statements in application code, excluding dependency implementation code.</td></tr>
+    <tr><td><code>compile statically</code></td><td>Statements that compile to native instructions.</td></tr>
+    <tr><td><code>in dynamic tier</code></td><td>Of those, the statements in functions that operate on values typed only at runtime, such as <code>any</code> values and untyped JavaScript. Shown when there are any. See <a href="#dynamic-tier">Dynamic tier</a>.</td></tr>
+    <tr><td><code>blockers</code></td><td>Unsupported operations with counts, diagnostic codes, reasons, locations, and hints.</td></tr>
+    <tr><td><code>runs at startup</code></td><td>Deferred operations in a JavaScript module's top-level code, which runs when the module loads: at startup for a module the program imports.</td></tr>
+    <tr><td><code>deferred to runtime</code></td><td>Other deferred operations in JavaScript code. Each throws only if it runs.</td></tr>
+    <tr><td><code>in unreached code</code></td><td>Blockers in code the entry never reaches. A build never compiles that code, so these cannot fail it.</td></tr>
+    <tr><td><code>differs from Node</code></td><td>Sites that compile but can behave differently from Node.js. See <a href="#node-divergences">Node divergences</a>.</td></tr>
+    <tr><td><code>npm package compilation</code></td><td>Native package compilation outcomes and refusal reasons.</td></tr>
+  </tbody>
+</table>
+
+Blockers in unreached code and deferred operations in JavaScript packages are listed separately because they don't fail a build. A deferred operation throws a runtime error if it runs, so a successful build doesn't mean every API of a package works; see [unsupported code inside a package](/docs/dependencies#unsupported-code-inside-a-package).
+
+If a function's signature can't compile, the statements in its body count as not compiling, so the percentage reflects how much of the program compiles. The report still lists the diagnostics of those statements; a use of a parameter whose type can't compile reports `SC2004` back to the signature.
+
+<span id="programs-that-require-dynamic-execution" />
+<span id="analyze-with-dynamic" />
+<span id="embedded-nodejs-builtins" />
+
+<span id="dynamic-tier" />
+
+## Dynamic tier
+
+Code that operates on values whose types are known only at runtime, such as `any` values, the result of an untyped `JSON.parse`, or untyped JavaScript, compiles into dynamic-tier functions. They are native code too, but they check types and look up properties at runtime, so they are slower than code with static types. The report's `in dynamic tier` line counts their statements.
+
+`--explain-dynamic` lists those functions and the operation that makes each one dynamic. It also lists the units an unsupported construct would move to the dynamic tier: the binding, field, class, function, or module that has no static representation for the construct, with the diagnostic behind each one. These are the constructs the dynamic tier is planned to compile; today they remain blockers in TypeScript and deferred runtime errors in JavaScript. Add a name, such as `--explain-dynamic=Point`, to show only the matching units. With `--print=diagnostics`, the document gains a `tiers` object with the same information.
+
+`--tier=static-only` keeps every unsupported construct a blocker instead of moving it to the dynamic tier; code that already operates on runtime-typed values compiles as before. Today `auto`, the default, behaves the same way.
+
+### Untyped code that likely runs often
+
+When functions of the program's own files use untyped values and likely run often, `scriptc build` and coverage report them as an `SC6101` warning. For the Benchmarks Game n-body program in plain JavaScript:
 
 ```console
-$ cat cli.ts
-import pc from "picocolors";
+$ scriptc build nbody.js -o nbody
+warning SC6101: 3 functions that likely run often use untyped values, which runs slower than typed code:
+  advance (nbody.js:22): untyped JavaScript file, in a loop
+  energy (nbody.js:40): untyped JavaScript file, in a loop
+  offsetMomentum (nbody.js:12): untyped JavaScript file, in a loop
+  hint: add types to compile these statically; see scriptc coverage --explain-dynamic
 
-console.log(pc.green("hello"));
-
-$ scriptc coverage cli.ts
-
-  statements analyzed   1
-  compile statically    0  (0%)
-
-  runs with --dynamic   2 sites
-      ×1  importing 'picocolors' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there  SC2013
-      ×1  values from the 'picocolors' package run in the embedded dynamic engine, which this build does not include                                SC2013
+The program compiled. Adding types to these functions lets scriptc compile them to faster code.
 ```
 
-The package must be installed before analysis; the quickstart shows [how to install and use it](/docs/quickstart#use-an-npm-dependency).
+Without a profile, a dynamic-tier function counts as likely to run often when a dynamic operation runs on every iteration of one of its loops (a `for` loop's initializer and a `for...of` loop's iterable run once), when a loop calls it, or when it calls itself. A function is named only when its source says why its values are untyped: a value typed `any` (for a `for...of` variable, the value it iterates), an untyped `JSON.parse` result, or an untyped JavaScript file. Dynamic code that runs once, such as setup code that reads an `any` configuration, is not reported, and neither are functions that are dynamic for an operation with no static lowering, which more types would not change.
 
-### Report fields
+The warning names at most five functions, most likely to run often first, and gives the total. A function expression is named by its own name, else by the variable, property or class field it is assigned to, else as `anonymous function`. Dynamic-tier code in npm packages is summarized on one line with each package's function count. A build that comes from the cache repeats the warning. `--no-dynamic-tier-warning` leaves it out, and `--fail-on=dynamic` fails a coverage run on it.
+
+## Diagnostic codes
+
+Coverage and `scriptc build` report the same diagnostic codes. Common ones include:
+
+- `SC2020`: a declared standard-library or Node.js API has no supported compiler implementation.
+- `SC2012`: this API form cannot compile natively.
+- `SC2013`: a package cannot compile natively; inspect the package-specific reason and the [dependency guide](/docs/dependencies).
+- `SC1100`: a value whose type is only known at runtime, such as `unknown`, is used where scriptc needs a specific type. Narrow or cast the value as the diagnostic suggests.
+
+## Node divergences
+
+Some code compiles but can behave differently than under Node.js. Coverage reports the cases it can detect as `SC6xxx` warnings, and `scriptc build` prints the same warnings after a successful build. They never fail a build, but `--fail-on=divergences` can fail a CI job on them.
+
+- `SC6001`: a record passed to, stored as, asserted as, or stored as an array element of a record type with different properties is copied, and the program then writes through the copy or compares it by identity.
+- `SC6002`: values of one record type are built in key orders scriptc cannot track per value, so the type keeps its declaration order, an object literal's key order differs from it, and the program observes the order through `JSON.stringify`, `Object.keys`, `Object.values`, `Object.entries`, `for...in`, or console output.
+- `SC6003`: `localeCompare` compares a string literal outside the built-in Latin-script collation.
+- `SC6004`: a call passes a class instance to a function that casts it to an unrelated class.
+
+## Gating builds and CI
+
+By default, `scriptc coverage` exits with status 0 whenever the program type-checks, so you can use the report to track progress. To fail a CI job instead, add `--fail-on`:
+
+```console
+$ scriptc coverage src/main.ts --fail-on=blockers
+```
+
+`--fail-on=blockers` exits with status 1 when the program has blockers that would fail `scriptc build`. Blockers in unreached code and deferred operations don't count. `--fail-on=divergences` also fails on Node divergences, and `--fail-on=dynamic` also fails on the `SC6101` warning for [untyped code that likely runs often](#untyped-code-that-likely-runs-often). A program that doesn't type-check always exits with status 1.
+
+Coverage caches its result. Running it again on an unchanged program, or after edits that only touch comments, reuses the previous verdict. Set `SCRIPTC_NO_CACHE=1` to turn the cache off.
+
+## Machine-readable diagnostics
+
+For editors, CI annotations, and other tools, `scriptc coverage --print=diagnostics` and `scriptc build --print=diagnostics` write one JSON document to stdout instead of the human-readable report. The exit status is unchanged. The document looks like this:
+
+```json
+{
+  "schema": "scriptc-diagnostics",
+  "schemaVersion": 1,
+  "compilerVersion": "0.3.0",
+  "command": "coverage",
+  "entry": "/work/app/src/main.ts",
+  "success": false,
+  "phase": "compile",
+  "stats": {
+    "statementsTotal": 13,
+    "statementsStatic": 12,
+    "statementsDynamic": 0,
+    "statementsFailed": 1,
+    "functionsSkipped": 0,
+    "percentStatic": 92
+  },
+  "groups": [
+    {
+      "id": "SC1031-c2cc8425",
+      "code": "SC1031",
+      "category": "unsupported",
+      "severity": "error",
+      "scope": "reached",
+      "message": "object destructuring of non-record values (the source is array-typed)",
+      "hint": "...",
+      "count": 1,
+      "primary": { "file": "/work/app/src/main.ts", "line": 13, "column": 7 },
+      "sites": [{ "file": "/work/app/src/main.ts", "line": 13, "column": 7 }]
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "SC1031",
+      "category": "unsupported",
+      "severity": "error",
+      "scope": "reached",
+      "file": "/work/app/src/main.ts",
+      "line": 13,
+      "column": 7,
+      "endLine": 13,
+      "endColumn": 28,
+      "start": 352,
+      "end": 373,
+      "message": "object destructuring of non-record values (the source is array-typed) are not supported yet",
+      "hint": "...",
+      "group": "SC1031-c2cc8425"
+    }
+  ]
+}
+```
 
 <table>
   <thead>
@@ -58,102 +178,61 @@ The package must be installed before analysis; the quickstart shows [how to inst
   </thead>
   <tbody>
     <tr>
-      <td><code>statements analyzed</code></td>
-      <td>Executable statements in the program, excluding dependency implementation code.</td>
+      <td><code>schemaVersion</code></td>
+      <td>Incremented when a field is renamed or removed or its meaning changes. New optional fields, categories, and codes keep the version.</td>
     </tr>
     <tr>
-      <td><code>compile statically</code></td>
-      <td>Statements that compile to native code.</td>
+      <td><code>success</code></td>
+      <td>Coverage: no blockers on the entry path (and, with <code>--fail-on=divergences</code>, no divergences). Build: an artifact was produced, named by <code>artifact</code>.</td>
     </tr>
     <tr>
-      <td><code>runs with --dynamic</code></td>
-      <td>Sites that require the embedded engine. Without <code>--dynamic</code>, these sites are compilation errors. Site counts can differ from statement counts.</td>
+      <td><code>phase</code></td>
+      <td><code>preflight</code> when type checking, configuration, or the module graph stopped the command; <code>compile</code> when blockers remain; <code>native</code> when native code generation or linking failed; otherwise <code>complete</code>.</td>
     </tr>
     <tr>
-      <td><code>blockers</code></td>
-      <td>Unsupported operations, listed with a count, reason, and diagnostic code. Enabling <code>--dynamic</code> does not resolve these blockers.</td>
+      <td><code>stats</code></td>
+      <td>Coverage only, absent after a preflight failure: the report's statement counts. <code>statementsStatic</code> counts every statement that compiles to native code; <code>statementsDynamic</code> is the part of those in dynamic-tier functions.</td>
+    </tr>
+    <tr>
+      <td><code>category</code></td>
+      <td><code>invalid-source</code> (the program has a TypeScript or JSON error), <code>unsupported</code> (valid code scriptc cannot compile yet), <code>divergence</code> (compiles, but can behave differently from Node.js), <code>performance</code> (compiles and behaves as under Node.js, but runs slower than typed code would), <code>environment</code> (project configuration, scriptc's type world, toolchain, or target), or <code>internal</code> (a compiler bug).</td>
+    </tr>
+    <tr>
+      <td><code>severity</code></td>
+      <td><code>error</code>, or <code>warning</code> for divergences.</td>
+    </tr>
+    <tr>
+      <td><code>scope</code></td>
+      <td><code>preflight</code>, <code>reached</code> (fails a build), <code>unreached</code> (code the entry never reaches), or <code>deferred</code> (a JavaScript statement that compiles to a throw of its diagnostic, which happens only if it executes).</td>
+    </tr>
+    <tr>
+      <td><code>line</code>, <code>column</code></td>
+      <td>1-based line and UTF-16 column; <code>start</code> and <code>end</code> are 0-based UTF-16 offsets.</td>
+    </tr>
+    <tr>
+      <td><code>group</code></td>
+      <td>The <code>id</code> of the root-cause group the diagnostic belongs to. A group's <code>primary</code> site is its first in source order.</td>
+    </tr>
+    <tr>
+      <td><code>startup</code></td>
+      <td><code>true</code> on a <code>deferred</code> diagnostic in a module's top-level code, which runs when the module loads. Absent otherwise.</td>
     </tr>
   </tbody>
 </table>
 
-## Analyze with --dynamic
-
-Add `--dynamic` to include dynamic execution in the analysis:
-
-```console
-$ cat cli.ts
-import pc from "picocolors";
-
-console.log(pc.green("hello"));
-
-$ scriptc coverage cli.ts --dynamic
-
-  statements analyzed   1
-  compile statically    0  (0%)
-  compile dynamically   1  (100%) (island sites — the embedded engine runs them)
-
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).
-```
-
-The final line indicates whether the program can build with `--dynamic`. Any remaining blockers are listed in the report.
-
-## Embedded Node.js builtins
-
-When embedded dependencies import Node.js builtin modules, the dynamic report lists each module, its shim status, and the package that imports it.
-
-The [commander example](/docs/dependencies#use-a-package) uses the following source:
-
-```console
-$ cat tool.ts
-import { Command } from "commander";
-
-const program = new Command();
-
-program
-  .name("greet")
-  .argument("<name>", "who to greet")
-  .option("-u, --upper", "use uppercase")
-  .action((name: string, opts: { upper?: boolean }) => {
-    const text = `hello, ${name}`;
-    console.log(opts.upper ? text.toUpperCase() : text);
-  });
-
-program.parse();
-
-$ scriptc coverage tool.ts --dynamic
-
-  statements analyzed   5
-  compile statically    2  (40%)
-  compile dynamically   3  (60%) (island sites — the embedded engine runs them)
-
-  embedded npm code imports Node builtins:
-    node:child_process  shimmed  (commander)
-    node:events         shimmed  (commander)
-    node:fs             shimmed  (commander)
-    node:path           shimmed  (commander)
-    node:process        shimmed  (commander)
-    node:util           shimmed  (commander)
-
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).
-```
-
-Shims provide supported Node.js APIs inside the embedded engine. They are separate implementations from Node.js's modules. See [npm Dependencies](/docs/dependencies#runtime-behavior) and the [Node.js compatibility reference](/compatibility) for their restrictions.
-
-## Diagnostic codes
-
-Coverage uses the same diagnostic codes as `scriptc build`. Common examples include:
-
-- `SC2020`: a declared standard-library or Node.js API has no supported compiler implementation. Use the diagnostic's suggested alternative where available.
-- `SC2013`: a package import or package value requires the embedded engine. Enable `--dynamic`, remove the dependency, or evaluate the experimental [static package options](/docs/dependencies#static-package-compilation-experimental).
-- `SC1100`: a value crosses an unsupported `unknown`/`any` boundary. Narrow or cast the value as directed by the diagnostic.
-
 ## Type errors
 
-Coverage requires a program that typechecks. If type checking fails, the report identifies the errors instead of producing statement counts. Fix those errors before interpreting compilation coverage.
+Coverage needs a program that type-checks. If type checking fails, the report lists the type errors instead of statement counts; fix them first.
+
+scriptc type-checks with its own settings: strict null checks, the ES2025 library, and Node.js types (its bundled declarations when the project has no `@types/node`). An error those settings cause, rather than the project's own `tsc` configuration, carries a hint naming the cause, such as a library member newer than ES2025 or a global of another runtime, and machine-readable output reports it in the `environment` category.
 
 ## External host type declarations
 
-An embedder may provide modules that are absent from `node_modules`. Use `--external-types` to map an exact bare module specifier to the embedder's declaration file during analysis. For example: `scriptc coverage src/core.ts --external-types @native-sdk/core=types/native-sdk-core.d.ts`.
+When your code will run inside a host application that provides its own modules, those modules aren't in `node_modules`. Use `--external-types` to give coverage their declarations so it can analyze the rest of your code:
+
+```console
+$ scriptc coverage src/core.ts --external-types @native-sdk/core=types/native-sdk-core.d.ts
+```
 
 The option is repeatable. Relative declaration paths resolve from the current working directory. Supported declaration extensions are `.d.ts`, `.d.mts`, and `.d.cts`. Relative declaration imports and re-exports are included, so the mapped file can be an `index.d.ts` barrel. Project-owned code using these types participates in coverage; type-only imports add no runtime boundary.
 

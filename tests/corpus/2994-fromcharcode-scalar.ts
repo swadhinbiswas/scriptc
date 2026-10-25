@@ -11,8 +11,8 @@ for (const value of values) {
   const scalar = String.fromCharCode(value);
   const spread = String.fromCharCode(...[value]);
   const bytes = String.fromCharCode(...new Float64Array([value]));
-  // Write lone surrogates as UTF-8 to exercise the runtime's documented
-  // replacement policy without asserting unsupported internal surrogates.
+  // Encoding to UTF-8 writes each lone surrogate as U+FFFD, the same bytes
+  // Node writes.
   console.log(Buffer.from(scalar).toString("hex"), Buffer.from(spread).toString("hex"), Buffer.from(bytes).toString("hex"));
 }
 

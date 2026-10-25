@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4063-cycle-hoisted-calls/odd.ts",
+  "<repo>/tests/corpus/4063-cycle-hoisted-calls/even.ts",
+  "<repo>/tests/corpus/4063-cycle-hoisted-calls/main.ts"
+ ],
+ "diags": []
+}

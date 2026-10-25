@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1615-cjs-export-shapes/table.cjs",
+  "<repo>/tests/corpus/1615-cjs-export-shapes/proxied.cjs",
+  "<repo>/tests/corpus/1615-cjs-export-shapes/main.cjs"
+ ],
+ "diags": []
+}

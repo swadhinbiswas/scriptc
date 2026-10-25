@@ -13,8 +13,8 @@ for (const text of samples) {
   for (const index of indices) show(at(text, index));
 }
 
-// Surrogate-splitting values retain the runtime's documented U+FFFD
-// boundary. These probes test UTF-16 bounds without splitting a pair.
+// These probes test UTF-16 bounds without splitting a pair
+// (4991-lone-surrogate-halves covers splitting).
 show(at("😀x", 2));
 show(at("😀x", 3));
 show(at("😀x", 0.5));

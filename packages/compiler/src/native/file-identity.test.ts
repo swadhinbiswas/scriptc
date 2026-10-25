@@ -18,21 +18,28 @@ test("native tool identity invalidates same-size replacements with preserved mti
     renameSync(replacement, path);
     expect(nativeFileIdentity(path)).not.toBe(first);
     expect(() => nativeFileIdentity(root)).toThrow("not a file");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test.skipIf(process.platform === "win32")("native tool identity follows a retargeted symlink", () => {
-  const root = mkdtempSync(join(tmpdir(), "scriptc-file-symlink-"));
-  try {
-    const current = join(root, "current");
-    const first = join(root, "first");
-    const second = join(root, "second");
-    writeFileSync(first, "same");
-    writeFileSync(second, "same");
-    symlinkSync(first, current);
-    const before = nativeFileIdentity(current);
-    rmSync(current);
-    symlinkSync(second, current);
-    expect(nativeFileIdentity(current)).not.toBe(before);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+test.skipIf(process.platform === "win32")(
+  "native tool identity follows a retargeted symlink",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "scriptc-file-symlink-"));
+    try {
+      const current = join(root, "current");
+      const first = join(root, "first");
+      const second = join(root, "second");
+      writeFileSync(first, "same");
+      writeFileSync(second, "same");
+      symlinkSync(first, current);
+      const before = nativeFileIdentity(current);
+      rmSync(current);
+      symlinkSync(second, current);
+      expect(nativeFileIdentity(current)).not.toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

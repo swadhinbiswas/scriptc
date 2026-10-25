@@ -1,7 +1,12 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { AnalyzeOptions, CompileOptions, CompileExecutableResult, CoverageInput } from "@scriptc/compiler";
+import type {
+  AnalyzeOptions,
+  CompileOptions,
+  CompileExecutableResult,
+  CoverageInput,
+} from "@scriptc/compiler";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -9,29 +14,49 @@ const api = new URL("../../packages/compiler/src/index.ts", import.meta.url).hre
 
 // Large synchronous frontend passes must leave Vitest's worker RPC responsive.
 // Execute the source API in a child and return only JSON-compatible results.
-async function compilerProcess(operation: "analyze" | "compile", entry: string, options: object): Promise<unknown> {
-  const { stdout, stderr } = await execFileAsync(process.execPath, [
-    "--max-old-space-size=8192", "--import", "tsx", "--input-type=module", "--eval",
-    `import { analyze, compile } from ${JSON.stringify(api)};
+async function compilerProcess(
+  operation: "analyze" | "compile",
+  entry: string,
+  options: object,
+): Promise<unknown> {
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [
+      "--max-old-space-size=8192",
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      `import { analyze, compile } from ${JSON.stringify(api)};
      const options = JSON.parse(process.argv[3]);
      const result = process.argv[1] === 'analyze'
        ? analyze(process.argv[2], options).coverage
        : await compile(process.argv[2], options);
      console.log(JSON.stringify(result, (key, value) => key === 'sourceTexts' ? undefined : value));`,
-    operation, entry, JSON.stringify(options),
-  ], { cwd: root, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+      operation,
+      entry,
+      JSON.stringify(options),
+    ],
+    { cwd: root, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 },
+  );
   if (stderr !== "") throw new Error(stderr);
   return JSON.parse(stdout);
 }
 
-export async function analyzeInChild(entry: string, options: AnalyzeOptions): Promise<CoverageInput> {
-  return await compilerProcess("analyze", entry, options) as CoverageInput;
+export async function analyzeInChild(
+  entry: string,
+  options: AnalyzeOptions,
+): Promise<CoverageInput> {
+  return (await compilerProcess("analyze", entry, options)) as CoverageInput;
 }
 
 type ExecutableResult =
   | Extract<CompileExecutableResult, { ok: true }>
   | Omit<Extract<CompileExecutableResult, { ok: false }>, "sourceTexts">;
 
-export async function compileInChild(entry: string, options: CompileOptions): Promise<ExecutableResult> {
-  return await compilerProcess("compile", entry, options) as ExecutableResult;
+export async function compileInChild(
+  entry: string,
+  options: CompileOptions,
+): Promise<ExecutableResult> {
+  return (await compilerProcess("compile", entry, options)) as ExecutableResult;
 }

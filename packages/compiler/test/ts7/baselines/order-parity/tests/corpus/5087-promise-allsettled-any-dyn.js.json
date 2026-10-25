@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5087-promise-allsettled-any-dyn.js"
+ ],
+ "diags": []
+}

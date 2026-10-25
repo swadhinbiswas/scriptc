@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/function-constructor-kinds/consumer.js",
+  "<repo>/tests/corpus/function-constructor-kinds/main.js"
+ ],
+ "diags": []
+}

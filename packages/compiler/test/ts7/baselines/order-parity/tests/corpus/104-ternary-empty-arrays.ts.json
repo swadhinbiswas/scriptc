@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/104-ternary-empty-arrays.ts"
+ ],
+ "diags": []
+}

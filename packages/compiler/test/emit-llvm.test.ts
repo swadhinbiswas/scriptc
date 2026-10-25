@@ -35,7 +35,7 @@ test("strings: literals, concat in a loop, toString, RC-clean under audit", asyn
   // while (i < 3) { acc = acc + ("-" + i); i = i + 1; }
   // console.log(acc, acc === "x-0-1-2", "α∂" < "β");
   const mod: IrModule = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "s.ts",
     entry: "__main",
     functions: [
@@ -53,9 +53,12 @@ test("strings: literals, concat in a loop, toString, RC-clean under audit", asyn
           {
             kind: "while",
             cond: {
-              kind: "bin", op: "<",
+              kind: "bin",
+              op: "<",
               left: { kind: "varRef", localId: "i.0", type: F64, loc },
-              right: num(3), type: BOOL, loc,
+              right: num(3),
+              type: BOOL,
+              loc,
             },
             body: [
               {
@@ -67,17 +70,31 @@ test("strings: literals, concat in a loop, toString, RC-clean under audit", asyn
                   right: {
                     kind: "strConcat",
                     left: str("-"),
-                    right: { kind: "toString", operand: { kind: "varRef", localId: "i.0", type: F64, loc }, type: STRING, loc },
-                    type: STRING, loc,
+                    right: {
+                      kind: "toString",
+                      operand: { kind: "varRef", localId: "i.0", type: F64, loc },
+                      type: STRING,
+                      loc,
+                    },
+                    type: STRING,
+                    loc,
                   },
-                  type: STRING, loc,
+                  type: STRING,
+                  loc,
                 },
                 loc,
               },
               {
                 kind: "assign",
                 localId: "i.0",
-                value: { kind: "bin", op: "+", left: { kind: "varRef", localId: "i.0", type: F64, loc }, right: num(1), type: F64, loc },
+                value: {
+                  kind: "bin",
+                  op: "+",
+                  left: { kind: "varRef", localId: "i.0", type: F64, loc },
+                  right: num(1),
+                  type: F64,
+                  loc,
+                },
                 loc,
               },
             ],
@@ -90,7 +107,14 @@ test("strings: literals, concat in a loop, toString, RC-clean under audit", asyn
               name: "console.log",
               args: [
                 { kind: "varRef", localId: "acc.0", type: STRING, loc },
-                { kind: "strEq", negated: false, left: { kind: "varRef", localId: "acc.0", type: STRING, loc }, right: str("x-0-1-2"), type: BOOL, loc },
+                {
+                  kind: "strEq",
+                  negated: false,
+                  left: { kind: "varRef", localId: "acc.0", type: STRING, loc },
+                  right: str("x-0-1-2"),
+                  type: BOOL,
+                  loc,
+                },
                 { kind: "strCmp", op: "<", left: str("α∂"), right: str("β"), type: BOOL, loc },
               ],
               type: VOID,
@@ -113,7 +137,7 @@ test("short-circuit: right operand of && only evaluates when left is true", asyn
   // if (false && sideEffect()) {} ; if (true || sideEffect()) {}
   // console.log("done")
   const mod: IrModule = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "l.ts",
     entry: "__main",
     functions: [
@@ -123,7 +147,17 @@ test("short-circuit: right operand of && only evaluates when left is true", asyn
         returnType: BOOL,
         locals: [],
         body: [
-          { kind: "exprStmt", expr: { kind: "intrinsic", name: "console.log", args: [{ kind: "strLit", value: "evaluated", type: STRING, loc }], type: VOID, loc }, loc },
+          {
+            kind: "exprStmt",
+            expr: {
+              kind: "intrinsic",
+              name: "console.log",
+              args: [{ kind: "strLit", value: "evaluated", type: STRING, loc }],
+              type: VOID,
+              loc,
+            },
+            loc,
+          },
           { kind: "return", value: { kind: "boolLit", value: true, type: BOOL, loc }, loc },
         ],
         loc,
@@ -136,15 +170,47 @@ test("short-circuit: right operand of && only evaluates when left is true", asyn
         body: [
           {
             kind: "if",
-            cond: { kind: "logical", op: "&&", left: { kind: "boolLit", value: false, type: BOOL, loc }, right: { kind: "call", callee: "sideEffect", args: [], type: BOOL, loc }, type: BOOL, loc },
-            then: [{ kind: "exprStmt", expr: { kind: "intrinsic", name: "console.log", args: [num(1)], type: VOID, loc }, loc }],
+            cond: {
+              kind: "logical",
+              op: "&&",
+              left: { kind: "boolLit", value: false, type: BOOL, loc },
+              right: { kind: "call", callee: "sideEffect", args: [], type: BOOL, loc },
+              type: BOOL,
+              loc,
+            },
+            then: [
+              {
+                kind: "exprStmt",
+                expr: { kind: "intrinsic", name: "console.log", args: [num(1)], type: VOID, loc },
+                loc,
+              },
+            ],
             else_: null,
             loc,
           },
           {
             kind: "if",
-            cond: { kind: "logical", op: "||", left: { kind: "boolLit", value: true, type: BOOL, loc }, right: { kind: "call", callee: "sideEffect", args: [], type: BOOL, loc }, type: BOOL, loc },
-            then: [{ kind: "exprStmt", expr: { kind: "intrinsic", name: "console.log", args: [{ kind: "strLit", value: "done", type: STRING, loc }], type: VOID, loc }, loc }],
+            cond: {
+              kind: "logical",
+              op: "||",
+              left: { kind: "boolLit", value: true, type: BOOL, loc },
+              right: { kind: "call", callee: "sideEffect", args: [], type: BOOL, loc },
+              type: BOOL,
+              loc,
+            },
+            then: [
+              {
+                kind: "exprStmt",
+                expr: {
+                  kind: "intrinsic",
+                  name: "console.log",
+                  args: [{ kind: "strLit", value: "done", type: STRING, loc }],
+                  type: VOID,
+                  loc,
+                },
+                loc,
+              },
+            ],
             else_: null,
             loc,
           },
@@ -161,7 +227,7 @@ test("string params: callee owns and releases; returns transfer ownership", asyn
   // function greet(who: string): string { return "hi " + who; }
   // console.log(greet("world"));
   const mod: IrModule = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "p.ts",
     entry: "__main",
     functions: [
@@ -177,7 +243,8 @@ test("string params: callee owns and releases; returns transfer ownership", asyn
               kind: "strConcat",
               left: { kind: "strLit", value: "hi ", type: STRING, loc },
               right: { kind: "varRef", localId: "who.0", type: STRING, loc },
-              type: STRING, loc,
+              type: STRING,
+              loc,
             },
             loc,
           },
@@ -195,8 +262,17 @@ test("string params: callee owns and releases; returns transfer ownership", asyn
             expr: {
               kind: "intrinsic",
               name: "console.log",
-              args: [{ kind: "call", callee: "greet", args: [{ kind: "strLit", value: "world", type: STRING, loc }], type: STRING, loc }],
-              type: VOID, loc,
+              args: [
+                {
+                  kind: "call",
+                  callee: "greet",
+                  args: [{ kind: "strLit", value: "world", type: STRING, loc }],
+                  type: STRING,
+                  loc,
+                },
+              ],
+              type: VOID,
+              loc,
             },
             loc,
           },

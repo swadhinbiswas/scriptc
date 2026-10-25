@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3138-array-large-storage.ts"
+ ],
+ "diags": []
+}

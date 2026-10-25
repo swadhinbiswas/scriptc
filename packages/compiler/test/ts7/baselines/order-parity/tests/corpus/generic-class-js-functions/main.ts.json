@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/generic-class-js-functions/functions.js",
+  "<repo>/tests/corpus/generic-class-js-functions/main.ts"
+ ],
+ "diags": []
+}

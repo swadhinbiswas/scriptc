@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4089-class-wrapper-tdz.js"
+ ],
+ "diags": []
+}

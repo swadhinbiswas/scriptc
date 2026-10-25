@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5243-event-target-subclass-dynamic.ts"
+ ],
+ "diags": []
+}

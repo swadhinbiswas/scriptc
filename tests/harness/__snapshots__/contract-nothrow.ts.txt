@@ -1,0 +1,35 @@
+contract-nothrow.ts:11:35 - error SC7001: 'sumDigits' is declared NoThrow but may throw: calls 'parseDigit' at contract-nothrow.ts:13:48 → throw statement at contract-nothrow.ts:7:29
+
+  10 | 
+  11 | function sumDigits(text: string): NoThrow<number> {
+     |                                   ^~~~~~~~~~~~~~~
+  12 |   let sum = 0;
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
+
+contract-nothrow.ts:17:28 - error SC7001: 'depth' is declared NoThrow but may throw: can recurse (directly or through callbacks), so the stack guard may throw RangeError at contract-nothrow.ts:17:1
+
+  16 | 
+  17 | function depth(n: number): NoThrow<number> {
+     |                            ^~~~~~~~~~~~~~~
+  18 |   return n <= 0 ? 0 : 1 + depth(n - 1);
+
+  hint: remove the recursion or remove NoThrow; a recursive function's stack guard throws on entry, outside any try/catch
+
+contract-nothrow.ts:21:54 - error SC7001: 'apply' is declared NoThrow but may throw: calls a function value at contract-nothrow.ts:22:10, and the function value 'the function at contract-nothrow.ts:33:71' may throw → calls 'parseDigit' at contract-nothrow.ts:33:78 → throw statement at contract-nothrow.ts:7:29
+
+  20 | 
+  21 | function apply(f: (x: number) => number, x: number): NoThrow<number> {
+     |                                                      ^~~~~~~~~~~~~~~
+  22 |   return f(x);
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
+
+contract-nothrow.ts:28:31 - error SC7001: 'width' is declared NoThrow but may throw: throws TypeError: Cannot read properties of undefined (reading 'length') at contract-nothrow.ts:29:10 (parameter 'text' is compiled as string | undefined: the argument at contract-nothrow.ts:34:19 can be missing)
+
+  27 | // parameter is compiled as `string | undefined` and the read can throw.
+  28 | function width(text: string): NoThrow<number> {
+     |                               ^~~~~~~~~~~~~~~
+  29 |   return text.length;
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow

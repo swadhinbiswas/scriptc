@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4453-int32-closed-locals.ts"
+ ],
+ "diags": []
+}

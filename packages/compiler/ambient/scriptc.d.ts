@@ -5,7 +5,7 @@
  * without a lowering is a SC2020 diagnostic at its use site. This file
  * declares only what that ES-only library does not:
  *
- * 1. scriptc's own primitives (comptime, __island_eval).
+ * 1. scriptc's own primitives (comptime).
  * 2. The RequestInfo type alias, supplied by the default DOM lib in ordinary
  *    TypeScript projects but absent from @types/node's globals.
  * 3. setTimeout/clearTimeout and the Timeout handle (Node/dyn territory the
@@ -13,6 +13,9 @@
  *    they MERGE as overloads instead of colliding — the Timeout handle maps
  *    to the numeric timer id either way, and .unref()/.ref()/.hasRef() are
  *    loop-liveness bookkeeping).
+ * 4. The WebAssembly namespace and BufferSource, which the DOM library
+ *    supplies in ordinary TypeScript projects (types only; every reached
+ *    use of the API is refused at its site).
  *
  * This file ships to EVERY program scriptc builds — the lowering program
  * and preflight's project-world second-chance program alike (a project
@@ -45,7 +48,23 @@ interface TextDecoder {
   readonly encoding: string;
   readonly fatal: boolean;
   readonly ignoreBOM: boolean;
-  decode(input?: ArrayBuffer | DataView | Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array | BigInt64Array | BigUint64Array, options?: { stream?: boolean }): string;
+  decode(
+    input?:
+      | ArrayBuffer
+      | DataView
+      | Int8Array
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int16Array
+      | Uint16Array
+      | Int32Array
+      | Uint32Array
+      | Float32Array
+      | Float64Array
+      | BigInt64Array
+      | BigUint64Array,
+    options?: { stream?: boolean },
+  ): string;
 }
 
 /* The timer handle — setTimeout's return, mapped to the numeric timer id.
@@ -76,7 +95,11 @@ declare function setTimeout(callback: (value?: unknown) => void, ms?: number): T
  * any function shape (never[] rest — parameter-contravariance's bottom);
  * the delivered call rides the checked-dynamic boundary, so each argument
  * is validated against the callback's real signature at fire time. */
-declare function setTimeout(callback: (...args: never[]) => void, ms?: number, ...args: unknown[]): Timeout;
+declare function setTimeout(
+  callback: (...args: never[]) => void,
+  ms?: number,
+  ...args: unknown[]
+): Timeout;
 declare function clearTimeout(handle?: Timeout | number | null | undefined): void;
 
 /* Compile-time evaluation. The callback must be an inline arrow/function
@@ -89,10 +112,133 @@ declare function clearTimeout(handle?: Timeout | number | null | undefined): voi
  * differential harness verifies this with a `comptime = (f) => f()` shim). */
 declare function comptime<T>(compute: () => T): T;
 
-/* INTERNAL TESTING HOOK — not part of the supported surface, deliberately
- * undocumented. Evaluates `code` in the embedded dynamic-island engine and
- * returns String(result); island exceptions arrive as catchable errors.
- * Requires --dynamic (a clean diagnostic otherwise). This exists to prove
- * the engine embed end-to-end in tests; user-facing constructs will lower
- * to the island through their own paths, not through this. */
-declare function __island_eval(code: string): string;
+/* The JavaScript WebAssembly API, as the DOM library declares it (scriptc's
+ * ES-only type world never loads lib.dom, and @types/node leaves it to
+ * lib.dom). Packages whose declarations name these types (quickjs-wasi,
+ * photon-node, ...) typecheck against them. These are types only: the
+ * type mapper gives every type declared here the checked-dynamic
+ * representation, and the lowerer refuses each reached use of the API with
+ * a located diagnostic (frontend/lowering/builtins/webassembly.ts).
+ * BufferSource admits every ArrayBufferView, as lib.dom did before
+ * TypeScript 5.7: Node's Buffer types are views over ArrayBufferLike. */
+type BufferSource = ArrayBufferView | ArrayBuffer;
+declare namespace WebAssembly {
+  interface CompileError extends Error {}
+  var CompileError: {
+    prototype: CompileError;
+    new (message?: string): CompileError;
+    (message?: string): CompileError;
+  };
+  interface Global<T extends ValueType = ValueType> {
+    value: ValueTypeMap[T];
+    valueOf(): ValueTypeMap[T];
+  }
+  var Global: {
+    prototype: Global;
+    new <T extends ValueType = ValueType>(
+      descriptor: GlobalDescriptor<T>,
+      v?: ValueTypeMap[T],
+    ): Global<T>;
+  };
+  interface Instance {
+    readonly exports: Exports;
+  }
+  var Instance: {
+    prototype: Instance;
+    new (module: Module, importObject?: Imports): Instance;
+  };
+  interface LinkError extends Error {}
+  var LinkError: {
+    prototype: LinkError;
+    new (message?: string): LinkError;
+    (message?: string): LinkError;
+  };
+  interface Memory {
+    readonly buffer: ArrayBuffer;
+    grow(delta: number): number;
+  }
+  var Memory: {
+    prototype: Memory;
+    new (descriptor: MemoryDescriptor): Memory;
+  };
+  interface Module {}
+  var Module: {
+    prototype: Module;
+    new (bytes: BufferSource): Module;
+    customSections(moduleObject: Module, sectionName: string): ArrayBuffer[];
+    exports(moduleObject: Module): ModuleExportDescriptor[];
+    imports(moduleObject: Module): ModuleImportDescriptor[];
+  };
+  interface RuntimeError extends Error {}
+  var RuntimeError: {
+    prototype: RuntimeError;
+    new (message?: string): RuntimeError;
+    (message?: string): RuntimeError;
+  };
+  interface Table {
+    readonly length: number;
+    get(index: number): any;
+    grow(delta: number, value?: any): number;
+    set(index: number, value?: any): void;
+  }
+  var Table: {
+    prototype: Table;
+    new (descriptor: TableDescriptor, value?: any): Table;
+  };
+  interface GlobalDescriptor<T extends ValueType = ValueType> {
+    mutable?: boolean;
+    value: T;
+  }
+  interface MemoryDescriptor {
+    initial: number;
+    maximum?: number;
+    shared?: boolean;
+  }
+  interface ModuleExportDescriptor {
+    kind: ImportExportKind;
+    name: string;
+  }
+  interface ModuleImportDescriptor {
+    kind: ImportExportKind;
+    module: string;
+    name: string;
+  }
+  interface TableDescriptor {
+    element: TableKind;
+    initial: number;
+    maximum?: number;
+  }
+  interface ValueTypeMap {
+    anyfunc: Function;
+    externref: any;
+    f32: number;
+    f64: number;
+    i32: number;
+    i64: bigint;
+    v128: never;
+  }
+  interface WebAssemblyInstantiatedSource {
+    instance: Instance;
+    module: Module;
+  }
+  type ImportExportKind = "function" | "global" | "memory" | "table";
+  type TableKind = "anyfunc" | "externref";
+  type ExportValue = Function | Global | Memory | Table;
+  type Exports = Record<string, ExportValue>;
+  type ImportValue = ExportValue | number;
+  type Imports = Record<string, ModuleImports>;
+  type ModuleImports = Record<string, ImportValue>;
+  type ValueType = keyof ValueTypeMap;
+  function compile(bytes: BufferSource): Promise<Module>;
+  function compileStreaming(source: Response | PromiseLike<Response>): Promise<Module>;
+  function instantiate(
+    bytes: BufferSource,
+    importObject?: Imports,
+  ): Promise<WebAssemblyInstantiatedSource>;
+  function instantiate(moduleObject: Module, importObject?: Imports): Promise<Instance>;
+  function instantiateStreaming(
+    source: Response | PromiseLike<Response>,
+    importObject?: Imports,
+  ): Promise<WebAssemblyInstantiatedSource>;
+  function validate(bytes: BufferSource): boolean;
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/constructed-class-dispatch.ts"
+ ],
+ "diags": []
+}

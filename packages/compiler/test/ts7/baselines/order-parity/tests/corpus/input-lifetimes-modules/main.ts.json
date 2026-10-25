@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/input-lifetimes-modules/model.ts",
+  "<repo>/tests/corpus/input-lifetimes-modules/helpers.ts",
+  "<repo>/tests/corpus/input-lifetimes-modules/main.ts"
+ ],
+ "diags": []
+}

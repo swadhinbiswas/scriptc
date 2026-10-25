@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/752-cycle-classes.ts"
+ ],
+ "diags": []
+}

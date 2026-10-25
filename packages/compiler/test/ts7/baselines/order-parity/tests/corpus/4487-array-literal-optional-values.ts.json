@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4487-array-literal-optional-values.ts"
+ ],
+ "diags": []
+}

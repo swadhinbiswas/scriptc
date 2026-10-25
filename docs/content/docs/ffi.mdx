@@ -2,26 +2,11 @@
 title: "Native FFI"
 ---
 
-Outbound FFI lets statically compiled TypeScript call C ABI symbols directly. A strict JSON manifest connects a signature-only TypeScript declaration to a native symbol and supplies the archives or objects that resolve it at link time. There is no runtime symbol lookup and no JavaScript engine at the boundary.
+Native FFI lets a compiled program call functions in C libraries. Use it when your program needs an existing native library, a platform API, or a small helper you write in C. You declare the function in TypeScript, describe its C signature in a JSON manifest, and scriptc links the native code into the executable at build time.
 
-## Replacing a Node-API addon
+## Call a C function
 
-A Node-API addon exposes JavaScript functions through callbacks that take `napi_env` and `napi_callback_info`. To use its native operation through FFI, extract that operation into a plain C ABI function. Build the function into an object file or static archive, and bind its C signature in the manifest. Keep the Node-API registration and JavaScript value conversion in a separate wrapper if you also publish a Node addon. Renaming a `.node` file or linking an archive that still calls `napi_*` does not remove its dependency on Node. See [native addon limitations](/docs/limitations#native-addons).
-
-For example, an addon client might call a small numeric helper like this:
-
-```ts:addon-client.ts
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-const native = require("./native.node") as {
-  scale(value: number): number;
-};
-
-console.log(native.scale(21));
-```
-
-Replace the addon import and method call with a signature-only TypeScript declaration and a direct call. The declaration gives the type checker its ordinary source-level signature; it emits no JavaScript body.
+Declare the function in TypeScript without a body. The declaration gives the type checker its signature:
 
 ```ts:main.ts
 declare function nativeScale(value: number): number;
@@ -29,7 +14,7 @@ declare function nativeScale(value: number): number;
 console.log(nativeScale(21));
 ```
 
-Implement a C ABI symbol with the matching native signature:
+Implement the function in C:
 
 ```c:native.c
 double native_scale(double value) {
@@ -37,7 +22,7 @@ double native_scale(double value) {
 }
 ```
 
-Bind the two names in an FFI manifest. Library paths are resolved relative to this file.
+Connect the two names in a manifest. `params` and `returns` give the C types, and `libraries` lists the objects or archives to link, relative to the manifest:
 
 ```json:ffi.json
 {
@@ -55,7 +40,7 @@ Bind the two names in an FFI manifest. Library paths are resolved relative to th
 }
 ```
 
-Build the native archive, then pass the manifest to scriptc:
+Build the C code into an archive, then pass the manifest to scriptc with `--ffi`:
 
 ```console
 $ clang -c native.c -o native.o
@@ -65,11 +50,34 @@ $ ./app
 42
 ```
 
-The FFI binding applies only to a direct call of that exact declaration. A function with a body, an overload, a generic declaration, an alias such as `const f = nativeScale`, or a shadowing local does not silently become a native call.
+Only direct calls to that exact declaration become native calls. A function with a body, an overload, a generic declaration, an alias such as `const f = nativeScale`, or a shadowing local stays an ordinary TypeScript function.
+
+For C++, export the function with `extern "C"` so it keeps an unmangled name. Pass the same manifest to `scriptc coverage` so the native calls count as compiled.
+
+<span id="replacing-a-node-api-addon" />
+
+## Replace a Node-API addon
+
+Compiled programs can't load Node-API (`.node`) addons, because those depend on Node.js itself. To keep using an addon's native code, move the operation into a plain C function and call it through FFI. If you also publish the addon for Node.js, keep the Node-API registration and value conversion in a separate wrapper.
+
+For example, a program that calls a small numeric helper from an addon:
+
+```ts:addon-client.ts
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const native = require("./native.node") as {
+  scale(value: number): number;
+};
+
+console.log(native.scale(21));
+```
+
+becomes the `nativeScale` declaration and direct call shown in [Call a C function](#call-a-c-function), with the helper's logic in `native_scale`. Renaming a `.node` file, or linking an archive that still calls `napi_*` functions, doesn't remove its dependency on Node.js. See [native addon limitations](/docs/limitations#native-addons).
 
 ## ABI classes
 
-The manifest is the native ABI authority. TypeScript has only `number`, so its declaration cannot distinguish a double from an integer-width parameter.
+Each parameter and result in the manifest has an ABI class that names its C type. TypeScript has only `number`, so the manifest, not the declaration, decides whether a value crosses as a double or as an integer of a specific width.
 
 <table>
   <thead>
@@ -175,66 +183,11 @@ Set <code>ffi_format</code> to <code>6</code> to use the additional scalar width
 
 Set <code>ffi_format</code> to <code>7</code> for <code>i64</code>, <code>u64</code>, and <code>pointer</code>. These classes use TypeScript <code>bigint</code> and the C types <code>int64_t</code>, <code>uint64_t</code>, and <code>void *</code>. Integer inputs use the low 64 bits; pointer inputs use the low pointer-width bits. Results preserve every bit without conversion through a JavaScript number. They work in direct calls and same-thread callbacks, including retained callbacks. Foreign-thread callback parameters using these classes remain refused.
 
-For C++, export the symbol with `extern "C"` so it keeps the manifest's unmangled C name.
-
 For operating-system helpers, wrap the system call in a fixed-signature C function too. For example, Linux's variadic `prctl` needs a wrapper that supplies its operation and trailing arguments. A wrapper returning C `int32_t` uses the manifest's `i32` return class and a TypeScript `number`; check its error result in TypeScript before using the value. Build the object or archive for the same target as the scriptc binary.
-
-## Static bindings for node:ffi
-
-JavaScript packages that load `node:ffi` through `createRequire` can use a format 7 catalog. Add a `library` string to each function to expose it through `ffi.dlopen`. The string must match the library argument used by the package; the native implementation comes from the manifest's linked objects or archives. No JavaScript engine, runtime library loader, or executable-memory allocation is involved.
-
-```json:ffi.json
-{
-  "ffi_format": 7,
-  "libraries": ["./native.o"],
-  "functions": [
-    {
-      "name": "nativeU64",
-      "symbol": "native_u64",
-      "library": "native",
-      "params": ["u64"],
-      "returns": "u64"
-    }
-  ]
-}
-```
-
-```c:native.c
-#include <stdint.h>
-uint64_t native_u64(uint64_t value) { return value; }
-```
-
-```js:app.mjs
-import { createRequire } from "node:module";
-const ffi = createRequire(import.meta.url)("node:ffi");
-const { lib, functions } = ffi.dlopen("native", {
-  nativeU64: { arguments: ["u64"], return: "u64" }
-});
-console.log(functions.nativeU64(9007199254740993n));
-lib.close();
-```
-
-Catalog entries support scalar and pointer signatures. Each requested symbol must have the compiled argument and return types. Calls check arity and integer ranges, and 64-bit arguments must be bigints. In this Node API, `bool` is an alias for `u8`, so its arguments and results are numbers. The direct manifest API retains its boolean convention.
-
-Pointer arguments accept a non-negative bigint address, an ArrayBuffer or view, a NUL-free UTF-8 string, or nullish values for a null pointer. Storage stays alive during the call. `getRawPointer` returns an ArrayBuffer or view's address, including a view's byte offset. `toArrayBuffer(pointer, length)` copies memory; passing `false` as its third argument creates a borrowed view. The caller must keep foreign memory valid for the entire lifetime of a borrowed view and must supply a readable range.
-
-For packages that call `lib.registerCallback`, declare each callback signature in the root `callbacks` array:
-
-```json
-"callbacks": [
-  { "library": "native", "params": ["u64"], "returns": "u64", "capacity": 16 }
-]
-```
-
-The compiler emits a fixed pool of native function pointers for each signature. Capacity defaults to 16 and may be 1–256. Registrations occupy independent slots; unregistering a callback or closing its library releases its slots. Exhausting the compiled capacity throws. These callbacks run on the registering script thread; calling one from a foreign thread is unsupported. Native code must stop using a callback pointer before unregistering it or closing its library. Closing a library also makes its saved function wrappers reject further calls.
-
-Callback returns undergo the same scalar range checks; pointer returns must be nullish or a non-negative bigint. Callback exceptions follow scriptc's deferred exception contract: the native call receives a zero result, and the exception reaches the calling script frame when that native call returns.
-
-On Darwin targets, a format 7 manifest may name system frameworks in `frameworks`, such as `["Foundation"]`. Objects and archives still belong in `libraries`, and ordinary system libraries belong in `system_libraries`.
 
 ## Callbacks and context pointers
 
-Format 2 adds call-scoped C function-pointer parameters. It describes the function pointer and opaque context as independent ABI entries, in their actual positions—matching the model used by C, Rust's `extern "C" fn` plus `*mut c_void`, and Zig's `*const fn (...) callconv(.c)` plus `*anyopaque`.
+Many C APIs take a function pointer and an opaque `void *` context that they pass back to the callback. Format 2 lets you pass a TypeScript function in that position. The manifest describes the function pointer and the context as separate entries, each in its actual position in the C signature.
 
 For example, this C function takes a callback first, a value second, and its context last. The callback itself receives the context last:
 
@@ -286,11 +239,13 @@ The callback id connects the two independently positioned context entries. Both 
 }
 ```
 
-A callback descriptor consumes one TypeScript function parameter and one native function-pointer slot. A context entry consumes no TypeScript parameter and one native `void *` slot. Formats 2 through 5 accept `f64`, `bool`, `u8`, `u32`, and `i32` callback parameters plus at most one context entry. Formats 3 through 5 additionally accept `cstring`, `string`, and `bytes`; callback returns remain scalar or `void`.
+A callback descriptor consumes one TypeScript function parameter and one native function-pointer slot. A context entry consumes no TypeScript parameter and one native `void *` slot. Callback parameters can use `f64`, `bool`, `u8`, `u32`, and `i32` from format 2, `cstring`, `string`, and `bytes` from format 3, and the classes added by formats 6 and 7 as described in [ABI classes](#abi-classes), plus at most one context entry. Callback returns are scalar or `void`.
 
 Format 3 string-bearing callback parameters copy native data before the closure runs. `cstring` reads one non-null, NUL-terminated `const char *`. `string` and `bytes` each consume a `const uint8_t *, size_t` pair; a null pointer is valid only when its length is zero. Text is decoded as UTF-8 with malformed sequences replaced by U+FFFD, matching `Buffer.toString("utf8")`. The resulting string or `Uint8Array` is freshly owned scriptc storage, so the closure may retain it without depending on the native buffer's lifetime. An unexpected null `cstring`, or a null non-empty span, traps at the boundary instead of being treated as empty.
 
 For a raw call-scoped C callback type with no userdata, omit the context entry from both parameter lists. scriptc installs that closure in a binding-specific thread-local slot around the native call, so captures and nested calls still work.
+
+### Retained callbacks
 
 Format 4 adds `lifetime: "retained"` for same-thread native APIs that store a callback and invoke it from a later FFI call. Registration pins the closure and its captures. A paired release binding passes the same trampoline and closure context back to native code, then unpins one matching registration after the native call returns:
 
@@ -340,9 +295,11 @@ timerRemove(tick);
 
 The release argument must be the same function value used for registration. Registrations to a context-bearing descriptor are counted: registering the same closure twice requires two releases. A raw descriptor's slot has replace semantics instead — every set call supersedes the previous registration, including one that passes the already-registered closure, so exactly one release is ever pending for that descriptor. Releasing an unregistered value traps because native code may still hold the original pointer — the trap fires before the native release call runs, so native code never observes the invalid release. The callback's function type must be exact at retained call sites; an implicit wrapper would create a different pointer and make release identity unsound. An inline function literal as a release argument is rejected for the same reason: it creates a fresh closure at every evaluation, a pointer no registration holds — pass the same named value used to register. Registering an inline literal remains legal; such a registration is simply permanent and is dropped by the exit teardown. A single binding cannot both register and release the same descriptor — the manifest loader rejects a `release` targeting a retained callback declared in the same function's parameter list, because the register-then-release ordering within one call would defeat the pre-call release validation.
 
-Context-bearing descriptors support multiple concurrent closures. A raw retained descriptor has no context pointer, so it has one slot on the script thread with replace semantics: the previous registration stays live and dispatching until the replacing set call returns (a native setter that flushes the outgoing callback mid-replace still reaches the old closure), then it is released and the slot commits to the new closure. Script-thread retained registrations do not keep the event loop alive; format 5 foreign registrations do. At process exit, `process` `'exit'` listeners run first — they may still release registrations or pump script-thread callbacks on every exit path. Foreign posting is disarmed when the loop stops, so a straggling native post is silently dropped. On exits that run atexit handlers, the runtime then drops the remaining registrations and disarms raw slots; `process.exit()` terminates immediately after its listeners and skips that sweep, leaving remaining registrations to the operating system. A raw-slot invocation after teardown traps instead of reaching a freed closure. A context-bearing registration has no slot to disarm — its trampoline and context pointer dangle once teardown frees the closure — so native code must not invoke one after exit; a library that can fire on its own exit path should have its registrations released from a `process` `'exit'` listener.
+Context-bearing descriptors support multiple concurrent closures. A raw retained descriptor has no context pointer, so it has one slot on the script thread with replace semantics: the previous registration stays live and dispatching until the replacing set call returns (a native setter that flushes the outgoing callback mid-replace still reaches the old closure), then it is released and the slot commits to the new closure. Script-thread retained registrations do not keep the event loop alive; format 5 foreign registrations do. At process exit, `process` `'exit'` listeners run first — they may still release registrations or pump script-thread callbacks on every exit path. Foreign posting is disarmed when the loop stops, so a straggling native post is dropped without an error. On exits that run atexit handlers, the runtime then drops the remaining registrations and disarms raw slots; `process.exit()` terminates immediately after its listeners and skips that sweep, leaving remaining registrations to the operating system. A raw-slot invocation after teardown traps instead of reaching a freed closure. A context-bearing registration has no slot to disarm — its trampoline and context pointer dangle once teardown frees the closure — so native code must not invoke one after exit; a library that can fire on its own exit path should have its registrations released from a `process` `'exit'` listener.
 
 Retained identity is scoped to the declaring binding. Every retained callback parameter is its own descriptor: the `<binding>:<callback-id>` pair names one registration ledger, one generated trampoline, and (for a raw descriptor) one slot, and a release binding validates and unpins only registrations made through the binding its `release` reference targets. Two bindings that store into the same native state — a plain setter and a flush-on-replace setter for one native slot, say — are therefore independent descriptors that pass native code two different function pointers. Registering the same function value through both and then releasing it through one is unsound: the release unpins in its own descriptor's ledger, but native code compares stored pointers against the other descriptor's trampoline, so the surviving registration stays armed and keeps dispatching — nothing traps, and the callback keeps firing after the program believes it released it. Keep a function value registered with one such native registration point through exactly one binding at a time, and release it through that binding's paired release.
+
+### Callbacks from other threads
 
 Format 5 adds `invoke: "foreign"` to a retained, context-bearing callback descriptor for libraries that invoke the callback from their own threads:
 
@@ -376,31 +333,92 @@ The native trampoline never runs script code. It copies scalar values and native
 
 Foreign delivery is deliberately fire-and-forget. It requires `lifetime: "retained"`, `returns: "void"`, and a context entry. Value-returning foreign callbacks would have to block the library thread on the script loop and are refused as deadlock-prone. Delivery takes at least one loop turn and is not suitable for real-time work such as audio DSP. Direct execution of script closures on native threads remains permanently unsupported because reference counting, exception cells, and fibers are thread-confined. Dereferenceable struct callback parameters are also unsupported; use an opaque native handle with accessor functions when the API permits it.
 
+### Exceptions in callbacks
+
 If a script-thread callback throws, the adapter returns zero (or `void`) to native code and suppresses further script callback execution while the exception is pending. When the outer native function returns, the original exception resumes through scriptc's ordinary catchable unwind path. Native work performed between the callback's return and the outer function's return is not rolled back. A foreign callback's native trampoline has already returned before its closure runs; a throw therefore follows event-loop callback semantics instead.
+
+## Static bindings for node:ffi
+
+JavaScript packages that load `node:ffi` through `createRequire` can run unchanged with a format 7 manifest. Add a `library` string to each function to make it available through `ffi.dlopen`. The string must match the library name the package passes to `dlopen`; the implementation comes from the objects or archives the manifest links, so nothing is loaded at runtime.
+
+```json:ffi.json
+{
+  "ffi_format": 7,
+  "libraries": ["./native.o"],
+  "functions": [
+    {
+      "name": "nativeU64",
+      "symbol": "native_u64",
+      "library": "native",
+      "params": ["u64"],
+      "returns": "u64"
+    }
+  ]
+}
+```
+
+```c:native.c
+#include <stdint.h>
+uint64_t native_u64(uint64_t value) { return value; }
+```
+
+```js:app.mjs
+import { createRequire } from "node:module";
+const ffi = createRequire(import.meta.url)("node:ffi");
+const { lib, functions } = ffi.dlopen("native", {
+  nativeU64: { arguments: ["u64"], return: "u64" }
+});
+console.log(functions.nativeU64(9007199254740993n));
+lib.close();
+```
+
+Catalog entries support scalar and pointer signatures. Each requested symbol must have the compiled argument and return types. Calls check arity and integer ranges, and 64-bit arguments must be bigints. In this Node API, `bool` is an alias for `u8`, so its arguments and results are numbers. The direct manifest API retains its boolean convention.
+
+Pointer arguments accept a non-negative bigint address, an ArrayBuffer or view, a NUL-free UTF-8 string, or nullish values for a null pointer. Storage stays alive during the call. `getRawPointer` returns an ArrayBuffer or view's address, including a view's byte offset. `toArrayBuffer(pointer, length)` copies memory; passing `false` as its third argument creates a borrowed view. The caller must keep foreign memory valid for the entire lifetime of a borrowed view and must supply a readable range.
+
+For packages that call `lib.registerCallback`, declare each callback signature in the root `callbacks` array:
+
+```json
+"callbacks": [
+  { "library": "native", "params": ["u64"], "returns": "u64", "capacity": 16 }
+]
+```
+
+The compiler emits a fixed pool of native function pointers for each signature. Capacity defaults to 16 and may be 1–256. Registrations occupy independent slots; unregistering a callback or closing its library releases its slots. Exhausting the compiled capacity throws. These callbacks run on the registering script thread; calling one from a foreign thread is unsupported. Native code must stop using a callback pointer before unregistering it or closing its library. Closing a library also makes its saved function wrappers reject further calls.
+
+Callback returns undergo the same scalar range checks; pointer returns must be nullish or a non-negative bigint. Callback exceptions follow scriptc's deferred exception contract: the native call receives a zero result, and the exception reaches the calling script frame when that native call returns.
+
+On Darwin targets, a format 7 manifest may name system frameworks in `frameworks`, such as `["Foundation"]`. Objects and archives still belong in `libraries`, and ordinary system libraries belong in `system_libraries`.
 
 ## Manifest fields
 
 <dl>
   <dt><code>ffi_format</code></dt>
-  <dd>Required. Format <code>1</code> supports value parameters; format <code>2</code> preserves them and adds callback/context entries; format <code>3</code> adds copy-in <code>cstring</code>, string-span, and byte-span callback parameters; format <code>4</code> adds retained registrations and release references; format <code>5</code> adds retained foreign-thread callbacks marshalled to the event loop; format <code>6</code> adds <code>f32</code>, <code>i8</code>, <code>u16</code>, <code>i16</code>, and outbound <code>mutable-bytes</code> spans.</dd>
+  <dd>Required. Format <code>1</code> supports value parameters; format <code>2</code> adds callback and context entries; format <code>3</code> adds copied <code>cstring</code>, string, and byte callback parameters; format <code>4</code> adds retained registrations and release references; format <code>5</code> adds retained callbacks from other threads, delivered on the event loop; format <code>6</code> adds <code>f32</code>, <code>i8</code>, <code>u16</code>, <code>i16</code>, and outbound <code>mutable-bytes</code> spans; format <code>7</code> adds <code>i64</code>, <code>u64</code>, and <code>pointer</code>, plus the <code>library</code>, <code>callbacks</code>, and <code>frameworks</code> fields used by <a href="#static-bindings-for-nodeffi"><code>node:ffi</code> bindings</a>. Each format accepts everything earlier formats do.</dd>
 
   <dt><code>functions</code></dt>
-  <dd>Required array. Every entry has exactly <code>name</code>, <code>symbol</code>, <code>params</code>, and <code>returns</code>. Binding names and symbols must be unique. Callback ids must be unique within a function and every context must match exactly one callback or release. A release references a retained <code>&lt;binding&gt;:&lt;callback-id&gt;</code> in the same manifest and inherits its callback ABI.</dd>
+  <dd>Required array. Every entry has <code>name</code>, <code>symbol</code>, <code>params</code>, and <code>returns</code>, and in format 7 an optional <code>library</code>. Binding names and symbols must be unique. Callback ids must be unique within a function and every context must match exactly one callback or release. A release references a retained <code>&lt;binding&gt;:&lt;callback-id&gt;</code> in the same manifest and inherits its callback ABI.</dd>
 
   <dt><code>libraries</code></dt>
   <dd>Optional array of archive or object paths. Relative paths are resolved from the manifest directory and appended after the generated program at link time.</dd>
 
   <dt><code>system_libraries</code></dt>
   <dd>Optional array of linker-neutral library names. For example, <code>["m"]</code> is emitted as <code>-lm</code>.</dd>
+
+  <dt><code>frameworks</code></dt>
+  <dd>Format 7, Darwin targets. Optional array of system framework names, such as <code>["Foundation"]</code>.</dd>
+
+  <dt><code>callbacks</code></dt>
+  <dd>Format 7. Optional array of callback signatures for <code>node:ffi</code> <code>registerCallback</code>, each with <code>library</code>, <code>params</code>, <code>returns</code>, and an optional <code>capacity</code> from 1 to 256 (default 16).</dd>
 </dl>
 
-Unknown fields, invalid ABI classes, duplicate names, and signature mismatches fail the build with an `SC5xxx` diagnostic. The same manifest can be passed to `scriptc coverage` so native call sites count as statically compiled.
+Unknown fields, invalid ABI classes, duplicate names, and signature mismatches fail the build with an `SC5xxx` diagnostic.
 
 ## Boundary rules and current limits
 
 - Native calls are synchronous and must return normally. Do not unwind C++ exceptions or `longjmp` across the boundary.
 - Native code is outside scriptc's exception, reference-counting, and sanitizer contracts. A bad pointer or mismatched C signature can still corrupt the process.
-- `invoke` defaults to `"script-thread"`. Format 5 foreign callbacks are asynchronous, `void`-returning, context-bearing, explicitly released, and not real-time capable; direct foreign-thread script execution is unsupported.
+- `invoke` defaults to `"script-thread"`. Callbacks from other threads (format 5) are asynchronous, return `void`, need a context entry, are released explicitly, and aren't suitable for real-time work; TypeScript code never runs directly on a foreign thread.
 - There are no variadic calls, struct-by-value arguments, or owned pointer returns. The `node:ffi` catalog resolves only bindings compiled into the binary; runtime `dlopen`/`dlsym` loading remains unsupported.
 - The archive or object must match the build target. Cross-compilation does not translate native inputs.
 - Outbound FFI is currently available for executable builds, not `scriptc build --lib`.

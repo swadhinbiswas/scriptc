@@ -7,11 +7,15 @@ import { analyze, compile } from "../src/index.js";
 
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 
-test.each(["llvm"] as const)("JS return overrides preserve calls and argument order (%s)", async (backend) => {
-  const dir = mkdtempSync(join(tmpdir(), "scriptc-override-returns-"));
-  try {
-    const entry = join(dir, "main.cjs");
-    writeFileSync(entry, `
+test.each(["llvm"] as const)(
+  "JS return overrides preserve calls and argument order (%s)",
+  async (backend) => {
+    const dir = mkdtempSync(join(tmpdir(), "scriptc-override-returns-"));
+    try {
+      const entry = join(dir, "main.cjs");
+      writeFileSync(
+        entry,
+        `
 class Base {
   method(value, other) { return 1; }
   dispatch(value) { return this.method(value, undefined); }
@@ -38,30 +42,38 @@ catch (error) { console.log("super", String(error).includes("SC1090")); }
 try { new Short().dispatch(argument("short")); }
 catch (error) { console.log("short", String(error).includes("SC1090")); }
 console.log("after");
-`);
-    const { coverage } = analyze(entry, { dynamic: false });
-    expect(coverage.diagnostics).toEqual([]);
-    expect(coverage.stats.statementsIsland).toBe(0);
-    expect(coverage.runtimeFences ?? []).toEqual([]);
-    const result = await compile(entry, { backend, dynamic: false, sanitize, outDir: dir, outPath: join(dir, "program") });
-    expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
-    if (!result.ok) return;
-    const child = spawnSync(result.binaryPath, [], { encoding: "utf8" });
-    expect(child.status).toBe(0);
-    expect(child.stderr).toBe("");
-    const oracle = spawnSync(process.execPath, [entry], { encoding: "utf8" });
-    expect(oracle.status).toBe(0);
-    expect(child.stdout).toBe(oracle.stdout);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+`,
+      );
+      const { coverage } = analyze(entry, {});
+      expect(coverage.diagnostics).toEqual([]);
+      expect(coverage.runtimeFences ?? []).toEqual([]);
+      const result = await compile(entry, {
+        backend,
+        sanitize,
+        outDir: dir,
+        outPath: join(dir, "program"),
+      });
+      expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+      if (!result.ok) return;
+      const child = spawnSync(result.binaryPath, [], { encoding: "utf8" });
+      expect(child.status).toBe(0);
+      expect(child.stderr).toBe("");
+      const oracle = spawnSync(process.execPath, [entry], { encoding: "utf8" });
+      expect(oracle.status).toBe(0);
+      expect(child.stdout).toBe(oracle.stdout);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("JS parameter overrides preserve calls and argument order", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-override-parameters-"));
   try {
     const entry = join(dir, "main.cjs");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
 // @ts-nocheck
 class Base {
   method(value = 1) { return 1; }
@@ -80,11 +92,17 @@ catch (error) { console.log("virtual", String(error).includes("SC1090")); }
 try { new Leaf().callSuper(argument("super")); }
 catch (error) { console.log("super", String(error).includes("SC1090")); }
 console.log("after");
-`);
-    const { coverage } = analyze(entry, { dynamic: false });
+`,
+    );
+    const { coverage } = analyze(entry, {});
     expect(coverage.diagnostics).toEqual([]);
     expect(coverage.runtimeFences ?? []).toEqual([]);
-    const result = await compile(entry, { backend: "llvm", dynamic: false, sanitize, outDir: dir, outPath: join(dir, "program") });
+    const result = await compile(entry, {
+      backend: "llvm",
+      sanitize,
+      outDir: dir,
+      outPath: join(dir, "program"),
+    });
     expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
     if (!result.ok) return;
     const child = spawnSync(result.binaryPath, [], { encoding: "utf8" });
@@ -99,16 +117,29 @@ console.log("after");
 });
 
 test.each([
-  ["async methods", `class Base { method() { return 1; } } class Derived extends Base { async method() { return "x"; } }`],
-  ["generators", `class Base { method() { return 1; } } class Derived extends Base { *method() { yield "x"; } }`],
+  [
+    "async methods",
+    `class Base { method() { return 1; } } class Derived extends Base { async method() { return "x"; } }`,
+  ],
+  [
+    "generators",
+    `class Base { method() { return 1; } } class Derived extends Base { *method() { yield "x"; } }`,
+  ],
 ])("%s retain their method entry refusal", (_name, source) => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-override-signatures-"));
   try {
     const entry = join(dir, "main.cjs");
     writeFileSync(entry, "// @ts-nocheck\n" + source + "\nnew Derived().method();\n");
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     const diagnostics = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
-    expect(diagnostics.some((d) => d.code === "SC1090" && /overriding.*(async|generator|different (signature|type))/.test(d.message)), JSON.stringify(diagnostics)).toBe(true);
+    expect(
+      diagnostics.some(
+        (d) =>
+          d.code === "SC1090" &&
+          /overriding.*(async|generator|different (signature|type))/.test(d.message),
+      ),
+      JSON.stringify(diagnostics),
+    ).toBe(true);
     expect(diagnostics.some((d) => /different return type/.test(d.message))).toBe(false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -124,10 +155,16 @@ test.each([
     const entry = join(dir, `main.${extension}`);
     const base = "class Base { method() { return 1; } }";
     writeFileSync(join(dir, "base.ts"), "export " + base);
-    writeFileSync(entry, `// @ts-nocheck\n${importedBase || base}\nclass Derived extends Base { method() { return 'x'; } }\nnew Derived();\n`);
-    const { coverage } = analyze(entry, { dynamic: false });
+    writeFileSync(
+      entry,
+      `// @ts-nocheck\n${importedBase || base}\nclass Derived extends Base { method() { return 'x'; } }\nnew Derived();\n`,
+    );
+    const { coverage } = analyze(entry, {});
     const diagnostics = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
-    expect(diagnostics.some((d) => d.code === "SC1090" && d.message.includes("different signature")), JSON.stringify(diagnostics)).toBe(true);
+    expect(
+      diagnostics.some((d) => d.code === "SC1090" && d.message.includes("different signature")),
+      JSON.stringify(diagnostics),
+    ).toBe(true);
     expect(diagnostics.some((d) => /different return type/.test(d.message))).toBe(false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

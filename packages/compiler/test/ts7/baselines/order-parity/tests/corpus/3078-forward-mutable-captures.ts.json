@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3078-forward-mutable-captures.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2570-buffer-arg-validation.cjs"
+ ],
+ "diags": []
+}

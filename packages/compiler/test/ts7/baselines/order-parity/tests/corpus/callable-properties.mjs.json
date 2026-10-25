@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/callable-properties.mjs"
+ ],
+ "diags": []
+}

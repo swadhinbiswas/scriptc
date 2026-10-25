@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2444-union-literal-reducer-spread.ts"
+ ],
+ "diags": []
+}

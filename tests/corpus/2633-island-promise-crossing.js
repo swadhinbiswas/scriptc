@@ -1,4 +1,3 @@
-// @dynamic
 // STATIC promises crossing INTO the island as real engine thenables
 // (lane dom-jsval-long-tail): a scriptc promise stored in an 'any' slot
 // wraps through the async-callback return bridge (scr_jsval_from_promise)

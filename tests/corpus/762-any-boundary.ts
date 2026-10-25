@@ -1,4 +1,3 @@
-// @dynamic
 // The boundary: static values marshal INTO the island (primitives by
 // value, JSON-safe composites as deep copies); `any` values exit through
 // VALIDATED extraction (strict primitives, JSON round-trip composites).

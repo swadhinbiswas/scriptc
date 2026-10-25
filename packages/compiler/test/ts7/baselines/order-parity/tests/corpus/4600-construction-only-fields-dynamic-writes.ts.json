@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4600-construction-only-fields-dynamic-writes.ts"
+ ],
+ "diags": []
+}

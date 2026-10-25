@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/cycle-var-early/b.ts",
+  "<repo>/tests/diagnostics/cycle-var-early/a.ts",
+  "<repo>/tests/diagnostics/cycle-var-early/main.ts"
+ ],
+ "diags": []
+}

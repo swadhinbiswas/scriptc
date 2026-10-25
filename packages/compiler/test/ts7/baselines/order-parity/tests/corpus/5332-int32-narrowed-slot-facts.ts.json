@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5332-int32-narrowed-slot-facts.ts"
+ ],
+ "diags": []
+}

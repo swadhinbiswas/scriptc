@@ -11,7 +11,9 @@ test("LLVM scalarize ordinary typed calls while preserving producers with finall
   try {
     const entry = join(dir, "main.ts");
     const outPath = join(dir, "main.ir.json");
-    await writeFile(entry, `
+    await writeFile(
+      entry,
+      `
 function pair(x: number): { a: number; b: number } {
   for (let i = 0; i < 3; i++) {
     if (i === x) return { b: i * 2, a: i };
@@ -28,9 +30,11 @@ function render(): void {
   console.log(g.a);
 }
 render();
-`);
+`,
+    );
     const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
-    if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const mod = deserializeModule(await readFile(outPath, "utf8"));
     const out = scalarizeNumericRecords(mod);
     expect(validateModule(mod)).toEqual([]);

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2918-builtin-callable-widths-cjs.ts"
+ ],
+ "diags": []
+}

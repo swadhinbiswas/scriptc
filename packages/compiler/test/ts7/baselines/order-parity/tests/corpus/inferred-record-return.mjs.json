@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/inferred-record-return.mjs"
+ ],
+ "diags": []
+}

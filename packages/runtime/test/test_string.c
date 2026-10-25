@@ -5,14 +5,14 @@
  * Numeric/boolean results are compared through scr_f64_to_str /
  * "true"/"false", so the expected column is always UTF-8 bytes.
  *
- * Also contains hand-written assertions for the documented divergence
- * (charAt / slice on half an astral pair -> U+FFFD instead of a lone
- * surrogate), even though the oracle covers them too via Buffer.from's
- * identical replacement behavior.
+ * Also contains hand-written assertions for lone surrogates (charAt /
+ * slice on half an astral pair keep that half), which the oracle covers
+ * too.
  *
  * Special mode: --crash-repeat / --crash-repeat-inf call
- * scr_str_repeat with an invalid count and must abort() after printing
- * "scriptc: RangeError: Invalid count value" (checked by string.test.ts).
+ * scr_str_repeat with an invalid count, which must leave Node's catchable
+ * RangeError pending ("Invalid count value: -1"); the mode prints it the
+ * way an uncaught throw does (checked by string.test.ts).
  *
  * Exit 0 = all pass; prints each mismatch (capped) and exits 1 otherwise.
  */
@@ -27,14 +27,26 @@
 long scr_str_live_count(void); /* provided by scr_string.c */
 #endif
 
+/* parseInt cases whose Node answer depends on the architecture carry it in
+ * the op name ("parseInt.arm64" / "parseInt.x64"); only this build's runs.
+ * scr_radix_fold uses the fused multiply-add on aarch64 and two roundings
+ * elsewhere, matching Node on arm64 and x64. */
+#if defined(__aarch64__)
+#define SCR_TEST_PARSEINT_ARCH "parseInt.arm64"
+#else
+#define SCR_TEST_PARSEINT_ARCH "parseInt.x64"
+#endif
+
 #ifdef SCR_SIDX_TEST
 /* Test-only sparse-index observability, deliberately absent from the normal
  * runtime ABI. The walker count is code-point steps after a cache prime. */
 void scr_sidx_test_reset_steps(void);
 size_t scr_sidx_test_walk_steps(void);
+size_t scr_sidx_test_searches(void);
 void scr_sidx_test_reset_cache(void);
 size_t scr_sidx_test_entries(void);
 size_t scr_sidx_test_points(void);
+size_t scr_sidx_test_active(void);
 #endif
 
 #define MAX_FIELD 8192
@@ -111,48 +123,120 @@ static void check_str(const char *op, const char *args, ScrStr *input,
   scr_str_release(got);
 }
 
-/* Hand-written assertions for the documented lone-surrogate divergence:
- * boundaries inside the astral pair of "a\u{1F600}b" produce U+FFFD where
- * JS would produce "\uD83D" / "\uDE00". */
-static void divergence_asserts(void) {
-  static const char FFFD[] = "\xEF\xBF\xBD";
+/* Hand-written lone-surrogate assertions: boundaries inside the astral
+ * pair of "a\u{1F600}b" keep "\uD83D" / "\uDE00" as WTF-8, and joining
+ * the halves again rebuilds the 4-byte character. */
+static void surrogate_asserts(void) {
+  static const char HIGH[] = "\xED\xA0\xBD", LOW[] = "\xED\xB8\x80";
   ScrStr *s = scr_str_new("a\xF0\x9F\x98\x80" "b", 6); /* a 😀 b */
 
-  ScrStr *hi = scr_str_char_at(s, 1); /* JS: "\uD83D" */
-  check("charAt-divergence", "1", s, hi->data, hi->len, FFFD, 3);
-  scr_str_release(hi);
+  ScrStr *hi = scr_str_char_at(s, 1); /* "\uD83D" */
+  check("charAt-surrogate", "1", s, hi->data, hi->len, HIGH, 3);
 
-  ScrStr *lo = scr_str_char_at(s, 2); /* JS: "\uDE00" */
-  check("charAt-divergence", "2", s, lo->data, lo->len, FFFD, 3);
+  ScrStr *lo = scr_str_char_at(s, 2); /* "\uDE00" */
+  check("charAt-surrogate", "2", s, lo->data, lo->len, LOW, 3);
+
+  ScrStr *pair = scr_str_concat(hi, lo);
+  check("concat-surrogates", "1,2", s, pair->data, pair->len, "\xF0\x9F\x98\x80", 4);
+  scr_str_release(pair);
+  ScrStr *parts[] = {hi, lo, lo};
+  ScrStr *joined = scr_str_concat_parts(parts, 3);
+  check("concat-parts-surrogates", "1,2,2", s, joined->data, joined->len,
+        "\xF0\x9F\x98\x80\xED\xB8\x80", 7);
+  scr_str_release(joined);
+  ScrStr *turned = scr_str_concat(lo, hi);
+  check("concat-turned", "2,1", s, turned->data, turned->len, "\xED\xB8\x80\xED\xA0\xBD", 6);
+  scr_str_release(turned);
+  scr_str_release(hi);
   scr_str_release(lo);
 
-  ScrStr *head = scr_str_slice(s, 0, 2); /* JS: "a\uD83D" */
-  check("slice-divergence", "0,2", s, head->data, head->len,
-        "a\xEF\xBF\xBD", 4);
+  ScrStr *head = scr_str_slice(s, 0, 2); /* "a\uD83D" */
+  check("slice-surrogate", "0,2", s, head->data, head->len, "a\xED\xA0\xBD", 4);
   scr_str_release(head);
 
-  ScrStr *tail = scr_str_slice(s, 2, 4); /* JS: "\uDE00b" */
-  check("slice-divergence", "2,4", s, tail->data, tail->len,
-        "\xEF\xBF\xBD" "b", 4);
+  ScrStr *tail = scr_str_slice(s, 2, 4); /* "\uDE00b" */
+  check("slice-surrogate", "2,4", s, tail->data, tail->len, "\xED\xB8\x80" "b", 4);
   scr_str_release(tail);
 
-  ScrStr *mid = scr_str_slice(s, 2, 3); /* JS: "\uDE00" */
-  check("slice-divergence", "2,3", s, mid->data, mid->len, FFFD, 3);
+  ScrStr *mid = scr_str_slice(s, 2, 3); /* "\uDE00" */
+  check("slice-surrogate", "2,3", s, mid->data, mid->len, LOW, 3);
   scr_str_release(mid);
 
   /* both boundaries split different pairs: "😀😀".slice(1,3) */
   ScrStr *two = scr_str_new("\xF0\x9F\x98\x80\xF0\x9F\x98\x80", 8);
-  ScrStr *both = scr_str_slice(two, 1, 3); /* JS: "\uDE00\uD83D" */
-  check("slice-divergence", "1,3", two, both->data, both->len,
-        "\xEF\xBF\xBD\xEF\xBF\xBD", 6);
+  ScrStr *both = scr_str_slice(two, 1, 3); /* "\uDE00\uD83D" */
+  check("slice-surrogate", "1,3", two, both->data, both->len,
+        "\xED\xB8\x80\xED\xA0\xBD", 6);
   scr_str_release(both);
 
-  /* numeric results do NOT diverge: exact surrogate values */
+  /* UTF-8 for byte sinks: U+FFFD for each lone surrogate, same length */
+  ScrStr *lone = scr_str_new("x\xED\xA0\xBDy\xED\x9F\xBF", 8);
+  char *owned;
+  const char *utf8 = scr_str_utf8(lone, &owned);
+  check("utf8-sink", "-", lone, utf8, lone->len, "x\xEF\xBF\xBDy\xED\x9F\xBF", 8);
+  scr_str_utf8_end(owned);
+  check_f64("isWellFormed", "-", lone, scr_str_is_well_formed(lone) ? 1 : 0, "0", 1);
+  scr_str_release(lone);
+
+  /* numeric results: exact surrogate values */
   check_f64("charCodeAt-surrogate", "1", s, scr_str_char_code_at(s, 1),
             "55357", 5); /* 0xD83D */
   check_f64("charCodeAt-surrogate", "2", s, scr_str_char_code_at(s, 2),
             "56832", 5); /* 0xDE00 */
 
+  /* Deferred scalar slices must match materialization, including the
+   * lone surrogates at split astral boundaries. */
+  for (size_t from = 0; from <= 5; from++) {
+    for (size_t to = 0; to <= 5; to++) {
+      for (unsigned substring = 0; substring < 2; substring++) {
+        ScrStringSlice range;
+        scr_str_slice_range(two, (double)from, (double)to, substring != 0, &range);
+        ScrStr *copy = substring ? scr_str_substring(two, (double)from, (double)to)
+                                 : scr_str_slice(two, (double)from, (double)to);
+        total++;
+        if ((double)range.length != scr_str_utf16_len(copy)) failed++;
+        for (size_t i = 0; i <= range.length; i++) {
+          double actual = scr_str_slice_char_code_at(two, &range, (double)i);
+          double expected = scr_str_char_code_at(copy, (double)i);
+          total++;
+          if (!(actual == expected || (isnan(actual) && isnan(expected)))) failed++;
+        }
+        scr_str_release(copy);
+      }
+    }
+  }
+  /* Scratch slices hold the materialized text. Only ASCII results of at
+   * least two units use the caller's buffer, marked as scratch. */
+  {
+    ScrStr *sources[] = {two, s, scr_str_new("GET /api/users 200", 18)};
+    const double marks[] = {-INFINITY, -7.5, -3, -0.5, -0.0, 0, 0.5, 1,
+                            2, 3.9, 5, 9, 40, INFINITY, NAN};
+    const size_t nmarks = sizeof marks / sizeof marks[0];
+    _Alignas(16) unsigned char buffer[96];
+    for (size_t k = 0; k < 3; k++) {
+      for (size_t a = 0; a < nmarks; a++) {
+        for (size_t b = 0; b < nmarks; b++) {
+          for (unsigned substring = 0; substring < 2; substring++) {
+            ScrStr *src = sources[k];
+            ScrStr *scratch = scr_str_slice_scratch(src, marks[a], marks[b], substring != 0,
+                                                    (ScrStr *)buffer, sizeof buffer);
+            ScrStr *copy = substring ? scr_str_substring(src, marks[a], marks[b])
+                                     : scr_str_slice(src, marks[a], marks[b]);
+            bool used = scratch == (ScrStr *)buffer;
+            bool expected = copy->len >= 2 && scr_bytes_all_ascii(copy->data, copy->len);
+            total++;
+            if (scratch->len != copy->len || memcmp(scratch->data, copy->data, copy->len) != 0 ||
+                used != expected || used != scr_str_is_scratch(scratch) ||
+                scr_str_utf16_len(scratch) != scr_str_utf16_len(copy))
+              failed++;
+            scr_str_release(scratch);
+            scr_str_release(copy);
+          }
+        }
+      }
+    }
+    scr_str_release(sources[2]);
+  }
   scr_str_release(two);
   scr_str_release(s);
 }
@@ -169,6 +253,106 @@ static void handoff_append(ScrStr **binding, ScrStr *suffix) {
   scr_str_release(old);
   *binding = scr_str_concat(snapshot, suffix);
   scr_str_release(snapshot);
+}
+
+static void split_storage_asserts(void) {
+  /* Cross the runtime's dense-storage boundary without allocating a
+   * million distinct strings: each piece is the shared single-byte "a". */
+  size_t boundary = (size_t)1 << 20, count = boundary + 3;
+  char *bytes = malloc(count * 2 - 1);
+  for (size_t i = 0; i < count; i++) {
+    bytes[i * 2] = 'a';
+    if (i + 1 < count) bytes[i * 2 + 1] = ',';
+  }
+  ScrStr *input = scr_str_new(bytes, count * 2 - 1);
+  free(bytes);
+  ScrStr *separator = scr_str_new(",", 1);
+  ScrArr *parts = scr_str_split(input, separator);
+  total++;
+  if (parts->len != count) failed++;
+  size_t positions[] = {0, boundary - 1, boundary, count - 1};
+  for (size_t i = 0; i < sizeof positions / sizeof *positions; i++) {
+    total++;
+    if (!scr_arr_has(parts, positions[i])) { failed++; continue; }
+    ScrStr *piece = scr_arr_get_ref(parts, positions[i]);
+    check("split-storage", "dense/sparse", input, piece->data, piece->len, "a", 1);
+    scr_str_release(piece);
+  }
+  scr_arr_release(parts);
+  scr_str_release(separator);
+  scr_str_release(input);
+}
+
+static void split_scratch_asserts(void) {
+  _Static_assert(offsetof(ScrSplitCursor, offset) == 0, "split cursor offset");
+  _Static_assert(offsetof(ScrSplitCursor, remaining) == sizeof(size_t), "split cursor limit");
+  _Static_assert(offsetof(ScrSplitCursor, pending_unit) == sizeof(size_t) + 4, "split cursor pending unit");
+  _Static_assert(offsetof(ScrSplitCursor, unit) == sizeof(size_t) + 8, "split cursor unit");
+  _Static_assert(sizeof(ScrSplitCursor) == (sizeof(size_t) + 12 + sizeof(size_t) - 1) /
+                                               sizeof(size_t) * sizeof(size_t),
+                 "split cursor storage");
+  ScrStr *input = scr_str_new("alpha,beta-long,\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C,test-tail,,last", 44);
+  ScrStr *separator = scr_str_new(",", 1), *scratch = NULL;
+  ScrSplitCursor cursor;
+  scr_str_split_cursor_init(&cursor, UINT32_MAX);
+  ScrStr *first = scr_str_split_cursor_next(input, separator, &cursor, &scratch);
+  total++;
+  if (first != scratch || first->rc != 2 || scr_str_utf16_len(first) != 5) failed++;
+  scr_str_release(first);
+  ScrStr *saved = scr_str_split_cursor_next(input, separator, &cursor, &scratch);
+  total++;
+  if (saved != first || scr_str_utf16_len(saved) != 9) failed++;
+  /* Keep this yield alive: the next piece must allocate independent storage. */
+  ScrStr *mixed = scr_str_split_cursor_next(input, separator, &cursor, &scratch);
+  total++;
+  if (mixed == saved || scr_str_utf16_len(mixed) != 4 ||
+      saved->len != 9 || memcmp(saved->data, "beta-long", 9) != 0) failed++;
+  scr_str_release(mixed);
+  ScrStr *tail = scr_str_split_cursor_next(input, separator, &cursor, &scratch);
+  total++;
+  if (tail != mixed || scr_str_utf16_len(tail) != 9) failed++;
+  scr_str_release(tail);
+  while ((tail = scr_str_split_cursor_next(input, separator, &cursor, &scratch)))
+    scr_str_release(tail);
+  scr_str_release(saved);
+  scr_str_release(scratch);
+  scr_str_release(separator);
+  scr_str_release(input);
+}
+
+static void construction_asserts(void) {
+  ScrStr *empty = scr_str_new("", 0);
+  ScrStr *value = scr_str_new("a\0\xE6\x97\xA5", 5);
+  ScrStr *parts[] = {empty, value, empty, value};
+  ScrStr *out = scr_str_concat_parts(parts, 4);
+  total++;
+  if (out->len != 10 || memcmp(out->data, value->data, 5) != 0 ||
+      memcmp(out->data + 5, value->data, 5) != 0 || out->data[10] != '\0' ||
+      value->rc != 1 || value->len != 5) {
+    failed++;
+    fputs("CONSTRUCTION: duplicate inputs, embedded zero or ownership\n", stderr);
+  }
+  scr_str_release(out);
+  ScrStr *single = scr_str_concat_parts(parts, 3);
+  ScrStr *left = scr_str_concat(empty, value);
+  ScrStr *right = scr_str_concat(value, empty);
+  total++;
+  if (single != value || left != value || right != value || value->rc != 4) {
+    failed++;
+    fputs("CONSTRUCTION: empty operands must preserve independent owners\n", stderr);
+  }
+  scr_str_release(single);
+  scr_str_release(left);
+  scr_str_release(right);
+  out = scr_str_concat_parts(NULL, 0);
+  total++;
+  if (out->len != 0 || out->data[0] != '\0') {
+    failed++;
+    fputs("CONSTRUCTION: empty part list\n", stderr);
+  }
+  scr_str_release(out);
+  scr_str_release(value);
+  scr_str_release(empty);
 }
 
 static void accumulation_asserts(void) {
@@ -338,10 +522,108 @@ static void short_string_asserts(void) {
   scr_str_release(source);
 }
 
+/* A loop's publish converts a non-ASCII receiver before any read, while a
+ * lone read still walks bytes. ASCII receivers publish nothing. A loop
+ * that can read fewer than one unit per 16 bytes counts as one read. */
+static void scan_units_asserts(void) {
+  ScrStr *s = scr_str_new("a\xC3\xA9\xF0\x9F\x98\x80" "b", 8); /* a é 😀 b */
+  static const double codes[] = {97, 233, 0xD83D, 0xDE00, 98};
+  if (scr_str_char_code_at(s, 0) != 97 || scr_str_scan.s == s) failed++;
+  scr_str_scan_units_for(s, NAN, NAN);
+  if (scr_str_scan.s != s || scr_str_scan.n != 5) failed++;
+  for (size_t i = 0; i < 5; i++)
+    if (scr_str_scan.n == 5 && (scr_str_scan.units[i] != codes[i] ||
+                                scr_str_char_code_at(s, (double)i) != codes[i])) failed++;
+  if (!isnan(scr_str_char_code_at(s, 5))) failed++;
+  scr_str_scan_units_for(s, NAN, NAN); /* republishing keeps the same units */
+  const uint16_t *units = scr_str_scan.units;
+  scr_str_scan_units_for(s, 0, 1);
+  if (scr_str_scan.s != s || scr_str_scan.units != units) failed++;
+  ScrStr *ascii = scr_str_new("plain", 5);
+  scr_str_scan_units_for(ascii, NAN, NAN);
+  if (scr_str_scan.s != s) failed++;
+  scr_str_release(ascii);
+  scr_str_release(s);
+  if (scr_str_scan.s != NULL) failed++;
+  /* 200 units in 400 bytes: a loop over 25 indexes converts at once. */
+  char text[400];
+  for (size_t i = 0; i < sizeof text; i += 2) memcpy(text + i, "\xC3\xA9", 2);
+  ScrStr *wide = scr_str_new(text, sizeof text);
+  scr_str_scan_units_for(wide, 175, 200);
+  if (scr_str_scan.s != wide || scr_str_scan.n != 200 || scr_str_scan.units[199] != 233) failed++;
+  scr_str_release(wide);
+  /* A loop over 24 does not; each such loop counts as one read, so the
+   * 32nd converts (32 reads, one per 12.5 bytes). */
+  ScrStr *line = scr_str_new(text, sizeof text);
+  scr_str_scan_units_for(line, 24, 0);
+  if (scr_str_scan.s == line) failed++;
+  for (int i = 1; i < 31; i++) scr_str_scan_units_for(line, i, i + 1);
+  if (scr_str_scan.s == line) failed++;
+  scr_str_scan_units_for(line, 31, 32);
+  if (scr_str_scan.s != line || scr_str_scan.n != 200) failed++;
+  scr_str_release(line);
+  total++;
+}
 #ifdef SCR_SIDX_TEST
 static void sidx_fail(const char *what) {
   failed++;
   fprintf(stderr, "SIDX: %s\n", what);
+}
+
+/* A live source must keep its index when sequential large slices use and
+ * vacate another slot. Slicing knows output length without decoding it. */
+static void sparse_slice_churn_asserts(void) {
+  enum { BYTES = 256 * 1024, QUERIES = 128 };
+  char *raw = malloc(BYTES);
+  if (!raw) { sidx_fail("slice churn allocation"); return; }
+  memset(raw, 'x', BYTES);
+  raw[100] = '\xc3'; raw[101] = '\xa9';
+  ScrStr *source = scr_str_new(raw, BYTES);
+  free(raw);
+  scr_sidx_test_reset_cache();
+  double length = scr_str_utf16_len(source);
+  scr_sidx_test_reset_steps();
+  for (size_t i = 0; i < QUERIES; i++) {
+    ScrStr *slice = scr_str_substring(source, (double)(200 + i), INFINITY);
+    if (scr_str_utf16_len(slice) != length - 200 - i)
+      sidx_fail("slice's known UTF-16 length was lost");
+    if (scr_str_char_code_at(source, 200 + i) != 'x')
+      sidx_fail("source changed during slice churn");
+    scr_str_release(slice);
+  }
+  if (scr_sidx_test_walk_steps() > QUERIES * 4200u)
+    sidx_fail("slice churn evicted the live source index");
+  ScrStr *whole = scr_str_slice(source, 0, INFINITY);
+  if (whole != source) sidx_fail("whole slice did not share its owner");
+  scr_str_release(source);
+  if (scr_str_utf16_len(whole) != length)
+    sidx_fail("whole slice lost ownership");
+  scr_str_release(whole);
+  if (scr_sidx_test_active()) sidx_fail("slice churn left stale cache entries");
+}
+
+static void index_activity_asserts(void) {
+  scr_sidx_test_reset_cache();
+  ScrStr *strings[9];
+  for (size_t i = 0; i < 9; i++) {
+    strings[i] = scr_str_new("\xc3\xa9x", 3);
+    /* Short lengths count directly; an indexed read claims a cursor. */
+    if (scr_str_utf16_len(strings[i]) != 2 || scr_sidx_test_active() != (i < 4 ? i : 4))
+      sidx_fail("short length claimed a cursor");
+    if (scr_str_char_code_at(strings[i], 1) != 'x') sidx_fail("cursor activation read");
+    if (scr_sidx_test_active() != (i < 4 ? i + 1 : 4))
+      sidx_fail("cursor activation or eviction count");
+  }
+  for (size_t i = 0; i < 9; i++) scr_str_release(strings[i]);
+  if (scr_sidx_test_active() != 0) sidx_fail("last cursor release stayed active");
+  ScrStr *s = scr_str_new("\xe4\xb8\xad", 3);
+  (void)scr_str_utf16_len(s);
+  scr_sidx_test_reset_cache();
+  if (scr_sidx_test_active() != 0) sidx_fail("cache reset stayed active");
+  if (scr_str_char_code_at(s, 0) != 0x4e2d || scr_sidx_test_active() != 1)
+    sidx_fail("cache reactivation after reset");
+  scr_str_release(s);
+  if (scr_sidx_test_active() != 0) sidx_fail("reactivated cursor was not purged");
 }
 
 /* The counter is deliberately about code-point decoder steps, not elapsed
@@ -372,7 +654,7 @@ static void sparse_index_asserts(void) {
       sidx_fail("charCodeAt result");
 
     ScrStr *ch = scr_str_char_at(s, (double)(base + 2));
-    if (ch->len != 3 || memcmp(ch->data, "\xEF\xBF\xBD", 3) != 0)
+    if (ch->len != 3 || memcmp(ch->data, "\xED\xA0\xBD", 3) != 0)
       sidx_fail("charAt surrogate result");
     scr_str_release(ch);
 
@@ -463,7 +745,7 @@ static void sparse_index_asserts(void) {
  * prefix must retain identity checkpoints instead of repeatedly walking the
  * distance between the two hot-cursor positions. A lookup at the ASCII
  * prefix's far end must retain those checkpoints too; otherwise a later
- * non-local lookup silently falls back to a linear restart. */
+ * non-local lookup falls back to a linear restart. */
 static void sparse_ascii_prefix_asserts(void) {
   enum { PREFIX = 4 * 1024 * 1024, QUERIES = 8 };
   const size_t first = (size_t)1024 * 1024 + 137;
@@ -539,6 +821,7 @@ static void sparse_all_ascii_end_asserts(void) {
  * materialize every checkpoint interval at that transition rather than
  * retaining only the hot cursor or an old-end anchor. */
 static void sparse_append_threshold_asserts(void) {
+  scr_sidx_test_reset_cache();
   enum { BEFORE = 32700, EXTRA = 200, QUERIES = 8 };
   ScrStr *eacute = scr_str_new("\xC3\xA9", 2);
   ScrStr *s = scr_str_repeat(eacute, BEFORE); /* 65,400 bytes: below 64KiB */
@@ -551,7 +834,7 @@ static void sparse_append_threshold_asserts(void) {
   ScrStr *more = scr_str_repeat(eacute, EXTRA);
   handoff_append(&s, more); /* in-place non-ASCII threshold crossing */
   if (scr_str_utf16_len(s) != (double)(BEFORE + 1 + EXTRA) ||
-      scr_sidx_test_points() == 0) {
+      scr_sidx_test_points() == 0 || scr_sidx_test_active() != 1) {
     sidx_fail("mixed threshold append did not materialize checkpoints");
   }
 
@@ -568,9 +851,136 @@ static void sparse_append_threshold_asserts(void) {
   scr_str_release(one);
   scr_str_release(s);
   scr_str_release(eacute);
+  if (scr_sidx_test_active() != 0) sidx_fail("transferred sparse entry was not purged");
+  scr_sidx_test_reset_cache();
+}
+
+/* Sequential, nearby and distant reads share one mixed receiver. The ASCII
+ * span ends at different word alignments, followed by two surrogate pairs
+ * and BMP characters; every code unit has an independent expected value. */
+static void local_navigation_asserts(void) {
+  enum { ASCII = 263, UNITS = ASCII + 7, REPS = 700 };
+  static const char tail[] = "\xC3\xA9\xF0\x9F\x98\x80"
+                             "\xE4\xB8\xAD\xF0\x9F\xA7\xAD\0";
+  static const double codes[] = {233, 0xD83D, 0xDE00, 0x4E2D,
+                                 0xD83E, 0xDDED, 0};
+  char piece[ASCII + sizeof(tail) - 1];
+  for (size_t i = 0; i < ASCII; i++) piece[i] = (char)('a' + i % 26);
+  memcpy(piece + ASCII, tail, sizeof(tail) - 1);
+  ScrStr *unit = scr_str_new(piece, sizeof(piece));
+  ScrStr *s = scr_str_repeat(unit, REPS);
+  scr_str_release(unit);
+  scr_sidx_test_reset_cache();
+  ScrStr *prefix = scr_str_new("abc", 3);
+  if (scr_str_index_of(s, prefix, 0) != 0 ||
+      !scr_str_starts_with_from(s, prefix, 0))
+    sidx_fail("cold prefix search");
+  if (scr_sidx_test_points() != 0)
+    sidx_fail("prefix search indexed unrelated suffix");
+  scr_str_release(prefix);
+  if (scr_str_utf16_len(s) != UNITS * REPS) sidx_fail("local length");
+  scr_sidx_test_reset_steps();
+  for (size_t direction = 0; direction < 2; direction++) {
+    for (size_t i = 0; i < UNITS * REPS; i++) {
+      size_t at = direction ? UNITS * REPS - i - 1 : i;
+      size_t offset = at % UNITS;
+      double expected = offset < ASCII ? (double)('a' + offset % 26)
+                                        : codes[offset - ASCII];
+      if (scr_str_char_code_at(s, (double)at) != expected) {
+        sidx_fail("local code unit");
+        break;
+      }
+    }
+  }
+  if (scr_sidx_test_searches() > 2)
+    sidx_fail("sequential reads repeatedly searched sparse index");
+  for (size_t i = 0; i < 1024; i++) {
+    size_t at = (i * 7919) % (UNITS * REPS);
+    size_t offset = at % UNITS;
+    double expected = offset < ASCII ? (double)('a' + offset % 26)
+                                      : codes[offset - ASCII];
+    if (scr_str_char_code_at(s, (double)at) != expected)
+      sidx_fail("distant code unit");
+    size_t start = at - offset;
+    ScrStr *part = scr_str_substring(s, (double)(start + ASCII),
+                                       (double)(start + UNITS));
+    if (part->len != sizeof(tail) - 1 ||
+        memcmp(part->data, tail, sizeof(tail) - 1) != 0)
+      sidx_fail("distant substring");
+    scr_str_release(part);
+  }
+  s = scr_str_regrow(s, s->len + 64);
+  (void)scr_str_char_code_at(s, UNITS * (REPS - 1) + 17);
+  ScrStr *suffix = scr_str_new("next", 4);
+  handoff_append(&s, suffix);
+  scr_str_release(suffix);
+  if (scr_str_char_code_at(s, UNITS * (REPS - 1) + 18) != 's' ||
+      scr_str_char_code_at(s, UNITS * REPS) != 'n' ||
+      scr_str_utf16_len(s) != UNITS * REPS + 4)
+    sidx_fail("local window across append");
+  scr_str_release(s);
+  scr_sidx_test_reset_cache();
+}
+
+/* An entry borrowed for a receiver must remain its entry when a second
+ * string needs indexing. Fill the cursor tier so the needle would evict
+ * precisely the receiver under a receiver-first lookup order. */
+static void positioned_suffix_eviction_asserts(void) {
+  scr_sidx_test_reset_cache();
+  ScrStr *s = scr_str_new("\xC3\xA9" "abcdef", 8);
+  ScrStr *others[3];
+  (void)scr_str_utf16_len(s);
+  for (size_t i = 0; i < 3; i++) {
+    others[i] = scr_str_new("\xE4\xB8\xAD", 3);
+    (void)scr_str_utf16_len(others[i]);
+  }
+  ScrStr *needle = scr_str_new("cd", 2);
+  if (!scr_str_ends_with_from(s, needle, 5))
+    sidx_fail("positioned suffix after receiver eviction");
+  if (scr_str_ends_with_from(s, needle, 4))
+    sidx_fail("positioned suffix mismatched boundary");
+  scr_str_release(needle);
+  for (size_t i = 0; i < 3; i++) scr_str_release(others[i]);
+  scr_str_release(s);
   scr_sidx_test_reset_cache();
 }
 #endif
+
+static void ordering_asserts(void) {
+  const char *suffixes[] = {
+    "", "a", "a\0b", "\xc3\xa9", "\xc3\xaa", "\xe4\xb8\xad",
+    "\xed\x9f\xbf", "\xee\x80\x80", "\xef\xbf\xbf",
+    "\xf0\x90\x80\x80", "\xf0\x90\x80\x81",
+    "\xf0\x9f\x98\x80", "\xf0\x9f\x98\x81", "\xf4\x8f\xbf\xbf"
+  };
+  for (size_t prefix = 0; prefix <= 17; prefix++) {
+    for (size_t left = 0; left < sizeof(suffixes) / sizeof(*suffixes); left++) {
+      for (size_t right = 0; right < sizeof(suffixes) / sizeof(*suffixes); right++) {
+        char ab[32], bb[32];
+        memset(ab, 'x', prefix); memset(bb, 'x', prefix);
+        size_t an = left == 2 ? 3 : strlen(suffixes[left]);
+        size_t bn = right == 2 ? 3 : strlen(suffixes[right]);
+        memcpy(ab + prefix, suffixes[left], an);
+        memcpy(bb + prefix, suffixes[right], bn);
+        ScrStr *a = scr_str_new(ab, prefix + an);
+        ScrStr *b = scr_str_new(bb, prefix + bn);
+        size_t alen = (size_t)scr_str_utf16_len(a), blen = (size_t)scr_str_utf16_len(b);
+        int expected = (alen > blen) - (alen < blen);
+        for (size_t i = 0; i < alen && i < blen; i++) {
+          double au = scr_str_char_code_at(a, i), bu = scr_str_char_code_at(b, i);
+          if (au != bu) { expected = au < bu ? -1 : 1; break; }
+        }
+        int got = scr_str_cmp_u16(a, b);
+        total++;
+        if (((got > 0) - (got < 0)) != expected) {
+          failed++;
+          fprintf(stderr, "UTF-16 ordering mismatch at prefix %zu: %zu/%zu\n", prefix, left, right);
+        }
+        scr_str_release(a); scr_str_release(b);
+      }
+    }
+  }
+}
 
 int main(int argc, char **argv) {
   if (argc > 1 && strncmp(argv[1], "--crash-repeat", 14) == 0) {
@@ -578,9 +988,15 @@ int main(int argc, char **argv) {
     double count = strcmp(argv[1], "--crash-repeat-inf") == 0
                        ? (double)INFINITY
                        : -1.0;
-    scr_str_repeat(s, count); /* must print RangeError and abort() */
-    fputs("UNREACHABLE: scr_str_repeat returned\n", stderr);
-    return 3;
+    ScrStr *r = scr_str_repeat(s, count); /* must leave a RangeError pending */
+    scr_str_release(r);
+    scr_str_release(s);
+    if (!scr_exc_pending()) {
+      fputs("UNREACHABLE: scr_str_repeat returned without an exception\n", stderr);
+      return 3;
+    }
+    scr_exc_print_uncaught();
+    return 0;
   }
 
   FILE *in = stdin;
@@ -645,15 +1061,22 @@ int main(int argc, char **argv) {
     } else if (strcmp(op, "trimEnd") == 0) {
       check_str(op, args, input, scr_str_trim_end(input), expected_bytes,
                 exp_len);
-    } else if (strcmp(op, "parseInt") == 0) {
+    } else if (strcmp(op, "parseInt") == 0 ||
+               strcmp(op, SCR_TEST_PARSEINT_ARCH) == 0) {
       check_f64(op, args, input, scr_parse_int(input, strtod(args, NULL)),
                 expected_bytes, exp_len);
-    } else if (strcmp(op, "split") == 0) {
+    } else if (strncmp(op, "parseInt.", 9) == 0) {
+      /* another architecture's answer (see SCR_TEST_PARSEINT_ARCH) */
+    } else if (strcmp(op, "split") == 0 || strcmp(op, "splitLimit") == 0) {
       /* args = separator hex; expected = "<count>:<pieces joined by 0x01>" */
+      double limit = 4294967295.0;
+      char *comma = strcmp(op, "splitLimit") == 0 ? strchr(args, ',') : NULL;
+      if (comma) { *comma = '\0'; limit = strtod(comma + 1, NULL); }
       size_t sep_len = hex_decode(args, needle_bytes);
+      if (comma) *comma = ',';
       if (sep_len == (size_t)-1) goto badline_release;
       ScrStr *sep = scr_str_new(needle_bytes, sep_len);
-      ScrArr *pieces = scr_str_split(input, sep);
+      ScrArr *pieces = scr_str_split_limit(input, sep, limit);
       size_t count = (size_t)scr_arr_len(pieces);
       size_t cap = 32;
       for (size_t i = 0; i < count; i++) {
@@ -671,6 +1094,39 @@ int main(int argc, char **argv) {
         scr_str_release(p);
       }
       check(op, args, input, joined, o, expected_bytes, exp_len);
+      /* Consume and release one piece at a time. Empty pieces must remain
+       * distinct from exhaustion, and resetting must restart the walk. */
+      ScrSplitCursor cursor;
+      for (int pass = 0; pass < 3; pass++) {
+        scr_str_split_cursor_init(&cursor, scr_to_uint32(limit));
+        ScrStr *scratch = NULL;
+        size_t n = 0, used = 32;
+        ScrStr *piece;
+        for (;;) {
+          if (pass == 2) {
+            size_t length;
+            const char *bytes = scr_str_split_cursor_span(input, sep, &cursor, &length);
+            if (!bytes) break;
+            piece = scr_str_split_materialize(bytes, length, &scratch);
+          } else {
+            piece = scr_str_split_cursor_next(input, sep, &cursor, &scratch);
+            if (!piece) break;
+          }
+          if (n) joined[used++] = '\x01';
+          memcpy(joined + used, piece->data, piece->len);
+          used += piece->len;
+          n++;
+          scr_str_release(piece);
+        }
+        size_t prefix = (size_t)snprintf(joined, 32, "%zu:", n);
+        total++;
+        if (n != count || prefix > exp_len || used - 32 != exp_len - prefix ||
+            memcmp(joined + 32, expected_bytes + prefix, used - 32) != 0)
+          failed++;
+        total++;
+        if (scr_str_split_cursor_next(input, sep, &cursor, &scratch) != NULL) failed++;
+        scr_str_release(scratch);
+      }
       free(joined);
       scr_arr_release(pieces);
       scr_str_release(sep);
@@ -732,14 +1188,23 @@ int main(int argc, char **argv) {
   }
   if (in != stdin) fclose(in);
 
-  divergence_asserts();
+  ordering_asserts();
+  surrogate_asserts();
+  construction_asserts();
+  split_storage_asserts();
+  split_scratch_asserts();
   accumulation_asserts();
   short_string_asserts();
+  scan_units_asserts();
 #ifdef SCR_SIDX_TEST
   sparse_index_asserts();
   sparse_ascii_prefix_asserts();
   sparse_all_ascii_end_asserts();
   sparse_append_threshold_asserts();
+  index_activity_asserts();
+  sparse_slice_churn_asserts();
+  local_navigation_asserts();
+  positioned_suffix_eviction_asserts();
 #endif
 
 #ifdef SCR_RC_AUDIT

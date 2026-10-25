@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2635-trap-binding-unmappable-written.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1825-exhaustive-typeof-switch.ts"
+ ],
+ "diags": []
+}

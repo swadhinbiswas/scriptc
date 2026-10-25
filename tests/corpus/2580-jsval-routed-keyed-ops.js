@@ -1,4 +1,3 @@
-// @dynamic
 // The routed keyed READ/WRITE over island values held in 'unknown'
 // (SCR_DYN_JSVAL — lane dyn-routing-ops): o[k] runs in the ENGINE and the
 // result wraps back scalar-normalized; writes land on the REAL engine

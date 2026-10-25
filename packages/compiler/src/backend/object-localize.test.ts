@@ -54,7 +54,11 @@ function buildStrtab(names: string[]): { data: Uint8Array; offsets: Map<string, 
 /** Assemble an ET_REL ELF64LE: caller supplies content sections; the
  * builder appends .symtab, .strtab, .shstrtab (their indices are
  * sections.length, +1, +2). Symbols must list locals first. */
-function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCount: number): Uint8Array {
+function buildElf(
+  sections: ElfSectionSpec[],
+  symbols: ElfSymbolSpec[],
+  localCount: number,
+): Uint8Array {
   const strtab = buildStrtab(symbols.map((s) => s.name).filter((n) => n !== ""));
   const symData = new Uint8Array((symbols.length + 1) * 24);
   const symView = new DataView(symData.buffer);
@@ -68,7 +72,14 @@ function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCou
   const all: ElfSectionSpec[] = [
     { name: "", type: 0 },
     ...sections,
-    { name: ".symtab", type: SHT_SYMTAB, data: symData, link: sections.length + 2, info: localCount + 1, entsize: 24n },
+    {
+      name: ".symtab",
+      type: SHT_SYMTAB,
+      data: symData,
+      link: sections.length + 2,
+      info: localCount + 1,
+      entsize: 24n,
+    },
     { name: ".strtab", type: SHT_STRTAB, data: strtab.data },
     { name: ".shstrtab", type: SHT_STRTAB },
   ];
@@ -116,7 +127,14 @@ function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCou
 
 /* Tiny independent reader for assertions. */
 interface ReadElf {
-  sections: { name: string; type: number; flags: bigint; link: number; info: number; data: Uint8Array }[];
+  sections: {
+    name: string;
+    type: number;
+    flags: bigint;
+    link: number;
+    info: number;
+    data: Uint8Array;
+  }[];
   symbols: { name: string; binding: number; shndx: number }[];
   symtabInfo: number;
 }
@@ -126,7 +144,15 @@ function readElf(bytes: Uint8Array): ReadElf {
   const shoff = Number(view.getBigUint64(40, true));
   const shnum = view.getUint16(60, true);
   const shstrndx = view.getUint16(62, true);
-  const raw = [] as { nameOff: number; type: number; flags: bigint; offset: number; size: number; link: number; info: number }[];
+  const raw = [] as {
+    nameOff: number;
+    type: number;
+    flags: bigint;
+    offset: number;
+    size: number;
+    link: number;
+    info: number;
+  }[];
   for (let i = 0; i < shnum; i++) {
     const at = shoff + i * 64;
     raw.push({
@@ -176,7 +202,12 @@ describe("localizeElfObject", () => {
     relaView.setBigUint64(8, (3n << 32n) | 2n, true); // sym 3 (helper), R_X86_64_PC32
     const object = buildElf(
       [
-        { name: ".text", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, data: new Uint8Array(16) },
+        {
+          name: ".text",
+          type: SHT_PROGBITS,
+          flags: SHF_ALLOC | SHF_EXECINSTR,
+          data: new Uint8Array(16),
+        },
         { name: ".rela.text", type: SHT_RELA, data: rela, link: 3, info: 1, entsize: 24n },
       ],
       [
@@ -218,7 +249,12 @@ describe("localizeElfObject", () => {
     const object = buildElf(
       [
         { name: ".group", type: SHT_GROUP, data: group, link: 3, info: 2, entsize: 4n },
-        { name: ".text.grouped", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR | SHF_GROUP, data: new Uint8Array(4) },
+        {
+          name: ".text.grouped",
+          type: SHT_PROGBITS,
+          flags: SHF_ALLOC | SHF_EXECINSTR | SHF_GROUP,
+          data: new Uint8Array(4),
+        },
       ],
       [
         { name: "", binding: 0, shndx: 1 }, // the group's own section symbol
@@ -342,7 +378,12 @@ function buildCoff(sections: CoffSectionSpec[], symbols: CoffSymbolSpec[]): Uint
 }
 
 interface ReadCoff {
-  sections: { name: string; characteristics: number; data: Uint8Array; relocs: { sym: number }[] }[];
+  sections: {
+    name: string;
+    characteristics: number;
+    data: Uint8Array;
+    relocs: { sym: number }[];
+  }[];
   symbols: { name: string; section: number; storageClass: number; index: number }[];
 }
 
@@ -367,7 +408,8 @@ function readCoff(bytes: Uint8Array): ReadCoff {
     const relocAt = view.getUint32(h + 24, true);
     const relocCount = view.getUint16(h + 32, true);
     const relocs = [] as { sym: number }[];
-    for (let r = 0; r < relocCount; r++) relocs.push({ sym: view.getUint32(relocAt + r * 10 + 4, true) });
+    for (let r = 0; r < relocCount; r++)
+      relocs.push({ sym: view.getUint32(relocAt + r * 10 + 4, true) });
     sections.push({
       name,
       characteristics: view.getUint32(h + 36, true),
@@ -376,7 +418,7 @@ function readCoff(bytes: Uint8Array): ReadCoff {
     });
   }
   const symbols = [] as ReadCoff["symbols"];
-  for (let i = 0; i < symbolCount; ) {
+  for (let i = 0; i < symbolCount;) {
     const a = symtabAt + i * 18;
     const name =
       view.getUint32(a, true) === 0
@@ -546,9 +588,7 @@ describe("mergeAndLocalizeCoffObjects", () => {
       ],
     );
 
-    const merged = readCoff(
-      mergeAndLocalizeCoffObjects([program], [needed, alternate], new Set()),
-    );
+    const merged = readCoff(mergeAndLocalizeCoffObjects([program], [needed, alternate], new Set()));
     const byName = new Map(merged.symbols.map((s) => [s.name, s]));
     expect(byName.has("alternate_only")).toBe(false);
     expect(merged.sections.filter((s) => s.name === ".text")).toHaveLength(2);
@@ -598,7 +638,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
         { name: ".refptr.shared", section: 2 },
       ],
     );
-    const merged = readCoff(mergeAndLocalizeCoffObjects([program], [support], new Set(["keep_me"])));
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects([program], [support], new Set(["keep_me"])),
+    );
     // One survivor section carries the stub; no COMDAT flag remains anywhere.
     const rdata = merged.sections.filter((s) => s.name === ".rdata");
     expect(rdata.length).toBe(1);
@@ -612,25 +654,62 @@ describe("mergeAndLocalizeCoffObjects", () => {
   });
 
   test("private COMDAT code and leaderless unwind sections retain each object's relocations", () => {
-    const member = (name: string, marker: number): Uint8Array => buildCoff([
-      { name: ".text", data: new Uint8Array([marker]), characteristics: 0x60000020 | IMAGE_SCN_LNK_COMDAT, comdatSelection: 1 },
-      { name: ".xdata", data: new Uint8Array([marker + 10]), characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT, comdatSelection: 2 },
-      { name: ".pdata", data: new Uint8Array(8), relocs: [{ va: 0, sym: 2, type: 3 }, { va: 4, sym: 3, type: 3 }] },
-    ], [
-      { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
-      { name: "private_fn", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC },
-      { name: ".xdata", section: 2, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
-      { name: ".pdata", section: 3, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
-      { name, section: 1 },
-    ]);
-    const merged = readCoff(mergeAndLocalizeCoffObjects([member("first", 1), member("second", 2)], [], new Set(["first", "second"])));
+    const member = (name: string, marker: number): Uint8Array =>
+      buildCoff(
+        [
+          {
+            name: ".text",
+            data: new Uint8Array([marker]),
+            characteristics: 0x60000020 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 1,
+          },
+          {
+            name: ".xdata",
+            data: new Uint8Array([marker + 10]),
+            characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 2,
+          },
+          {
+            name: ".pdata",
+            data: new Uint8Array(8),
+            relocs: [
+              { va: 0, sym: 2, type: 3 },
+              { va: 4, sym: 3, type: 3 },
+            ],
+          },
+        ],
+        [
+          { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: "private_fn", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC },
+          { name: ".xdata", section: 2, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: ".pdata", section: 3, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name, section: 1 },
+        ],
+      );
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects(
+        [member("first", 1), member("second", 2)],
+        [],
+        new Set(["first", "second"]),
+      ),
+    );
     expect(merged.sections).toHaveLength(6);
-    expect(merged.sections.filter((s) => s.name === ".text").map((s) => [...s.data])).toEqual([[1], [2]]);
-    expect(merged.sections.filter((s) => s.name === ".xdata").map((s) => [...s.data])).toEqual([[11], [12]]);
-    for (const section of merged.sections) expect(section.characteristics & IMAGE_SCN_LNK_COMDAT).toBe(0);
+    expect(merged.sections.filter((s) => s.name === ".text").map((s) => [...s.data])).toEqual([
+      [1],
+      [2],
+    ]);
+    expect(merged.sections.filter((s) => s.name === ".xdata").map((s) => [...s.data])).toEqual([
+      [11],
+      [12],
+    ]);
+    for (const section of merged.sections)
+      expect(section.characteristics & IMAGE_SCN_LNK_COMDAT).toBe(0);
     const byIndex = new Map(merged.symbols.map((s) => [s.index, s]));
     const pdata = merged.sections.filter((s) => s.name === ".pdata");
-    expect(pdata.map((s) => s.relocs.map((r) => byIndex.get(r.sym)?.section))).toEqual([[1, 2], [4, 5]]);
+    expect(pdata.map((s) => s.relocs.map((r) => byIndex.get(r.sym)?.section))).toEqual([
+      [1, 2],
+      [4, 5],
+    ]);
   });
 
   const comdatPair = (
@@ -639,7 +718,12 @@ describe("mergeAndLocalizeCoffObjects", () => {
     secondData: Uint8Array,
   ): { program: Uint8Array; support: Uint8Array[] } => {
     const program = buildCoff(
-      [text([{ va: 0, sym: 3, type: 4 }, { va: 4, sym: 4, type: 4 }])],
+      [
+        text([
+          { va: 0, sym: 3, type: 4 },
+          { va: 4, sym: 4, type: 4 },
+        ]),
+      ],
       [
         { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
         { name: "entry", section: 1 },
@@ -670,7 +754,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
 
   test("COMDAT LARGEST retains the largest selected definition", () => {
     const pair = comdatPair(6, new Uint8Array([1, 2, 3, 4]), new Uint8Array([5, 6, 7, 8, 9]));
-    const merged = readCoff(mergeAndLocalizeCoffObjects([pair.program], pair.support, new Set(["entry"])));
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects([pair.program], pair.support, new Set(["entry"])),
+    );
     const rdata = merged.sections.filter((section) => section.name === ".rdata");
     expect(rdata).toHaveLength(1);
     expect([...rdata[0]!.data]).toEqual([5, 6, 7, 8, 9]);
@@ -745,8 +831,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
   test("COMDAT duplicates refuse conflicting selection kinds", () => {
     const one = comdatPair(2, new Uint8Array(4), new Uint8Array(4));
     const two = comdatPair(3, new Uint8Array(4), new Uint8Array(4));
-    expect(() => mergeAndLocalizeCoffObjects([one.program], [one.support[0]!, two.support[1]!], new Set()))
-      .toThrow(/conflicting COMDAT selections/);
+    expect(() =>
+      mergeAndLocalizeCoffObjects([one.program], [one.support[0]!, two.support[1]!], new Set()),
+    ).toThrow(/conflicting COMDAT selections/);
   });
 
   test("duplicate strong definitions refuse with both members named", () => {

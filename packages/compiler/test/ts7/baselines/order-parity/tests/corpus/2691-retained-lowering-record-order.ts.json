@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2691-retained-lowering-record-order.ts"
+ ],
+ "diags": []
+}

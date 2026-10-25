@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2520-private-statics-class-name-calls.ts"
+ ],
+ "diags": []
+}

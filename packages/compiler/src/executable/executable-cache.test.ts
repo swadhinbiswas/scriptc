@@ -2,13 +2,22 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { FrontendInputTracker, trackedFileExists, trackedReadFile } from "../frontend/input-tracker.js";
-import { nativeArtifactDependenciesStillMatch, snapshotNativeArtifactDependencies } from "../backend/native-toolchain.js";
+import {
+  FrontendInputTracker,
+  trackedFileExists,
+  trackedReadFile,
+} from "../frontend/input-tracker.js";
+import {
+  nativeArtifactDependenciesStillMatch,
+  snapshotNativeArtifactDependencies,
+} from "../backend/native-toolchain.js";
 import { installDarwinDebugSymbols, readDarwinDebugSymbols } from "../backend/debug-symbols.js";
 import {
+  hasEarlyExecutableNativeBuild,
   publishEarlyExecutableCache,
   readEarlyExecutableCache,
   readRoutedExecutableCache,
+  recordEarlyExecutableNativeBuild,
   type EarlyExecutableCacheOptions,
   type EarlyExecutableNativeFeatures,
 } from "./executable-cache.js";
@@ -21,13 +30,11 @@ afterEach(async () => {
 
 const native: EarlyExecutableNativeFeatures = {
   backend: "llvm",
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: true,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -40,17 +47,31 @@ const native: EarlyExecutableNativeFeatures = {
   bigint: false,
   searchParams: false,
   qs: false,
+  utilPromisify: false,
+  dynBuiltinClass: false,
+  dynBuiltinStream: false,
   parseArgs: false,
   stream: false,
   net: false,
   http: false,
   http2: false,
   dgram: false,
+  dnsPromises: false,
+  dgramDyn: false,
+  textCodecDyn: false,
   watch: false,
   foreignFfi: false,
   nodeTest: false,
   tls: false,
   tlsCa: false,
+  cipher: false,
+  ecdh: false,
+  dh: false,
+  pki: false,
+  ed25519: false,
+  x509: false,
+  webcrypto: false,
+  perfLoop: false,
 };
 
 async function fixture(): Promise<{
@@ -83,7 +104,6 @@ async function fixture(): Promise<{
       outPath: join(dir, "entry"),
       emitIr: true,
       sanitize: false,
-      dynamic: false,
       backend: "llvm",
       npmStatic: null,
       ffiProfile: null,
@@ -118,8 +138,15 @@ test("early executable cache restores the emitted TU, IR, and native feature gat
   const hit = await readEarlyExecutableCache(f.root, f.options);
   expect(hit?.native).toEqual(native);
   expect(hit?.executableRestored).toBe(false);
-  expect(await readFile(f.llvmPath, "utf8")).toBe("; generated llvm\n");
-  expect(await readFile(f.irPath, "utf8")).toContain("irVersion");
+  // The build compiles private copies beside the shared names and installs
+  // them there when it is done.
+  expect(hit?.llvmPath).toBe(f.llvmPath);
+  expect(hit?.irPath).toBe(f.irPath);
+  expect(hit?.llvmSourcePath).toMatch(/[/\\]\.scriptc-llvm-[^/\\]*\.ll$/);
+  expect(hit?.irSourcePath).toMatch(/[/\\]\.scriptc-ir-/);
+  expect(await readFile(hit!.llvmSourcePath!, "utf8")).toBe("; generated llvm\n");
+  expect(await readFile(hit!.irSourcePath!, "utf8")).toContain("irVersion");
+  await expect(stat(f.llvmPath)).rejects.toThrow();
   expect(await readFile(alternateC, "utf8")).toBe("/* user-owned native source */\n");
 });
 
@@ -130,11 +157,19 @@ test("early dev cache restores the matching dSYM and rejects a missing payload",
   const tracker = new FrontendInputTracker();
   tracker.run(() => trackedReadFile(f.source));
   await writeFile(f.options.outPath, "native binary");
-  const symbols = Buffer.concat([Buffer.from("SCDSYM01"), Buffer.from([5, 0, 0, 0]), Buffer.from("plistDWARF")]);
+  const symbols = Buffer.concat([
+    Buffer.from("SCDSYM01"),
+    Buffer.from([5, 0, 0, 0]),
+    Buffer.from("plistDWARF"),
+  ]);
   await installDarwinDebugSymbols(symbols, f.options.outPath);
   await publishEarlyExecutableCache(f.root, f.options, {
-    llvmPath: f.llvmPath, irPath: f.irPath, native: { ...native, optimization: "dev" },
-    executableRestored: true, nativeDependencies: [], frontend: tracker.snapshot(),
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native: { ...native, optimization: "dev" },
+    executableRestored: true,
+    nativeDependencies: [],
+    frontend: tracker.snapshot(),
   });
   await rm(`${f.options.outPath}.dSYM`, { recursive: true });
   expect((await readEarlyExecutableCache(f.root, f.options))?.executableRestored).toBe(true);
@@ -144,6 +179,22 @@ test("early dev cache restores the matching dSYM and rejects a missing payload",
   expect(cachedSymbols).toBeDefined();
   await rm(join(f.root, cachedSymbols!));
   expect(await readEarlyExecutableCache(f.root, f.options)).toBeNull();
+});
+
+test("early executable cache preserves worker runtime selection when only frontend output restores", async () => {
+  const f = await fixture();
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => trackedReadFile(f.source));
+  await publishEarlyExecutableCache(f.root, f.options, {
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native: { ...native, workers: true },
+    executableRestored: false,
+    frontend: tracker.snapshot(),
+  });
+  const restored = await readEarlyExecutableCache(f.root, f.options);
+  expect(restored?.native.workers).toBe(true);
+  expect(restored?.executableRestored).toBe(false);
 });
 
 test("early executable cache misses on source and resolution changes", async () => {
@@ -169,7 +220,7 @@ test("early executable cache misses on source and resolution changes", async () 
   expect(await readEarlyExecutableCache(f.root, f.options)).toBeNull();
 });
 
-test("early executable keys isolate compile modes, paths, implementation, and FFI manifests", async () => {
+test("early executable keys isolate compile modes, paths, implementation, checker, and FFI manifests", async () => {
   const f = await fixture();
   const tracker = new FrontendInputTracker();
   tracker.run(() => trackedReadFile(f.source));
@@ -183,8 +234,14 @@ test("early executable keys isolate compile modes, paths, implementation, and FF
   const variants: EarlyExecutableCacheOptions[] = [
     { ...f.options, emitIr: false },
     { ...f.options, sanitize: true },
-    { ...f.options, dynamic: true },
     { ...f.options, optimization: "dev" },
+    { ...f.options, optimization: "speed" },
+    { ...f.options, detachedExit: true },
+    { ...f.options, targetCpu: "x86-64-v3" },
+    { ...f.options, targetCpu: "x86-64-v4" },
+    { ...f.options, profile: "profile-generate:/tmp/%p.profraw" },
+    { ...f.options, profile: "profile-use:digest" },
+    { ...f.options, checker: "tsc-ts-executable-identity" },
     { ...f.options, npmStatic: "auto" },
     { ...f.options, npmStatic: ["commander"] },
     { ...f.options, outPath: join(f.options.outDir, "other") },
@@ -193,11 +250,34 @@ test("early executable keys isolate compile modes, paths, implementation, and FF
     { ...f.options, nativeEnvironment: "other-native-environment" },
     { ...f.options, nodeVersion: "v24-other" },
     { ...f.options, implementation: "other-implementation" },
-    { ...f.options, ffiProfile: { path: join(f.options.outDir, "ffi.json"), bytes: Buffer.from("one") } },
+    {
+      ...f.options,
+      ffiProfile: { path: join(f.options.outDir, "ffi.json"), bytes: Buffer.from("one") },
+    },
   ];
   for (const options of variants) {
     expect(await readEarlyExecutableCache(f.root, options)).toBeNull();
   }
+});
+
+test("speed entries round-trip their posture and stay isolated from release and dev", async () => {
+  const f = await fixture();
+  const speedOptions: EarlyExecutableCacheOptions = { ...f.options, optimization: "speed" };
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => trackedReadFile(f.source));
+  await publishEarlyExecutableCache(f.root, speedOptions, {
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native: { ...native, optimization: "speed" },
+    executableRestored: false,
+    frontend: tracker.snapshot(),
+  });
+  expect((await readEarlyExecutableCache(f.root, speedOptions))?.native).toEqual({
+    ...native,
+    optimization: "speed",
+  });
+  expect(await readEarlyExecutableCache(f.root, f.options)).toBeNull();
+  expect(await readEarlyExecutableCache(f.root, { ...f.options, optimization: "dev" })).toBeNull();
 });
 
 test("early executable cache rejects corruption and refreshes payload LRU times", async () => {
@@ -242,15 +322,17 @@ test("early executable cache restores a validated final binary", async () => {
     irPath: f.irPath,
     native,
     executableRestored: true,
-    nativeDependencies: [{
-      path: dependency,
-      kind: "file",
-      dev: info.dev,
-      ino: info.ino,
-      size: info.size,
-      mtimeMs: info.mtimeMs,
-      ctimeMs: info.ctimeMs,
-    }],
+    nativeDependencies: [
+      {
+        path: dependency,
+        kind: "file",
+        dev: info.dev,
+        ino: info.ino,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+        ctimeMs: info.ctimeMs,
+      },
+    ],
     frontend: tracker.snapshot(),
   });
   await writeFile(f.options.outPath, "caller-modified\n");
@@ -279,15 +361,17 @@ test("routed executable hits require an unchanged compiler implementation proof"
     stat(dependency),
     stat(nativeDependency),
   ]);
-  f.options.implementationDependencies = [{
-    path: dependency,
-    kind: "file",
-    dev: implementationInfo.dev,
-    ino: implementationInfo.ino,
-    size: implementationInfo.size,
-    mtimeMs: implementationInfo.mtimeMs,
-    ctimeMs: implementationInfo.ctimeMs,
-  }];
+  f.options.implementationDependencies = [
+    {
+      path: dependency,
+      kind: "file",
+      dev: implementationInfo.dev,
+      ino: implementationInfo.ino,
+      size: implementationInfo.size,
+      mtimeMs: implementationInfo.mtimeMs,
+      ctimeMs: implementationInfo.ctimeMs,
+    },
+  ];
   const tracker = new FrontendInputTracker();
   tracker.run(() => trackedReadFile(f.source));
   await publishEarlyExecutableCache(f.root, f.options, {
@@ -295,15 +379,17 @@ test("routed executable hits require an unchanged compiler implementation proof"
     irPath: f.irPath,
     native,
     executableRestored: true,
-    nativeDependencies: [{
-      path: nativeDependency,
-      kind: "file",
-      dev: nativeInfo.dev,
-      ino: nativeInfo.ino,
-      size: nativeInfo.size,
-      mtimeMs: nativeInfo.mtimeMs,
-      ctimeMs: nativeInfo.ctimeMs,
-    }],
+    nativeDependencies: [
+      {
+        path: nativeDependency,
+        kind: "file",
+        dev: nativeInfo.dev,
+        ino: nativeInfo.ino,
+        size: nativeInfo.size,
+        mtimeMs: nativeInfo.mtimeMs,
+        ctimeMs: nativeInfo.ctimeMs,
+      },
+    ],
     frontend: tracker.snapshot(),
   });
   const route = { ...f.options };
@@ -329,15 +415,17 @@ test("routed executable hits require an unchanged compiler implementation proof"
     irPath: f.irPath,
     native,
     executableRestored: true,
-    nativeDependencies: [{
-      path: nativeDependency,
-      kind: "file",
-      dev: nativeInfo.dev,
-      ino: nativeInfo.ino,
-      size: nativeInfo.size,
-      mtimeMs: nativeInfo.mtimeMs,
-      ctimeMs: nativeInfo.ctimeMs,
-    }],
+    nativeDependencies: [
+      {
+        path: nativeDependency,
+        kind: "file",
+        dev: nativeInfo.dev,
+        ino: nativeInfo.ino,
+        size: nativeInfo.size,
+        mtimeMs: nativeInfo.mtimeMs,
+        ctimeMs: nativeInfo.ctimeMs,
+      },
+    ],
     frontend: tracker.snapshot(),
   });
   expect(await readRoutedExecutableCache(f.root, route)).not.toBeNull();
@@ -346,9 +434,11 @@ test("routed executable hits require an unchanged compiler implementation proof"
 });
 
 test("native dependency validation rejects malformed cache data", async () => {
-  expect(await nativeArtifactDependenciesStillMatch([
-    { path: "/tmp/not-enough-fields", kind: "file" },
-  ] as never)).toBe(false);
+  expect(
+    await nativeArtifactDependenciesStillMatch([
+      { path: "/tmp/not-enough-fields", kind: "file" },
+    ] as never),
+  ).toBe(false);
 });
 
 async function routedFixture(executableRestored = true) {
@@ -363,10 +453,17 @@ async function routedFixture(executableRestored = true) {
     writeFile(f.options.outPath, "cached executable\n"),
   ]);
   const info = await stat(implementation);
-  f.options.implementationDependencies = [{
-    path: implementation, kind: "file", dev: info.dev, ino: info.ino,
-    size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs,
-  }];
+  f.options.implementationDependencies = [
+    {
+      path: implementation,
+      kind: "file",
+      dev: info.dev,
+      ino: info.ino,
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      ctimeMs: info.ctimeMs,
+    },
+  ];
   const tracker = new FrontendInputTracker();
   tracker.run(() => {
     trackedReadFile(f.source);
@@ -374,8 +471,13 @@ async function routedFixture(executableRestored = true) {
     trackedFileExists(f.missing);
   });
   await publishEarlyExecutableCache(f.root, f.options, {
-    llvmPath: f.llvmPath, irPath: f.irPath, native, executableRestored,
-    ...(executableRestored ? { nativeDependencies: await snapshotNativeArtifactDependencies([nativeDependency]) } : {}),
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native,
+    executableRestored,
+    ...(executableRestored
+      ? { nativeDependencies: await snapshotNativeArtifactDependencies([nativeDependency]) }
+      : {}),
     frontend: tracker.snapshot(),
   });
   await Promise.all([
@@ -389,8 +491,12 @@ async function routedFixture(executableRestored = true) {
 test("missing and disabled routes skip deferred native driver discovery", async () => {
   const f = await fixture();
   const discover = vi.fn(async () => f.options.nativeEnvironment);
-  expect(await readRoutedExecutableCache(null, { ...f.options, nativeEnvironment: discover })).toBeNull();
-  expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover })).toBeNull();
+  expect(
+    await readRoutedExecutableCache(null, { ...f.options, nativeEnvironment: discover }),
+  ).toBeNull();
+  expect(
+    await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover }),
+  ).toBeNull();
   expect(discover).not.toHaveBeenCalled();
 });
 
@@ -404,7 +510,9 @@ test.each(["source", "payload", "frontend-only"])(
       await writeFile(join(f.root, "early-exe", key!, "program.bin"), "corrupt executable\n");
     }
     const discover = vi.fn(async () => f.options.nativeEnvironment);
-    expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover })).toBeNull();
+    expect(
+      await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover }),
+    ).toBeNull();
     expect(discover).not.toHaveBeenCalled();
     expect(await readFile(f.options.outPath, "utf8")).toBe("current executable\n");
     expect(await readFile(f.llvmPath, "utf8")).toBe("; current LLVM\n");
@@ -415,7 +523,10 @@ test.each(["source", "payload", "frontend-only"])(
 test("a deferred driver fingerprint is checked once before restoring a routed hit", async () => {
   const f = await routedFixture();
   const discover = vi.fn(async () => f.options.nativeEnvironment);
-  expect((await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover }))?.executableRestored).toBe(true);
+  expect(
+    (await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover }))
+      ?.executableRestored,
+  ).toBe(true);
   expect(discover).toHaveBeenCalledTimes(1);
   expect(await readFile(f.options.outPath, "utf8")).toBe("cached executable\n");
   expect(await readFile(f.llvmPath, "utf8")).toBe("; generated llvm\n");
@@ -429,12 +540,15 @@ test.each(["environment", "failure", "source", "declarations", "implementation",
     const discover = vi.fn(async () => {
       if (change === "failure") throw new Error("driver discovery failed");
       if (change === "source") await writeFile(f.source, 'console.log("edited");\n');
-      if (change === "declarations") await writeFile(f.declarations, "export const value: string;\n");
+      if (change === "declarations")
+        await writeFile(f.declarations, "export const value: string;\n");
       if (change === "implementation") await writeFile(f.implementation, "compiler-v2\n");
       if (change === "native") await writeFile(f.nativeDependency, "native-v2\n");
       return change === "environment" ? "another driver" : f.options.nativeEnvironment;
     });
-    expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover })).toBeNull();
+    expect(
+      await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: discover }),
+    ).toBeNull();
     expect(discover).toHaveBeenCalledTimes(1);
     expect(await readFile(f.options.outPath, "utf8")).toBe("current executable\n");
     expect(await readFile(f.llvmPath, "utf8")).toBe("; current LLVM\n");
@@ -442,25 +556,94 @@ test.each(["environment", "failure", "source", "declarations", "implementation",
   },
 );
 
-test.each(["implementation", "native", "declarations", "resolution"])("a stale %s proof refuses a deferred routed hit", async (change) => {
-  const f = await routedFixture();
-  const path = { implementation: f.implementation, native: f.nativeDependency, declarations: f.declarations, resolution: f.missing }[change]!;
-  await writeFile(path, "changed before discovery\n");
-  expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: async () => f.options.nativeEnvironment })).toBeNull();
-  expect(await readFile(f.options.outPath, "utf8")).toBe("current executable\n");
-  expect(await readFile(f.llvmPath, "utf8")).toBe("; current LLVM\n");
-  expect(await readFile(f.irPath, "utf8")).toBe("current IR\n");
-});
+test.each(["implementation", "native", "declarations", "resolution"])(
+  "a stale %s proof refuses a deferred routed hit",
+  async (change) => {
+    const f = await routedFixture();
+    const path = {
+      implementation: f.implementation,
+      native: f.nativeDependency,
+      declarations: f.declarations,
+      resolution: f.missing,
+    }[change]!;
+    await writeFile(path, "changed before discovery\n");
+    expect(
+      await readRoutedExecutableCache(f.root, {
+        ...f.options,
+        nativeEnvironment: async () => f.options.nativeEnvironment,
+      }),
+    ).toBeNull();
+    expect(await readFile(f.options.outPath, "utf8")).toBe("current executable\n");
+    expect(await readFile(f.llvmPath, "utf8")).toBe("; current LLVM\n");
+    expect(await readFile(f.irPath, "utf8")).toBe("current IR\n");
+  },
+);
 
 test("the route index still isolates eager and deferred native environments", async () => {
   const f = await routedFixture();
-  expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: "another driver" })).toBeNull();
-  await publishEarlyExecutableCache(f.root, { ...f.options, nativeEnvironment: "another driver" }, {
-    llvmPath: f.llvmPath, irPath: f.irPath, native, executableRestored: true,
-    nativeDependencies: await snapshotNativeArtifactDependencies([f.nativeDependency]),
-    frontend: (await readEarlyExecutableCache(f.root, f.options))!.frontend,
-  });
+  expect(
+    await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: "another driver" }),
+  ).toBeNull();
+  await publishEarlyExecutableCache(
+    f.root,
+    { ...f.options, nativeEnvironment: "another driver" },
+    {
+      llvmPath: f.llvmPath,
+      irPath: f.irPath,
+      native,
+      executableRestored: true,
+      nativeDependencies: await snapshotNativeArtifactDependencies([f.nativeDependency]),
+      frontend: (await readEarlyExecutableCache(f.root, f.options))!.frontend,
+    },
+  );
   expect(await readRoutedExecutableCache(f.root, f.options)).toBeNull();
-  expect(await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: async () => f.options.nativeEnvironment })).toBeNull();
-  expect((await readRoutedExecutableCache(f.root, { ...f.options, nativeEnvironment: async () => "another driver" }))?.executableRestored).toBe(true);
+  expect(
+    await readRoutedExecutableCache(f.root, {
+      ...f.options,
+      nativeEnvironment: async () => f.options.nativeEnvironment,
+    }),
+  ).toBeNull();
+  expect(
+    (
+      await readRoutedExecutableCache(f.root, {
+        ...f.options,
+        nativeEnvironment: async () => "another driver",
+      })
+    )?.executableRestored,
+  ).toBe(true);
+});
+
+test("a recorded native build is found by its invocation", async () => {
+  const f = await fixture();
+  expect(await hasEarlyExecutableNativeBuild(null, f.options)).toBe(false);
+  expect(await hasEarlyExecutableNativeBuild(f.root, f.options)).toBe(false);
+  await recordEarlyExecutableNativeBuild(null, f.options);
+  await recordEarlyExecutableNativeBuild(f.root, f.options);
+  expect(await hasEarlyExecutableNativeBuild(f.root, f.options)).toBe(true);
+  // The record does not depend on the compiler implementation or the native environment.
+  const rebuilt: EarlyExecutableCacheOptions = {
+    ...f.options,
+    implementation: "b".repeat(64),
+    nativeEnvironment: "another driver",
+  };
+  expect(await hasEarlyExecutableNativeBuild(f.root, rebuilt)).toBe(true);
+  expect(
+    await hasEarlyExecutableNativeBuild(f.root, {
+      ...f.options,
+      outPath: join(f.options.outDir, "other"),
+    }),
+  ).toBe(false);
+  expect(await hasEarlyExecutableNativeBuild(f.root, { ...f.options, sanitize: true })).toBe(false);
+  // Publishing an executable does not record a native build.
+  const other = { ...f.options, outPath: join(f.options.outDir, "published") };
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => trackedReadFile(f.source));
+  await publishEarlyExecutableCache(f.root, other, {
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native,
+    executableRestored: false,
+    frontend: tracker.snapshot(),
+  });
+  expect(await hasEarlyExecutableNativeBuild(f.root, other)).toBe(false);
 });

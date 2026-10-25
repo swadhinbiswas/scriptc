@@ -18,9 +18,15 @@ function sanitize(name: string, property = false): string {
   for (let i = 0; i < name.length; i++) {
     const code = name.charCodeAt(i);
     const ch = name.charAt(i);
-    result += code === 46 && !property ? "_"
-      : (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || (code === 95 && !property)
-        ? ch : `_x${unsignedHex(code)}_`;
+    result +=
+      code === 46 && !property
+        ? "_"
+        : (code >= 65 && code <= 90) ||
+            (code >= 97 && code <= 122) ||
+            (code >= 48 && code <= 57) ||
+            (code === 95 && !property)
+          ? ch
+          : `_x${unsignedHex(code)}_`;
   }
   return result;
 }
@@ -47,6 +53,12 @@ export function mangleRawParam(localId: string): string {
 /** Env-signature wrapper letting a plain declared function be a closure. */
 export function mangleWrapper(fnName: string): string {
   return `sc_w_${sanitize(fnName)}`;
+}
+
+/** Env-signature wrapper of a declared function's borrowing body: the
+ * closure entry that lends every reference argument. */
+export function mangleBorrowingWrapper(fnName: string): string {
+  return `sc_wb_${sanitize(fnName)}`;
 }
 
 /** The interned (immortal) closure value of a declared function. */
@@ -96,6 +108,13 @@ export function mangleVtStruct(rootClassName: string): string {
  * differ before any user-controlled text, so the two can never collide. */
 export function mangleVtInstance(className: string): string {
   return `sc_vtable_${sanitize(className)}`;
+}
+/** The per-HIERARCHY array of the vtables of its classes in preorder, for
+ * hierarchies whose instances keep their class id in the rc word
+ * (classes.ts LlClassMeta.idInRc). `sc_vta_` differs from `sc_vtable_` and
+ * `sc_vtt_` before any user-controlled text. */
+export function mangleVtArray(rootClassName: string): string {
+  return `sc_vta_${sanitize(rootClassName)}`;
 }
 /** A virtual slot's member name inside the vtable struct. Sibling
  * branches of one hierarchy can each declare a slot for the SAME method
@@ -160,6 +179,27 @@ export function mangleGlobal(globalId: string): string {
 export function mangleAsyncSpawn(fnName: string): string {
   return `sc_as_${sanitize(fnName)}`;
 }
+/** `await f(...)` of a direct async call: the call and its await as one
+ * entry that returns the awaited value. */
+export function mangleAsyncAwaitCall(fnName: string): string {
+  return `sc_aw_${sanitize(fnName)}`;
+}
+/** `return f(...)` of a direct async call in an async function: the call,
+ * the adoption turn, and the await as one entry returning the value. */
+export function mangleAsyncAdoptCall(fnName: string): string {
+  return `sc_ad_${sanitize(fnName)}`;
+}
+/** A stackless coroutine body's `await f(...)` of a fiberless async f: the
+ * body run in place, returning its result with any throw left pending; the
+ * coroutine takes the await's turn itself. */
+export function mangleAsyncInlineAwaitCall(fnName: string): string {
+  return `sc_ai_${sanitize(fnName)}`;
+}
+/** A stackless coroutine body's `await f(...)` of a stackless async f: the
+ * spawn of f's fiber record, which keeps its promise inside (direct await). */
+export function mangleAsyncDirectSpawn(fnName: string): string {
+  return `sc_dw_${sanitize(fnName)}`;
+}
 export function mangleTrampoline(fnName: string): string {
   return `sc_tr_${sanitize(fnName)}`;
 }
@@ -175,6 +215,11 @@ export function mangleGenSpawn(fnName: string): string {
 }
 export function mangleGenDrop(fnName: string): string {
   return `sc_gd_${sanitize(fnName)}`;
+}
+/** The never-started return() hook of a generator that closes its source
+ * argument (an iterator helper). */
+export function mangleGenSourceClose(fnName: string): string {
+  return `sc_gc_${sanitize(fnName)}`;
 }
 /** Emitted ref-kind resolve thunk, interned per inner-type key. */
 export function mangleResolveThunk(n: number): string {

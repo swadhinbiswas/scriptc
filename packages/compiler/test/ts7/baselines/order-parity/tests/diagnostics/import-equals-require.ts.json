@@ -1,0 +1,26 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/import-equals-require.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Import assignment cannot be used when targeting ECMAScript modules. Consider using 'import * as ns from \"mod\"', 'import {a} from \"mod\"', 'import d from \"mod\"', or another module format instead.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-equals-require.ts",
+    "start": 178,
+    "end": 204
+   }
+  },
+  {
+   "code": "SC1013",
+   "message": "import = require(...) assignments are not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/import-equals-require.ts",
+    "start": 178,
+    "end": 204
+   },
+   "milestone": "later"
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/missing-read-narrowed-storage.ts"
+ ],
+ "diags": []
+}

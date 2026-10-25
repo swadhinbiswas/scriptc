@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/300-if-else.ts"
+ ],
+ "diags": []
+}

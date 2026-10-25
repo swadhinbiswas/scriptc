@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5448-fs-glob-patterns.ts"
+ ],
+ "diags": []
+}

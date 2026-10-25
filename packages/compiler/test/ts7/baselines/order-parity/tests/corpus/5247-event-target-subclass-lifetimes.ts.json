@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5247-event-target-subclass-lifetimes.ts"
+ ],
+ "diags": []
+}

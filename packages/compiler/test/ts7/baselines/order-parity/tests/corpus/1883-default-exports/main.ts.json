@@ -1,0 +1,11 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1883-default-exports/double.ts",
+  "<repo>/tests/corpus/1883-default-exports/counter.ts",
+  "<repo>/tests/corpus/1883-default-exports/config.ts",
+  "<repo>/tests/corpus/1883-default-exports/pick.ts",
+  "<repo>/tests/corpus/1883-default-exports/hub.ts",
+  "<repo>/tests/corpus/1883-default-exports/main.ts"
+ ],
+ "diags": []
+}

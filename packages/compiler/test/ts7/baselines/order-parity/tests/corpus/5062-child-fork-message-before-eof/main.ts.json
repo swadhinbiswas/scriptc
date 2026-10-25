@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5062-child-fork-message-before-eof/main.ts"
+ ],
+ "diags": []
+}

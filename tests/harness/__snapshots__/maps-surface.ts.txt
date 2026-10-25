@@ -1,8 +1,6 @@
-maps-surface.ts:21:11 - error SC2011: values of type '(v: number, k: string, theMap: Map<string, number>) => void' have no static representation but run in the embedded dynamic engine, which this build does not include
+maps-surface.ts:21:11 - error SC2001: values of type '(v: number, k: string, theMap: Map<string, number>) => void' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
 
   20 | // The forEach callback receives (value, key) — no third map parameter.
   21 | m.forEach((v, k, theMap) => console.log(k, v));
      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   22 | // The unsupported callback must produce a diagnostic.
-
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)

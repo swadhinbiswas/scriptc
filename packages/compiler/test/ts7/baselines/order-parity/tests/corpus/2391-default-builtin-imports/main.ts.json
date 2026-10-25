@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2391-default-builtin-imports/main.ts"
+ ],
+ "diags": []
+}

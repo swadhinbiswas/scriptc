@@ -5,7 +5,6 @@ const MACHO_LINKER_GLOBALS = new Set(["__mh_execute_header"]);
 export function validateLlvmHelperExports(symbols) {
   return {
     hasMain: symbols.includes("_main"),
-    unexpected: symbols.filter((symbol) =>
-      symbol !== "_main" && !MACHO_LINKER_GLOBALS.has(symbol)),
+    unexpected: symbols.filter((symbol) => symbol !== "_main" && !MACHO_LINKER_GLOBALS.has(symbol)),
   };
 }

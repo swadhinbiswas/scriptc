@@ -1,9 +1,21 @@
 import type { CompileFailure, CompileRequestOptions } from "../compile-types.js";
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
-import { checkerPanicDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import { frontendDisposed } from "../frontend/dispose-hook.js";
+import {
+  checkerPanicDiag,
+  npmStaticRefusalDiag,
+  iceDiag,
+  isCheckerPanic,
+  type ScrDiagnostic,
+} from "../diagnostics/diagnostic.js";
 import type { IrModule, SrcLoc } from "../ir/ir.js";
 import { validateModule } from "../ir/validate.js";
-import { fenceSpeculativeWasiFunctions, moduleWasiUnavailableSurface, targetRefusalDiag } from "../backend/target-diagnostics.js";
+import { checkContracts } from "../contracts/check.js";
+import {
+  fenceSpeculativeWasiFunctions,
+  moduleWasiUnavailableSurface,
+  targetRefusalDiag,
+} from "../backend/target-diagnostics.js";
 import type { LowerResult, LowerStats } from "../frontend/lowering/lowerer.js";
 import type { FrontendFactory } from "../frontend/pipeline.js";
 import type { CompilationTiming } from "../timing.js";
@@ -13,6 +25,9 @@ export interface PreparedExecutableModule {
   mod: IrModule;
   sourceTexts: Map<string, string>;
   stats: LowerStats;
+  /** Divergence warnings (SC6xxx): the build succeeds; these sites can
+   * behave differently from Node. */
+  warnings: ScrDiagnostic[];
 }
 
 /** Release the parser/checker before native object generation begins. */
@@ -37,13 +52,26 @@ export function prepareExecutableModule(
       sourceTexts: fe.sourceTexts(),
     });
 
+    const refused = fe.npmStatic.filter((entry) => entry.status === "refused");
+    if (refused.length > 0) {
+      return fail(
+        refused.map((entry) =>
+          npmStaticRefusalDiag(
+            entry.package,
+            entry.detail ?? "its static compilation was refused",
+            fe.npmImportSites.get(entry.package) ?? { file: entryPath, start: 0, end: 0 },
+            entry.hint,
+          ),
+        ),
+      );
+    }
     if (fe.preflight.length > 0) return fail(fe.preflight);
 
     try {
       lowered = fe.lower({
-        dynamic: opts.dynamic ?? false,
         targetPlatform: buildPlatform,
         ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
+        ...(opts.tier !== undefined ? { tierMode: opts.tier } : {}),
       });
       timing("lower");
     } catch (e) {
@@ -77,10 +105,27 @@ export function prepareExecutableModule(
       }
     }
     sourceTexts = fe.sourceTexts();
+    if (lowered.contracts) {
+      const checked = checkContracts(lowered.module, lowered.contracts, sourceTexts);
+      timing("contracts");
+      if (checked.diagnostics.length > 0) return fail(checked.diagnostics);
+      if (checked.contracts) lowered.module.contracts = checked.contracts;
+    }
   } finally {
     fe.dispose();
+    frontendDisposed();
     timing("frontend-dispose");
   }
 
-  return { ok: true, mod: lowered.module!, sourceTexts, stats: lowered.stats };
+  return {
+    ok: true,
+    mod: lowered.module!,
+    sourceTexts,
+    stats: lowered.stats,
+    warnings: [
+      ...(fe.warnings ?? []),
+      ...(lowered.divergences ?? []),
+      ...(lowered.performance ?? []),
+    ],
+  };
 }

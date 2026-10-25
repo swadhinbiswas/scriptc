@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3064-installed-entry-imports/state.ts",
+  "<repo>/tests/corpus/3064-installed-entry-imports/core/run.ts",
+  "<repo>/tests/corpus/3064-installed-entry-imports/core/index.ts",
+  "<repo>/tests/corpus/3064-installed-entry-imports/main.ts"
+ ],
+ "diags": []
+}

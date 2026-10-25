@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5421-readable-from-generators.cjs"
+ ],
+ "diags": []
+}

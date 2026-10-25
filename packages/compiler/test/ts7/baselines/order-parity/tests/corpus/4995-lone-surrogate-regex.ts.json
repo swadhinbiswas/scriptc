@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4995-lone-surrogate-regex.ts"
+ ],
+ "diags": []
+}

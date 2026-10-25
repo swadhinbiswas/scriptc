@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2935-module-namespace-values/mod.ts",
+  "<repo>/tests/corpus/2935-module-namespace-values/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2943-process-exit-code-invalid.ts"
+ ],
+ "diags": []
+}

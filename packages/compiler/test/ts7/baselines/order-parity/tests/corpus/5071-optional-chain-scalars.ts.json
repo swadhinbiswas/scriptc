@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5071-optional-chain-scalars.ts"
+ ],
+ "diags": []
+}

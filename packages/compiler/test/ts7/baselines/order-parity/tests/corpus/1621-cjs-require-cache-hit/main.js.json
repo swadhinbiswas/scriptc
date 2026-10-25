@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1621-cjs-require-cache-hit/counter.js",
+  "<repo>/tests/corpus/1621-cjs-require-cache-hit/main.js"
+ ],
+ "diags": []
+}

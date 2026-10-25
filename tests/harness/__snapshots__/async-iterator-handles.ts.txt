@@ -25,14 +25,14 @@ async-iterator-handles.ts:6:7 - error SC2020: 'AsyncIterableIterator<number>' is
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-async-iterator-handles.ts:6:21 - error SC2020: 'ReadableStream.values in a static build' is part of the standard library types but has no scriptc lowering yet
+async-iterator-handles.ts:6:21 - error SC2020: 'ReadableStream.values' is part of the standard library types but has no scriptc lowering yet
 
   5 | const nodeIterator = Readable.from(["a"]).iterator();
   6 | const webIterator = ReadableStream.from([1]).values();
     |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   7 | console.log(nodeIterator, webIterator);
 
-  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); values()/[Symbol.asyncIterator]() compile when consumed directly by for await, while stored iterator handles require --dynamic
+  hint: direct for-await consumption compiles statically; storing or driving the first-class iterator handle is unsupported
 
 async-iterator-handles.ts:7:13 - error SC2004: uses of 'nodeIterator' inherit the blocker on its declaration
 

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5040-promise-all-race-turns.ts"
+ ],
+ "diags": []
+}

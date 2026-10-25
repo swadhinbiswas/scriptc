@@ -25,7 +25,8 @@ export class SourceLocations {
   position(loc: SrcLoc): SourcePosition | null {
     const starts = this.starts.get(loc.file);
     if (starts === undefined || loc.start < 0) return null;
-    let lo = 0, hi = starts.length - 1;
+    let lo = 0,
+      hi = starts.length - 1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >>> 1;
       if (starts[mid]! <= loc.start) lo = mid;

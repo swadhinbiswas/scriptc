@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/create-require/main.ts"
+ ],
+ "diags": []
+}

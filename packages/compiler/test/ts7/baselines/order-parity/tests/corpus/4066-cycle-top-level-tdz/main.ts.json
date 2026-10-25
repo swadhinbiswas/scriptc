@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4066-cycle-top-level-tdz/margin.ts",
+  "<repo>/tests/corpus/4066-cycle-top-level-tdz/frame.ts",
+  "<repo>/tests/corpus/4066-cycle-top-level-tdz/main.ts"
+ ],
+ "diags": []
+}

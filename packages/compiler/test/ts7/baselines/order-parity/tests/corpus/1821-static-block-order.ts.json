@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1821-static-block-order.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2425-elseif-head-exit-narrow.ts"
+ ],
+ "diags": []
+}

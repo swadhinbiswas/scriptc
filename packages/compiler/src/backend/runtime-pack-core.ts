@@ -1,5 +1,6 @@
 /** Runtime-pack schema and selection shared by compiler hosts. Filesystem
  * discovery, artifact verification and staging belong to the calling host. */
+import { optimizationClass, type NativeOptimization } from "./optimization.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
 import { RUNTIME_ABI_MARKER, RUNTIME_ABI_VERSION } from "./runtime-abi.js";
 import type { NativeTargetSpec } from "./targets.js";
@@ -18,10 +19,12 @@ export interface RuntimePackArtifact {
   size: number;
 }
 
-interface RuntimePackVariant extends RuntimePackArtifact {
+export interface RuntimePackVariant extends RuntimePackArtifact {
   id: string;
   when: Record<string, boolean>;
   defines: string[];
+  /** LLVM bitcode of the same unit, imported by the helper for inlining. */
+  bitcode?: RuntimePackArtifact;
 }
 
 interface RuntimePackUnit {
@@ -31,12 +34,19 @@ interface RuntimePackUnit {
 }
 
 interface RuntimePackArchive extends RuntimePackArtifact {
-  id: "quickjs" | "libregexp" | "zlib" | "mbedtls";
+  id: "quickjs" | "libregexp" | "zlib" | "brotli" | "mbedtls";
   predicate: RuntimePredicate;
 }
 
 export type RuntimePackMode = "executable" | "library" | "library-thread";
-export type RuntimePackFlavor = "release" | "dev" | "library-release" | "library-dev" | "library-thread-release" | "library-thread-dev";
+export type RuntimePackFlavor =
+  | "release"
+  | "dev"
+  | "speed"
+  | "library-release"
+  | "library-dev"
+  | "library-thread-release"
+  | "library-thread-dev";
 
 interface RuntimePackFlavorManifest {
   optimization: "-O2" | "-O0";
@@ -69,8 +79,23 @@ export interface RuntimePackManifest {
 }
 
 export interface RuntimeFeatureSet extends NativeLinkFeatures {
+  workers: boolean;
+  youngNursery: boolean;
+  eventTarget: boolean;
+  wasm: boolean;
+  dynTier: boolean;
+  streamDyn: boolean;
+  handleProps: boolean;
+  declAdopt: boolean;
+  dynForAwait: boolean;
+  eventsOnceSignal: boolean;
+  dynBuffer: boolean;
+  builtinValues: boolean;
+  warningReplace: boolean;
+  stdioExtended: boolean;
+  brotli: boolean;
+  moduleNamespace: boolean;
   nativeFetch: boolean;
-  netIslandEffective: boolean;
   netEffective: boolean;
   httpEffective: boolean;
   tlsEffective: boolean;
@@ -79,7 +104,11 @@ export interface RuntimeFeatureSet extends NativeLinkFeatures {
 }
 
 export class RuntimePackError extends Error {
-  constructor(message: string, readonly code: "missing" | "invalid" | "unsupported") {
+  constructor(
+    message: string,
+    readonly code: "missing" | "invalid" | "unsupported",
+    readonly hint?: string,
+  ) {
     super(message);
     this.name = "RuntimePackError";
   }
@@ -87,7 +116,7 @@ export class RuntimePackError extends Error {
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -101,16 +130,28 @@ function validPredicate(value: unknown): value is RuntimePredicate {
   if (item === null) return false;
   const keys = Object.keys(item);
   if (keys.some((key) => key !== "all" && key !== "any" && key !== "not")) return false;
-  return keys.length > 0 && keys.every((key) =>
-    Array.isArray(item[key]) && (item[key] as unknown[]).every((feature) => typeof feature === "string")
+  return (
+    keys.length > 0 &&
+    keys.every(
+      (key) =>
+        Array.isArray(item[key]) &&
+        (item[key] as unknown[]).every((feature) => typeof feature === "string"),
+    )
   );
 }
 
 function validArtifact(value: unknown): value is RuntimePackArtifact {
   const item = object(value);
-  return item !== null && typeof item.path === "string" && !item.path.startsWith("/") &&
-    !item.path.split(/[\\/]/).includes("..") && validDigest(item.sha256) &&
-    typeof item.size === "number" && Number.isInteger(item.size) && item.size >= 0;
+  return (
+    item !== null &&
+    typeof item.path === "string" &&
+    !item.path.startsWith("/") &&
+    !item.path.split(/[\\/]/).includes("..") &&
+    validDigest(item.sha256) &&
+    typeof item.size === "number" &&
+    Number.isInteger(item.size) &&
+    item.size >= 0
+  );
 }
 
 export function parseRuntimePackManifest(value: unknown): RuntimePackManifest {
@@ -122,79 +163,139 @@ export function parseRuntimePackManifest(value: unknown): RuntimePackManifest {
   const flavors = object(manifest?.flavors);
   const validFlavor = (value: unknown, optimization: string): boolean => {
     const flavor = object(value);
-    return flavor?.optimization === optimization && Array.isArray(flavor.runtime_units) &&
+    return (
+      flavor?.optimization === optimization &&
+      Array.isArray(flavor.runtime_units) &&
       flavor.runtime_units.every((raw) => {
         const unit = object(raw);
-        return typeof unit?.source === "string" && validPredicate(unit.predicate) &&
-          Array.isArray(unit.variants) && unit.variants.length > 0 && unit.variants.every((variantRaw) => {
+        return (
+          typeof unit?.source === "string" &&
+          validPredicate(unit.predicate) &&
+          Array.isArray(unit.variants) &&
+          unit.variants.length > 0 &&
+          unit.variants.every((variantRaw) => {
             const variant = object(variantRaw);
             const when = object(variant?.when);
-            return validArtifact(variantRaw) && typeof variant?.id === "string" && when !== null &&
+            return (
+              validArtifact(variantRaw) &&
+              (variant?.bitcode === undefined || validArtifact(variant.bitcode)) &&
+              typeof variant?.id === "string" &&
+              when !== null &&
               Object.values(when).every((entry) => typeof entry === "boolean") &&
-              Array.isArray(variant.defines) && variant.defines.every((entry) => typeof entry === "string");
-          });
-      });
+              Array.isArray(variant.defines) &&
+              variant.defines.every((entry) => typeof entry === "string")
+            );
+          })
+        );
+      })
+    );
   };
   if (
-    manifest?.schema !== RUNTIME_PACK_SCHEMA || manifest.format !== RUNTIME_PACK_FORMAT ||
-    typeof manifest.package !== "string" || typeof manifest.version !== "string" ||
+    manifest?.schema !== RUNTIME_PACK_SCHEMA ||
+    manifest.format !== RUNTIME_PACK_FORMAT ||
+    typeof manifest.package !== "string" ||
+    typeof manifest.version !== "string" ||
     !isRuntimePackTarget(target) ||
-    abi?.version !== RUNTIME_ABI_VERSION || abi.marker !== RUNTIME_ABI_MARKER ||
-    typeof compiler?.command !== "string" || typeof compiler.identity !== "string" ||
-    compiler.target !== (target?.llvm_triple) ||
-    !Array.isArray(macros?.executable) || !macros.executable.every((entry) => typeof entry === "string") ||
-    !Array.isArray(macros.excluded) || !macros.excluded.every((entry) => typeof entry === "string") ||
+    abi?.version !== RUNTIME_ABI_VERSION ||
+    abi.marker !== RUNTIME_ABI_MARKER ||
+    typeof compiler?.command !== "string" ||
+    typeof compiler.identity !== "string" ||
+    compiler.target !== target?.llvm_triple ||
+    !Array.isArray(macros?.executable) ||
+    !macros.executable.every((entry) => typeof entry === "string") ||
+    !Array.isArray(macros.excluded) ||
+    !macros.excluded.every((entry) => typeof entry === "string") ||
     macros.sanitizer !== "external-toolchain-required" ||
-    flavors === null || Object.keys(flavors).length === 0 ||
-    Object.keys(flavors).some((name) => !["release", "dev", "library-release", "library-dev", "library-thread-release", "library-thread-dev"].includes(name)) ||
-    ((flavors.release !== undefined || flavors.dev !== undefined) && (!validFlavor(flavors.release, "-O2") || !validFlavor(flavors.dev, "-O0"))) ||
-    Object.entries(flavors).some(([name, flavor]) => !validFlavor(flavor, name.endsWith("dev") ? "-O0" : "-O2")) ||
-    !Array.isArray(manifest.archives) || !manifest.archives.every((raw) => {
+    flavors === null ||
+    Object.keys(flavors).length === 0 ||
+    Object.keys(flavors).some(
+      (name) =>
+        ![
+          "release",
+          "dev",
+          "speed",
+          "library-release",
+          "library-dev",
+          "library-thread-release",
+          "library-thread-dev",
+        ].includes(name),
+    ) ||
+    ((flavors.release !== undefined || flavors.dev !== undefined) &&
+      (!validFlavor(flavors.release, "-O2") || !validFlavor(flavors.dev, "-O0"))) ||
+    // The speed flavor is an optional companion of the executable flavors.
+    (flavors.speed !== undefined && flavors.release === undefined) ||
+    Object.entries(flavors).some(
+      ([name, flavor]) => !validFlavor(flavor, name.endsWith("dev") ? "-O0" : "-O2"),
+    ) ||
+    !Array.isArray(manifest.archives) ||
+    !manifest.archives.every((raw) => {
       const archive = object(raw);
-      return validArtifact(raw) && typeof archive?.id === "string" && validPredicate(archive.predicate);
+      return (
+        validArtifact(raw) && typeof archive?.id === "string" && validPredicate(archive.predicate)
+      );
     }) ||
-    !Array.isArray(manifest.system_libraries) || !manifest.system_libraries.every((raw) => {
+    !Array.isArray(manifest.system_libraries) ||
+    !manifest.system_libraries.every((raw) => {
       const library = object(raw);
       return typeof library?.name === "string" && validPredicate(library.predicate);
     }) ||
-    !Array.isArray(manifest.licenses) || !manifest.licenses.every((raw) => {
+    !Array.isArray(manifest.licenses) ||
+    !manifest.licenses.every((raw) => {
       const license = object(raw);
       return typeof license?.path === "string" && typeof license.license === "string";
     })
-  ) throw new RuntimePackError("installed runtime-pack.json is malformed or incompatible", "invalid");
+  )
+    throw new RuntimePackError(
+      "installed runtime-pack.json is malformed or incompatible",
+      "invalid",
+    );
   return manifest as unknown as RuntimePackManifest;
 }
 
 function isRuntimePackTarget(target: Record<string, unknown> | null): boolean {
-  return target !== null &&
+  return (
+    target !== null &&
     typeof target.name === "string" &&
     typeof target.llvm_triple === "string" &&
-    (target.architecture === "arm64" || target.architecture === "x64" || target.architecture === "wasm32") &&
-    (target.object_format === "macho" || target.object_format === "elf" || target.object_format === "coff" || target.object_format === "wasm") &&
-    typeof target.minimum_os === "string";
+    (target.architecture === "arm64" ||
+      target.architecture === "x64" ||
+      target.architecture === "wasm32") &&
+    (target.object_format === "macho" ||
+      target.object_format === "elf" ||
+      target.object_format === "coff" ||
+      target.object_format === "wasm") &&
+    typeof target.minimum_os === "string"
+  );
 }
 
 export function effectiveRuntimeFeatures(
   features: NativeLinkFeatures,
-  env: NodeJS.ProcessEnv = process.env,
+  _env: NodeJS.ProcessEnv = process.env,
 ): RuntimeFeatureSet {
-  const curlFetch = features.dynamic && features.fetch && env["SCRIPTC_FETCH_CURL"] === "1";
-  if (curlFetch) {
-    throw new RuntimePackError(
-      "SCRIPTC_FETCH_CURL=1 is an external developer-toolchain comparison mode and is not available with precompiled runtime packs",
-      "unsupported",
-    );
-  }
   const nativeFetch = features.fetch;
-  const netIslandEffective = features.dynamic && (features.netIsland || nativeFetch);
-  const netEffective = features.net || nativeFetch || netIslandEffective;
-  const httpEffective = features.http || nativeFetch || netIslandEffective;
-  const tlsEffective = features.tls || nativeFetch || netIslandEffective;
+  const netEffective = features.net || nativeFetch;
+  const httpEffective = features.http || nativeFetch;
+  const tlsEffective = features.tls || nativeFetch;
   const tlsCaEffective = features.tlsCa || tlsEffective;
   return {
     ...features,
+    workers: features.workers === true,
+    youngNursery: features.youngNursery === true,
+    eventTarget: features.eventTarget === true,
+    wasm: features.wasm === true,
+    dynTier: features.dynTier === true,
+    streamDyn: features.streamDyn === true,
+    handleProps: features.handleProps === true,
+    declAdopt: features.declAdopt === true,
+    dynForAwait: features.dynForAwait === true,
+    eventsOnceSignal: features.eventsOnceSignal === true,
+    dynBuffer: features.dynBuffer === true,
+    builtinValues: features.builtinValues === true,
+    warningReplace: features.warningReplace === true,
+    stdioExtended: features.stdioExtended === true,
+    brotli: features.brotli === true,
+    moduleNamespace: features.moduleNamespace === true,
     nativeFetch,
-    netIslandEffective,
     netEffective,
     httpEffective,
     tlsEffective,
@@ -203,26 +304,35 @@ export function effectiveRuntimeFeatures(
   };
 }
 
-export function evaluateRuntimePredicate(
-  predicate: RuntimePredicate,
-  features: object,
-): boolean {
+export function evaluateRuntimePredicate(predicate: RuntimePredicate, features: object): boolean {
   const values = features as Record<string, boolean>;
   if (typeof predicate === "boolean") return predicate;
   if (typeof predicate === "string") return values[predicate] === true;
-  return (predicate.all?.every((name) => values[name] === true) ?? true) &&
+  return (
+    (predicate.all?.every((name) => values[name] === true) ?? true) &&
     (predicate.any?.some((name) => values[name] === true) ?? true) &&
-    (predicate.not?.every((name) => values[name] !== true) ?? true);
+    (predicate.not?.every((name) => values[name] !== true) ?? true)
+  );
 }
 
 function selectVariant(unit: RuntimePackUnit, features: RuntimeFeatureSet): RuntimePackVariant {
   const matches = unit.variants.filter((variant) =>
-    Object.entries(variant.when).every(([name, expected]) => features[name as keyof RuntimeFeatureSet] === expected)
+    Object.entries(variant.when).every(
+      ([name, expected]) => features[name as keyof RuntimeFeatureSet] === expected,
+    ),
   );
-  matches.sort((a, b) => Object.keys(b.when).length - Object.keys(a.when).length || a.id.localeCompare(b.id));
+  matches.sort(
+    (a, b) => Object.keys(b.when).length - Object.keys(a.when).length || a.id.localeCompare(b.id),
+  );
   const selected = matches[0];
   if (selected === undefined) {
     throw new RuntimePackError(`runtime pack has no variant for ${unit.source}`, "invalid");
+  }
+  if ((features.workers === true) !== selected.defines.includes("SCR_WORKERS")) {
+    throw new RuntimePackError(
+      `runtime pack has an incompatible thread-state variant for ${unit.source}; reinstall the matching runtime package`,
+      "invalid",
+    );
   }
   return selected;
 }
@@ -236,26 +346,49 @@ export function validateRuntimePackIdentity(
   compilerVersion: string,
 ): void {
   if (
-    packageName !== target.runtimePackPackage || manifest.package !== target.runtimePackPackage ||
-    packageVersion !== compilerVersion || manifest.version !== compilerVersion
+    packageName !== target.runtimePackPackage ||
+    manifest.package !== target.runtimePackPackage ||
+    packageVersion !== compilerVersion ||
+    manifest.version !== compilerVersion
   ) {
     throw new RuntimePackError(
-      `runtime pack version mismatch: expected ${target.runtimePackPackage}@${compilerVersion}, found ${packageName}@${packageVersion}`,
+      `runtime pack version mismatch: expected ${target.runtimePackPackage}@${compilerVersion}, found package ${packageName}@${packageVersion} with manifest ${manifest.package}@${manifest.version}`,
       "invalid",
     );
   }
   if (
-    manifest.target.name !== target.name || manifest.target.llvm_triple !== target.llvmTriple ||
-    manifest.target.architecture !== target.architecture || manifest.target.object_format !== target.objectFormat ||
+    manifest.target.name !== target.name ||
+    manifest.target.llvm_triple !== target.llvmTriple ||
+    manifest.target.architecture !== target.architecture ||
+    manifest.target.object_format !== target.objectFormat ||
     manifest.target.minimum_os !== target.minimumOs
-  ) throw new RuntimePackError(`runtime pack does not support target ${target.name}`, "invalid");
+  )
+    throw new RuntimePackError(`runtime pack does not support target ${target.name}`, "invalid");
 }
 
 export interface RuntimePackArtifacts {
   features: RuntimeFeatureSet;
-  runtime: RuntimePackArtifact[];
+  /** Selected unit variants; each may carry its bitcode artifact. */
+  runtime: (RuntimePackArtifact & { bitcode?: RuntimePackArtifact })[];
   archives: RuntimePackArtifact[];
   systemLibraries: string[];
+}
+
+/** The manifest flavor a posture links. Speed selects the executable `speed`
+ * flavor when the pack ships one (size-for-speed runtime objects) and the
+ * release flavor otherwise; library modes have no speed flavor and link
+ * their release objects. */
+export function runtimePackFlavorKey(
+  manifest: RuntimePackManifest,
+  optimization: NativeOptimization,
+  mode: RuntimePackMode = "executable",
+): RuntimePackFlavor {
+  const optimized = optimizationClass(optimization);
+  if (mode === "library") return optimized === "release" ? "library-release" : "library-dev";
+  if (mode === "library-thread")
+    return optimized === "release" ? "library-thread-release" : "library-thread-dev";
+  if (optimization === "speed" && manifest.flavors.speed !== undefined) return "speed";
+  return optimized;
 }
 
 /** Selection is deterministic and independent of installation paths. Both
@@ -263,25 +396,28 @@ export interface RuntimePackArtifacts {
 export function selectRuntimePackArtifacts(
   manifest: RuntimePackManifest,
   requested: NativeLinkFeatures,
-  flavor: "release" | "dev",
+  flavor: NativeOptimization,
   env: NodeJS.ProcessEnv = process.env,
   mode: RuntimePackMode = "executable",
 ): RuntimePackArtifacts {
   const features = effectiveRuntimeFeatures(requested, env);
-  const key: RuntimePackFlavor = mode === "executable" ? flavor : `${mode}-${flavor}`;
-  const selectedFlavor = mode === "library"
-    ? flavor === "release" ? manifest.flavors["library-release"] : manifest.flavors["library-dev"]
-    : mode === "library-thread"
-      ? flavor === "release" ? manifest.flavors["library-thread-release"] : manifest.flavors["library-thread-dev"]
-      : flavor === "release" ? manifest.flavors.release : manifest.flavors.dev;
-  if (selectedFlavor === undefined) throw new RuntimePackError(`runtime pack has no ${key} flavor; reinstall the matching runtime package`, "invalid");
-  if (mode !== "executable" && requested.dynamic) throw new RuntimePackError("library runtime packs do not support dynamic execution", "unsupported");
+  if (features.workers && (mode !== "executable" || manifest.target.object_format === "wasm"))
+    throw new RuntimePackError("worker threads require a native static executable", "unsupported");
+  const key = runtimePackFlavorKey(manifest, flavor, mode);
+  const selectedFlavor = manifest.flavors[key];
+  if (selectedFlavor === undefined)
+    throw new RuntimePackError(
+      `runtime pack has no ${key} flavor; reinstall the matching runtime package`,
+      "invalid",
+    );
   return {
     features,
     runtime: selectedFlavor.runtime_units
       .filter((unit) => evaluateRuntimePredicate(unit.predicate, features))
       .map((unit) => selectVariant(unit, features)),
-    archives: manifest.archives.filter((archive) => evaluateRuntimePredicate(archive.predicate, features)),
+    archives: manifest.archives.filter((archive) =>
+      evaluateRuntimePredicate(archive.predicate, features),
+    ),
     systemLibraries: manifest.system_libraries
       .filter((entry) => evaluateRuntimePredicate(entry.predicate, features))
       .map((entry) => entry.name),

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/async-local-typed-results.ts"
+ ],
+ "diags": []
+}

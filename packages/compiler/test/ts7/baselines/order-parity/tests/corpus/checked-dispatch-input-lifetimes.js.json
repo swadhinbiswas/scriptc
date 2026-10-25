@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/checked-dispatch-input-lifetimes.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2092-package-imports/src/util.ts",
+  "<repo>/tests/corpus/2092-package-imports/src/extra.ts",
+  "<repo>/tests/corpus/2092-package-imports/src/greet.ts",
+  "<repo>/tests/corpus/2092-package-imports/main.ts"
+ ],
+ "diags": []
+}

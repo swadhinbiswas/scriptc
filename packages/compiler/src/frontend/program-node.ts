@@ -1,7 +1,10 @@
 /** Node convenience entry. Native callers supply FrontendServices to
  * program.ts directly; each Node load owns all of its parser connections. */
 import { dirname, resolve } from "node:path";
-import { loadProgram as loadWithServices, checkPreflightTs7 as preflightWithHost } from "./program.js";
+import {
+  loadProgram as loadWithServices,
+  checkPreflightTs7 as preflightWithHost,
+} from "./program.js";
 import { createNodeFrontendServices } from "./services-node.js";
 import type { Ts7Host } from "./ts7/program-host.js";
 export * from "./program.js";
@@ -11,18 +14,27 @@ export interface NodeProgramLoadOptions {
   externalTypes?: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined;
 }
 
-export function loadProgram(entryPath: string, options?: NodeProgramLoadOptions): ReturnType<typeof loadWithServices> {
+export function loadProgram(
+  entryPath: string,
+  options?: NodeProgramLoadOptions,
+): ReturnType<typeof loadWithServices> {
   const services = createNodeFrontendServices();
   try {
     const load = loadWithServices(entryPath, services, {
-      npmStatic: [...options?.npmStatic ?? []],
-      externalTypes: options?.externalTypes instanceof Map ? [...options.externalTypes] : Object.entries(options?.externalTypes ?? {}),
+      npmStatic: [...(options?.npmStatic ?? [])],
+      externalTypes:
+        options?.externalTypes instanceof Map
+          ? [...options.externalTypes]
+          : Object.entries(options?.externalTypes ?? {}),
     });
     return {
       ...load,
       dispose: () => {
-        try { load.dispose(); }
-        finally { services.close(); }
+        try {
+          load.dispose();
+        } finally {
+          services.close();
+        }
       },
     };
   } catch (error) {
@@ -31,12 +43,20 @@ export function loadProgram(entryPath: string, options?: NodeProgramLoadOptions)
   }
 }
 
-export function checkPreflightTs7(entryPath: string, sharedHost?: Ts7Host): ReturnType<typeof preflightWithHost> {
+export function checkPreflightTs7(
+  entryPath: string,
+  sharedHost?: Ts7Host,
+): ReturnType<typeof preflightWithHost> {
   if (sharedHost !== undefined) return preflightWithHost(entryPath, sharedHost);
   const services = createNodeFrontendServices();
   try {
     const host = services.createProgramHost({ cwd: dirname(resolve(entryPath)) });
-    try { return preflightWithHost(entryPath, host); }
-    finally { host.close(); }
-  } finally { services.close(); }
+    try {
+      return preflightWithHost(entryPath, host);
+    } finally {
+      host.close();
+    }
+  } finally {
+    services.close();
+  }
 }

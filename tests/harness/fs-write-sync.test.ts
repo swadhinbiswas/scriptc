@@ -46,10 +46,12 @@ describe.skipIf(process.platform === "win32")(
           stderr += chunk;
         });
         if (closeStdout) child.stdout!.destroy();
-        const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-          child.on("error", reject);
-          child.on("close", (code, signal) => resolve({ code, signal }));
-        });
+        const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            child.on("error", reject);
+            child.on("close", (code, signal) => resolve({ code, signal }));
+          },
+        );
         return { outcome, stdout, stderr };
       };
 
@@ -74,9 +76,9 @@ describe.skipIf(process.platform === "win32")(
       expect(fileLimit.stdout).toBe("");
       expect(fileLimit.stderr).toBe(
         "current first: 512\n" +
-        "current caught: Error EFBIG EFBIG: file too large, write\n" +
-        "positioned first: 512\n" +
-        "positioned caught: Error EFBIG EFBIG: file too large, write\n",
+          "current caught: Error EFBIG EFBIG: file too large, write\n" +
+          "positioned first: 512\n" +
+          "positioned caught: Error EFBIG EFBIG: file too large, write\n",
       );
     });
   },

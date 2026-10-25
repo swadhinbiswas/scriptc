@@ -36,10 +36,16 @@ console.log(
   parenthesizedNull.toString("utf8"),
 );
 console.log(fs.readSync(fdPositioned, positioned, 0, 5, 9999));
-// Node returns after intrinsic offset validation but before checking the
-// buffer window, position, or descriptor when the requested window is empty.
-console.log(fs.readSync(fdPositioned, positioned, 0, 0, 1.5));
-console.log(fs.readSync(-123, positioned, 9999, 0, 1.5));
+// Node returns after offset and position validation but before checking
+// the buffer window or descriptor when the requested window is empty.
+console.log(fs.readSync(fdPositioned, positioned, 0, 0, 1));
+console.log(fs.readSync(-123, positioned, 9999, 0, null));
+try {
+  fs.readSync(-123, positioned, 9999, 0, 1.5);
+} catch (e) {
+  console.log("empty window position caught:", (e as Error).name);
+  console.log((e as Error).message);
+}
 try {
   fs.readSync(fdPositioned, positioned, 0.5, 0, 0);
 } catch (e) {

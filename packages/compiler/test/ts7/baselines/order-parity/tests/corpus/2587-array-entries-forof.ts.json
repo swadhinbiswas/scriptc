@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2587-array-entries-forof.ts"
+ ],
+ "diags": []
+}

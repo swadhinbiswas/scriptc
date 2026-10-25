@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/call-lifetimes-owned-boundaries.ts"
+ ],
+ "diags": []
+}

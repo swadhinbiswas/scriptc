@@ -1,8 +1,10 @@
 import { InternalCompilerError } from "../errors.js";
+import { byteNumberAccess } from "./byte-numbers.js";
 import {
   BYTES_ELEMENT_NAME,
   DYN_HANDLE_KINDS,
   RUNTIME_STREAM_CLASSES,
+  recordTextCodecClass,
   typeEquals,
   type IrExpr,
   type IrLibFn,
@@ -10,6 +12,7 @@ import {
   type IrStmt,
   type IrType,
   type IrUnionDef,
+  classValueConstructor,
 } from "./ir.js";
 
 /** Destination tags for a union widening that preserves every payload's
@@ -26,28 +29,93 @@ export function unionWideningTags(from: readonly IrType[], to: readonly IrType[]
 }
 
 /**
- * Recognize the one concat shape whose destination binding can temporarily
+ * Recognize the concat shape whose destination binding can temporarily
  * hand off its ownership to the left operand:
  *
  *     target = target + suffix
+ *     target = target + a + b      (the suffix is a + b)
  *
- * Both native emitters use this rather than attempting a wider purity or
- * alias analysis.  In particular, fields, nested concat trees, dynamic
- * operations, and a different destination all retain the ordinary borrowed
- * concat lowering.
+ * The target is the leftmost operand, so it is read first either way, and
+ * the remaining operands keep their order in the suffix; every operand is
+ * already a string, so regrouping them does not change the result. Both
+ * native emitters use this rather than attempting a wider purity or alias
+ * analysis.  In particular, fields, dynamic operations, and a different
+ * destination all retain the ordinary borrowed concat lowering.
  */
-export function matchStringSelfConcat(targetLocalId: string, value: IrExpr): IrExpr | null {
+export function matchStringSelfConcat(
+  targetLocalId: string,
+  value: IrExpr,
+): { left: IrExpr; suffix: IrExpr } | null {
   if (
     value.kind !== "strConcat" ||
     value.type.kind !== "string" ||
-    value.left.kind !== "varRef" ||
-    value.left.type.kind !== "string" ||
-    value.left.localId !== targetLocalId ||
     value.right.type.kind !== "string"
-  ) {
+  )
     return null;
+  if (value.left.kind === "varRef") {
+    if (value.left.type.kind !== "string" || value.left.localId !== targetLocalId) return null;
+    return { left: value.left, suffix: value.right };
   }
+  const inner = matchStringSelfConcat(targetLocalId, value.left);
+  if (inner === null) return null;
+  return {
+    left: inner.left,
+    suffix: {
+      kind: "strConcat",
+      left: inner.suffix,
+      right: value.right,
+      type: value.type,
+      loc: value.loc,
+    },
+  };
+}
+
+/** The suffix of a canonical string field append, `recv.f = recv.f + suffix`
+ * (the statement form of `recv.f += suffix`), where both sides name the
+ * same field through the same local receiver. Null for any other store. */
+export function matchFieldSelfConcat(
+  store: Extract<IrStmt, { kind: "fieldSet" | "recordSet" }>,
+): IrExpr | null {
+  const value = store.value;
+  if (
+    store.obj.kind !== "varRef" ||
+    value.kind !== "strConcat" ||
+    value.type.kind !== "string" ||
+    value.left.type.kind !== "string" ||
+    value.right.type.kind !== "string"
+  )
+    return null;
+  const left = value.left;
+  const sameField =
+    store.kind === "fieldSet"
+      ? left.kind === "fieldGet" && left.className === store.className
+      : left.kind === "recordGet" && left.shapeId === store.shapeId;
+  if (
+    !sameField ||
+    (left.kind !== "fieldGet" && left.kind !== "recordGet") ||
+    left.field !== store.field ||
+    left.obj.kind !== "varRef" ||
+    left.obj.localId !== store.obj.localId
+  )
+    return null;
   return value.right;
+}
+
+/** Whether `value` reads element `arr[index]` of two locals directly or as
+ * one arm of a ternary (the `string[]` compound operand, which reads a hole
+ * as "undefined"). */
+export function readsArraySlot(value: IrExpr, arrId: string, indexId: string): boolean {
+  if (value.kind === "ternary")
+    return (
+      readsArraySlot(value.then, arrId, indexId) || readsArraySlot(value.else_, arrId, indexId)
+    );
+  return (
+    value.kind === "arrayGet" &&
+    value.arr.kind === "varRef" &&
+    value.arr.localId === arrId &&
+    value.index.kind === "varRef" &&
+    value.index.localId === indexId
+  );
 }
 
 /** Descendant tree needed by constructor queries. Parent links deliberately
@@ -64,33 +132,59 @@ export function dynDesc(
   unionsById: ReadonlyMap<string, IrUnionDef>,
 ): string {
   switch (t.kind) {
-    case "f64": return "number";
-    case "bigint": return "bigint";
-    case "symbol": return "symbol";
-    case "string": return "string";
-    case "bool": return "boolean";
-    case "record": return recordsById.get(t.shapeId)?.tuple ? "array" : "object";
-    case "array": return "array";
-    case "nullT": return "null";
-    case "undefinedT": return "undefined";
-    case "dyn": return "unknown";
-    case "promise": return "Promise";
-    case "procStream": return "ProcessStream";
-    case "bytes": return BYTES_ELEMENT_NAME[t.elem];
-    case "object": return t.className.replace(/^%/, "");
+    case "f64":
+      return "number";
+    case "bigint":
+      return "bigint";
+    case "symbol":
+      return "symbol";
+    case "string":
+      return "string";
+    case "bool":
+      return "boolean";
+    case "record": {
+      const shape = recordsById.get(t.shapeId);
+      return shape?.tuple ? "array" : ((shape && recordTextCodecClass(shape)) ?? "object");
+    }
+    case "array":
+      return "array";
+    case "nullT":
+      return "null";
+    case "undefinedT":
+      return "undefined";
+    case "dyn":
+    case "jsval":
+      return "unknown";
+    case "promise":
+      return "Promise";
+    case "procStream":
+      return "ProcessStream";
+    case "bytes":
+      return BYTES_ELEMENT_NAME[t.elem];
+    case "object":
+      return t.className.replace(/^%/, "");
     case "union": {
       const def = unionsById.get(t.unionId);
-      if (!def) throw new InternalCompilerError(`IR analysis bug: dynDesc of unknown union ${t.unionId}`);
+      if (!def)
+        throw new InternalCompilerError(`IR analysis bug: dynDesc of unknown union ${t.unionId}`);
       return def.arms.map((arm) => dynDesc(arm, recordsById, unionsById)).join(" | ");
     }
-    case "func": return "function";
-    case "classval": return "class constructor";
-    case "generator": return t.async ? "AsyncGenerator" : "Generator";
-    case "map": return "Map";
-    case "set": return "Set";
-    case "regex": return "RegExp";
-    case "url": return "URL";
-    case "date": return "Date";
+    case "func":
+      return "function";
+    case "classval":
+      return "class constructor";
+    case "generator":
+      return t.async ? "AsyncGenerator" : "Generator";
+    case "map":
+      return "Map";
+    case "set":
+      return "Set";
+    case "regex":
+      return "RegExp";
+    case "url":
+      return "URL";
+    case "date":
+      return "Date";
     default: {
       const handle = DYN_HANDLE_KINDS.get(t.kind);
       if (handle) return handle.cls;
@@ -103,13 +197,46 @@ export function dynDesc(
 // suspend, or release an owner. Keep this explicit: array folds and future
 // Math operations must not inherit the guarantee from their name alone.
 const BORROW_SAFE_MATH = new Set<IrLibFn>([
-  "math.floor", "math.ceil", "math.trunc", "math.round", "math.abs",
-  "math.min", "math.max", "math.sqrt", "math.pow",
-  "math.sin", "math.sinh", "math.cos", "math.cosh", "math.tan", "math.tanh",
-  "math.asin", "math.asinh", "math.acos", "math.acosh", "math.atan", "math.atanh",
-  "math.atan2", "math.cbrt", "math.clz32", "math.sign", "math.exp", "math.expm1",
-  "math.fround", "math.log", "math.log1p", "math.log2", "math.log10", "math.imul",
+  "math.floor",
+  "math.ceil",
+  "math.trunc",
+  "math.round",
+  "math.abs",
+  "math.min",
+  "math.max",
+  "math.sqrt",
+  "math.pow",
+  "math.sin",
+  "math.sinh",
+  "math.cos",
+  "math.cosh",
+  "math.tan",
+  "math.tanh",
+  "math.asin",
+  "math.asinh",
+  "math.acos",
+  "math.acosh",
+  "math.atan",
+  "math.atanh",
+  "math.atan2",
+  "math.cbrt",
+  "math.clz32",
+  "math.sign",
+  "math.exp",
+  "math.expm1",
+  "math.f16round",
+  "math.fround",
+  "math.log",
+  "math.log1p",
+  "math.log2",
+  "math.log10",
+  "math.imul",
 ]);
+
+/** A Math lowering that borrows no references and cannot invoke user code. */
+export function isBorrowSafeMath(fn: IrLibFn): boolean {
+  return BORROW_SAFE_MATH.has(fn);
+}
 
 /** Whether an operand preserves a direct receiver binding until its last
  * borrowed use. No user calls or suspension may intervene. This does not
@@ -119,6 +246,7 @@ export function isStableReceiverOperand(e: IrExpr, receiverLocalId: string): boo
   switch (e.kind) {
     case "numLit":
     case "boolLit":
+    case "strLit":
     case "varRef":
     case "incDec":
       return true;
@@ -126,32 +254,43 @@ export function isStableReceiverOperand(e: IrExpr, receiverLocalId: string): boo
       return e.localId !== receiverLocalId && isStableReceiverOperand(e.value, receiverLocalId);
     case "bin":
     case "logical":
-      return isStableReceiverOperand(e.left, receiverLocalId) &&
-        isStableReceiverOperand(e.right, receiverLocalId);
+      return (
+        isStableReceiverOperand(e.left, receiverLocalId) &&
+        isStableReceiverOperand(e.right, receiverLocalId)
+      );
     case "unary":
     case "toBool":
       return isStableReceiverOperand(e.operand, receiverLocalId);
     case "ternary":
-      return isStableReceiverOperand(e.cond, receiverLocalId) &&
+      return (
+        isStableReceiverOperand(e.cond, receiverLocalId) &&
         isStableReceiverOperand(e.then, receiverLocalId) &&
-        isStableReceiverOperand(e.else_, receiverLocalId);
+        isStableReceiverOperand(e.else_, receiverLocalId)
+      );
     case "bytesIntrinsic":
-      return (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
+      return (
+        (e.method === "get" ||
+          e.method === "length" ||
+          e.method === "byteLength" ||
+          byteNumberAccess(e) !== null) &&
         e.receiver.kind === "varRef" &&
-        e.args.every((arg) => isStableReceiverOperand(arg, receiverLocalId));
+        e.args.every((arg) => isStableReceiverOperand(arg, receiverLocalId))
+      );
     case "libCall":
-      return BORROW_SAFE_MATH.has(e.fn) && e.type.kind === "f64" &&
-        e.args.every((arg) => arg.type.kind === "f64" && isStableReceiverOperand(arg, receiverLocalId));
+      return (
+        BORROW_SAFE_MATH.has(e.fn) &&
+        e.type.kind === "f64" &&
+        e.args.every(
+          (arg) => arg.type.kind === "f64" && isStableReceiverOperand(arg, receiverLocalId),
+        )
+      );
     default:
       return false;
   }
 }
 
 /** The undefined arm's tag of a union type, or -1. */
-export function undefinedArmTag(
-  t: IrType,
-  unionsById: ReadonlyMap<string, IrUnionDef>,
-): number {
+export function undefinedArmTag(t: IrType, unionsById: ReadonlyMap<string, IrUnionDef>): number {
   if (t.kind !== "union") return -1;
   return unionsById.get(t.unionId)?.arms.findIndex((arm) => arm.kind === "undefinedT") ?? -1;
 }
@@ -159,8 +298,14 @@ export function undefinedArmTag(
 /** True when a statement list ends in a control-flow jump. */
 export function endsWithJump(stmts: readonly IrStmt[]): boolean {
   const last = stmts[stmts.length - 1]?.kind;
-  return last === "return" || last === "break" || last === "continue" ||
-    last === "throw" || last === "rethrow" || last === "runtimeFence";
+  return (
+    last === "return" ||
+    last === "break" ||
+    last === "continue" ||
+    last === "throw" ||
+    last === "rethrow" ||
+    last === "runtimeFence"
+  );
 }
 
 /** True when class-value construction can enter a throwing constructor in
@@ -170,9 +315,10 @@ export function newValueMayThrow(
   meta: IrClassGraphNode | undefined,
   mayThrow: ReadonlySet<string>,
 ): boolean {
-  if (!meta) throw new InternalCompilerError(`IR analysis bug: newValue on unknown class ${className}`);
+  if (!meta)
+    throw new InternalCompilerError(`IR analysis bug: newValue on unknown class ${className}`);
   const any = (node: IrClassGraphNode): boolean =>
-    mayThrow.has(`%${node.def.name}.constructor`) || node.children.some(any);
+    mayThrow.has(classValueConstructor(node.def).fn) || node.children.some(any);
   return any(meta);
 }
 

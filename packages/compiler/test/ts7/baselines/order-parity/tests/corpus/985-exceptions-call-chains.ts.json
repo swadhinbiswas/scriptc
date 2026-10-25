@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/985-exceptions-call-chains.ts"
+ ],
+ "diags": []
+}

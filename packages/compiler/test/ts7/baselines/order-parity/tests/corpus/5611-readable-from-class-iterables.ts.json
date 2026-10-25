@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5611-readable-from-class-iterables.ts"
+ ],
+ "diags": []
+}

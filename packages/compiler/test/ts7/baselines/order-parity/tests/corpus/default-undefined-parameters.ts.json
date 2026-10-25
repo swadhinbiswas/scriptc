@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/default-undefined-parameters.ts"
+ ],
+ "diags": []
+}

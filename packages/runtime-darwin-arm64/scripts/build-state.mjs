@@ -87,7 +87,8 @@ export async function installRuntimePack({
     manifestInstalled = true;
   } catch (error) {
     if (manifestInstalled) await rm(manifestPath, { force: true }).catch(() => undefined);
-    if (outputInstalled) await rm(outputRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (outputInstalled)
+      await rm(outputRoot, { recursive: true, force: true }).catch(() => undefined);
     if (manifestBackedUp) await rename(backupManifestPath, manifestPath).catch(() => undefined);
     if (outputBackedUp) await rename(backupRoot, outputRoot).catch(() => undefined);
     throw error;

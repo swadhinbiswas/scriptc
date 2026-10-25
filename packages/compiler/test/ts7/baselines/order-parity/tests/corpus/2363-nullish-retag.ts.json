@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2363-nullish-retag.ts"
+ ],
+ "diags": []
+}

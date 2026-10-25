@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-default-options/options.js",
+  "<repo>/tests/corpus/js-default-options/index.js",
+  "<repo>/tests/corpus/js-default-options/main.ts"
+ ],
+ "diags": []
+}

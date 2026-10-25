@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5355-captured-function-declarations.ts"
+ ],
+ "diags": []
+}

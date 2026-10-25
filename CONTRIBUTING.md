@@ -10,6 +10,16 @@ $ pnpm install && pnpm -r build
 
 The workspace build compiles the TypeScript packages and checks the compatibility inventory. It does not rebuild packaged native artifacts and needs no local LLVM installation.
 
+## Code quality
+
+Run `pnpm lint` and `pnpm format:check` before submitting changes. `pnpm lint:fix` applies safe oxlint fixes; review the diff afterward. `pnpm format` applies oxfmt formatting. The commands cover owned JavaScript and TypeScript in packages, repository scripts, compatibility tooling, the test harness, and the root test configuration. CI runs the same checks without waiting for native builds.
+
+Use `pnpm lint --format=agent` for compact diagnostics or `pnpm lint --format=json` for structured output. These use the same rules and exclusions as the ordinary check.
+
+The root configurations exclude program fixtures, generated outputs, vendor code, and the standalone documentation workspace. Deliberately invalid or poorly formatted programs are test data. Formatting also preserves embedded source strings and import execution order. Native C and C++ use their existing conventions.
+
+Keep the compiler's frontend/backend import boundary and the explicit TypeScript parser islands intact. Lint exceptions must explain the semantic reason and apply to the smallest useful scope; do not disable a correctness check just to clear a finding. The compiler's non-null assertions remain permitted where existing proofs establish the value, while redundant and unsafe optional-chain assertions are checked.
+
 ## Tests
 
 The test corpus runs each program under Node.js and as a compiled native binary, then compares stdout, stderr, and exit codes byte-for-byte. Run focused tests while developing; use `pnpm test:sandbox` for the full validation gate. Both the plain and sanitized lanes must pass. The sanitized lane enables AddressSanitizer and the runtime reference-count audit.
@@ -34,11 +44,17 @@ See the [test harness guide](./tests/harness/README.md) for focused checks, plat
 
 When changing native assembly or object emission, runtime-pack selection, or the C runtime, rebuild the relevant native artifacts explicitly. Install CMake, Ninja, the pinned LLVM 22 development package, and Zig 0.16.0 on the target host. Run the matching `@scriptc/llvm-<platform>` and `@scriptc/runtime-<platform>` packages' `build:native` scripts. The macOS full test suite also needs those generated artifacts.
 
+## Runtime headers
+
+`packages/runtime/src/scr_runtime.h` includes the per-module runtime headers (`scr_string.h`, `scr_dyn.h`, `scr_http.h`, and so on) in dependency order and holds no declarations itself. Add a new declaration to the header of the runtime unit that defines it: `scr_<unit>.h` for `scr_<unit>.c`, or the header whose first comment names that unit. The comment at the top of `scr_runtime.h` lists the ordering rules. To move hunks from a branch that still edits the single-file `scr_runtime.h`, run `node scripts/runtime-header-hunks.mjs <diff>`. It prints a patch for the module headers.
+
 ## Documentation
 
 The docs site is a standalone pnpm workspace under `docs/`. Install its dependencies with `pnpm --dir docs install` and start it with `pnpm --dir docs dev`. Reuse an existing dev server when one is running.
 
 Content lives in `docs/content/docs`. Keep shared layout and runtime behavior in `@vercel/geistdocs`; local adapters belong under `docs/src`. Follow the authoring conventions in [AGENTS.md](./AGENTS.md).
+
+The Limitations page is split into partials under `docs/content/limitations/`, one file per labeled bullet and one per section's other text. Edit the partial for the bullet or section you change; [AGENTS.md](./AGENTS.md#limitations-page-partials) describes the layout and how to move edits from a branch that still edits the single-file page.
 
 Before landing docs or compatibility output changes, run `NEXT_DIST_DIR=.next-check pnpm --dir docs check`. The separate output directory keeps the production build from corrupting a running dev server's `.next` state. This gate checks compatibility drift, TypeScript, the production build, and HTTP routes.
 

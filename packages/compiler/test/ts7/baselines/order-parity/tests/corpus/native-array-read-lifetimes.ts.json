@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/native-array-read-lifetimes.ts"
+ ],
+ "diags": []
+}

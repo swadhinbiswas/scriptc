@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1686-stream-readable-paused.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1710-cjs-export-class/countdown.js",
+  "<repo>/tests/corpus/1710-cjs-export-class/main.js"
+ ],
+ "diags": []
+}

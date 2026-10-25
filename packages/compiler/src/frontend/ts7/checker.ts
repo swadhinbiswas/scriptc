@@ -1,5 +1,4 @@
 import { CheckerCache } from "./checker-cache.js";
-import { InternalCompilerError } from "../../errors.js";
 /* The checker facade: 5.9.3-shaped TypeChecker methods over 7.0.2's sync
  * client, built around the survey's feasibility verdict. Naive per-call use
  * of the 7.0.2 client costs 0.1-0.3 ms of IPC per query; the census counted
@@ -16,8 +15,8 @@ import { InternalCompilerError } from "../../errors.js";
  *    finding), so this layer is where reuse lives.
  *
  * 2. PHASE-AWARE BATCH PREFETCH. Ordinary callers keep the whole-file
- *    first-miss fallback, but the compiler explicitly batches declaration
- *    headers, top-level code, and each newly reachable body wave. Managed
+ *    first-miss fallback for implementation files. The compiler explicitly
+ *    batches declaration headers, top-level code, and each newly reachable body wave. Managed
  *    files then use direct memoized misses instead of accidentally sweeping
  *    every unreachable body. prefetchSourceFile() retains the whole-file
  *    escape hatch. Symbol prefetch also batch-fetches getTypeOfSymbol over
@@ -36,7 +35,7 @@ import { InternalCompilerError } from "../../errors.js";
  *    repeats an IPC request. All paths are verified against the raw checker
  *    and against 5.9.3 by the adapter's suites. */
 
-import type { Node, SourceFile } from "./ast-types.js";
+import type { Identifier, Node, SourceFile } from "./ast-types.js";
 import type {
   IndexInfo,
   InterfaceType,
@@ -46,10 +45,11 @@ import type {
   TypePredicate,
   TypeReference,
 } from "./semantic-types.js";
-import type { SemanticChecker as Checker } from "./semantic-checker.js";
-import type { SemanticProject as Project } from "./semantic-model.js";
-import { walkPreorder } from "./ast.js";
-import { SignatureKind, SyntaxKind, TypeFlags } from "./enums.js";
+import { NODE_BATCH_QUERIES, type SemanticChecker as Checker } from "./semantic-checker.js";
+import { symbolNameOf, type SemanticProject as Project } from "./semantic-model.js";
+import { isTypeNode, walkPreorder } from "./ast.js";
+import { SignatureKind, SyntaxKind, TypeFlags, type SymbolFlags } from "./enums.js";
+import { getSourceFileOfNode } from "./node-functions.js";
 
 /** Array-overload chunk size: large enough that per-request overhead
  * vanishes, small enough to keep any single JSON-RPC payload modest. */
@@ -77,6 +77,44 @@ function withPanicFence<I, O>(
       ...withPanicFence(chunk.slice(mid), call),
     ];
   }
+}
+
+/** Answers for `items` in chunks, each answer given to `store`. A chunk
+ * that throws is split until the throwing items are alone; those get no
+ * answer, so their direct query throws again where it is made. */
+function batchAnswers<I, O>(
+  items: readonly I[],
+  fetch: (chunk: readonly I[]) => readonly (O | undefined)[],
+  store: (item: I, answer: O | undefined) => void,
+  unknown: (error: unknown) => boolean = () => false,
+): boolean {
+  let known = true;
+  const answer = (chunk: readonly I[]): void => {
+    if (!known) return;
+    let answers: readonly (O | undefined)[];
+    try {
+      answers = fetch(chunk);
+    } catch (error) {
+      if (unknown(error)) {
+        known = false;
+        return;
+      }
+      if (chunk.length === 1) return;
+      const mid = chunk.length >> 1;
+      answer(chunk.slice(0, mid));
+      answer(chunk.slice(mid));
+      return;
+    }
+    chunk.forEach((item, index) => store(item, answers[index]));
+  };
+  for (let i = 0; i < items.length; i += BATCH_CHUNK) answer(items.slice(i, i + BATCH_CHUNK));
+  return known;
+}
+
+/** Whether a request failed because the server has no such method: tsgo,
+ * and tsc-ts before 0.0.7, answer the batch methods this way. */
+function unknownMethod(error: unknown, method: string): boolean {
+  return error instanceof Error && error.message.includes(`unknown API method "${method}"`);
 }
 
 function chunked<T, R>(items: readonly T[], fetch: (chunk: readonly T[]) => readonly R[]): R[] {
@@ -120,6 +158,16 @@ export function constituentTypes(type: Type): readonly Type[] {
   return type.getTypes() ?? [];
 }
 
+/** True for the panic typescript-go's API raises serializing a union's
+ * constituents (an empty tuple cloned as an array literal keeps the tuple
+ * flag without tuple data: `s.match(re) || []`). The union itself is
+ * readable; its members are not. */
+export function isUnreadableConstituentsPanic(e: unknown): boolean {
+  return (
+    e instanceof Error && (e as { unreadableConstituents?: true }).unreadableConstituents === true
+  );
+}
+
 /** Function-like declarations whose body is deferred until reachability
  * asks for it. Header prefetch walks their names, type parameters, params,
  * and return types but leaves the body for a later explicit body wave. */
@@ -133,7 +181,7 @@ const DEFERRED_BODY_OWNERS = new Set<SyntaxKind>([
   SyntaxKind.SetAccessor,
 ]);
 
-type PrefetchWalk = "all" | "structure" | "reachable";
+type PrefetchWalk = "all" | "runtime" | "structure" | "reachable";
 
 function isClassLikeKind(kind: SyntaxKind): boolean {
   return kind === SyntaxKind.ClassDeclaration || kind === SyntaxKind.ClassExpression;
@@ -144,7 +192,7 @@ function isClassMember(node: Node | undefined): boolean {
 }
 
 function isDeferredExecutableRoot(node: Node, walk: PrefetchWalk): boolean {
-  if (walk === "all") return false;
+  if (walk === "all" || walk === "runtime") return false;
   const parent = node.parent;
   if (parent === undefined) return false;
   if (DEFERRED_BODY_OWNERS.has(parent.kind) && parent.body === node) {
@@ -163,7 +211,7 @@ function isDeferredExecutableRoot(node: Node, walk: PrefetchWalk): boolean {
   return (
     parent.kind === SyntaxKind.PropertyDeclaration &&
     parent.initializer === node &&
-    !parent.modifiers?.some((modifier) => modifier.kind === SyntaxKind.StaticKeyword)
+    !parent.modifiers?.nodes.some((modifier) => modifier.kind === SyntaxKind.StaticKeyword)
   );
 }
 
@@ -177,6 +225,20 @@ function collectNodes(roots: readonly Node[], walk: PrefetchWalk = "all"): Node[
   const seen = new Set<Node>();
   for (const root of roots) {
     walkPreorder(root, (n, depth) => {
+      // Managed waves prepare runtime lowering. Type-only syntax is still
+      // checked by tsgo, but its metadata need not cross the process boundary
+      // unless a consumer asks for it. Class heritage expressions remain
+      // runtime inputs, and explicit roots retain the full query contract.
+      if (
+        n !== root &&
+        walk !== "all" &&
+        (n.kind === SyntaxKind.InterfaceDeclaration ||
+          n.kind === SyntaxKind.TypeAliasDeclaration ||
+          n.kind === SyntaxKind.TypeParameter ||
+          (isTypeNode(n) && n.kind !== SyntaxKind.ExpressionWithTypeArguments))
+      ) {
+        return "skip";
+      }
       if (n !== root && isDeferredExecutableRoot(n, walk)) return "skip";
       if (!seen.has(n)) {
         seen.add(n);
@@ -191,6 +253,9 @@ function collectNodes(roots: readonly Node[], walk: PrefetchWalk = "all"): Node[
 
 export class CheckerFacade {
   private readonly cache = new CheckerCache();
+  /** Batch methods the server answered as unknown. Lowering asks those
+   * node by node from then on, without a failed request per prefetch. */
+  private readonly unknownBatchMethods = new Set<string>();
 
   constructor(
     /** The underlying 7.0.2 sync checker — exposed for methods the facade
@@ -210,57 +275,8 @@ export class CheckerFacade {
   /** Eagerly release memoized answers when a facade is no longer needed.
    * The semantic project also owns this cleanup, covering session close
    * and snapshot disposal even when callers retain the facade. */
-  dispose(): void { this.cache.dispose(); }
-
-  /* ── the symbol-declaration surface (phase 3) ─────────────────────────
-   * 7's Symbol carries declarations as NodeHandles (server references),
-   * where 5.9.3 handed out the nodes themselves. The lowering reads
-   * symbol.declarations/valueDeclaration pervasively, so the facade owns
-   * the resolve step (NodeHandle.resolve into the client AST — identity-
-   * stable, probe-verified) and memoizes per symbol. Requires the project
-   * the symbols came from (options.project — Ts7Program supplies it). */
-
-  private requireProject(): Project {
-    const project = this.options.project;
-    if (!project) throw new InternalCompilerError("CheckerFacade built without a project cannot resolve declarations");
-    return project;
-  }
-
-  /** 5.9.3's symbol.declarations (never undefined here: 7 answers an empty
-   * array where 5.9.3 answered undefined — callers treat them alike). */
-  declarationsOf(symbol: Ts7Symbol): readonly Node[] {
-    this.ensureActive();
-    let decls = this.cache.declsOf.get(symbol);
-    if (decls === undefined) {
-      const project = this.requireProject();
-      const resolved: Node[] = [];
-      for (const handle of symbol.declarations) {
-        const node = handle.resolve(project);
-        if (node !== undefined) resolved.push(node);
-      }
-      decls = resolved;
-      this.cache.declsOf.set(symbol, decls);
-    }
-    return decls;
-  }
-
-  /** 5.9.3's symbol.valueDeclaration. */
-  valueDeclarationOf(symbol: Ts7Symbol): Node | undefined {
-    this.ensureActive();
-    if (this.cache.valueDeclOf.has(symbol)) return this.cache.valueDeclOf.get(symbol);
-    const decl = symbol.valueDeclaration?.resolve(this.requireProject());
-    this.cache.valueDeclOf.set(symbol, decl);
-    return decl;
-  }
-
-  /** 5.9.3's signature.getDeclaration() (undefined for synthesized
-   * signatures — same contract as sig.declaration there). */
-  signatureDeclaration(signature: Signature): Node | undefined {
-    this.ensureActive();
-    if (this.cache.sigDeclOf.has(signature)) return this.cache.sigDeclOf.get(signature);
-    const decl = signature.declaration?.resolve(this.requireProject());
-    this.cache.sigDeclOf.set(signature, decl);
-    return decl;
+  dispose(): void {
+    this.cache.dispose();
   }
 
   /** 5.9.3's type.getCallSignatures(). */
@@ -283,6 +299,14 @@ export class CheckerFacade {
       this.cache.ctorSigsOf.set(type, sigs);
     }
     return sigs;
+  }
+
+  /** The call or construct signatures of `type`, as getCallSignatures and getConstructSignatures
+   * answer them. */
+  getSignaturesOfType(type: Type, kind: SignatureKind): readonly Signature[] {
+    return kind === SignatureKind.Call
+      ? this.getCallSignatures(type)
+      : this.getConstructSignatures(type);
   }
 
   /** 5.9.3's type.getProperty(name). */
@@ -339,17 +363,78 @@ export class CheckerFacade {
   prefetchRoots(roots: readonly Node[]): void {
     this.ensureActive();
     this.markManaged(roots);
-    this.prefetchNodes(collectNodes(roots, "reachable"));
+    const nodes = collectNodes(roots, "reachable");
+    this.prefetchNodes(nodes);
+    if (!NODE_BATCH_QUERIES) return;
+    // Lowering a call resolves its signature (reconcileOverloadReturn).
+    this.prefetchResolvedSignatures(
+      nodes.filter(
+        (node) =>
+          node.kind === SyntaxKind.CallExpression ||
+          node.kind === SyntaxKind.TaggedTemplateExpression,
+      ),
+    );
+    // Lowering an array literal or a conditional asks its contextual type.
+    this.prefetchContextualTypes(
+      nodes.filter(
+        (node) =>
+          node.kind === SyntaxKind.ArrayLiteralExpression ||
+          node.kind === SyntaxKind.ConditionalExpression,
+      ),
+    );
+  }
+
+  /** Batches the contextual type of each node, for an analysis that asks it
+   * of many nodes (class-protocols.ts). A query that fails stays out of the
+   * memo, so a later getContextualType asks again as it would have. */
+  prefetchContextualTypes(nodes: readonly Node[]): void {
+    if (!NODE_BATCH_QUERIES) return;
+    this.ensureActive();
+    const missing = [...new Set(nodes)].filter((node) => !this.cache.contextualType.has(node));
+    this.batchNodes(
+      "getContextualTypes",
+      missing,
+      (chunk) => this.raw.getContextualTypes(chunk),
+      (node, type) => this.cache.contextualType.set(node, type),
+    );
+  }
+
+  /** Batches the resolved signature of each call (getResolvedSignature). */
+  prefetchResolvedSignatures(nodes: readonly Node[]): void {
+    if (!NODE_BATCH_QUERIES) return;
+    this.ensureActive();
+    const missing = [...new Set(nodes)].filter((node) => !this.cache.resolvedSignature.has(node));
+    this.batchNodes(
+      "getResolvedSignatures",
+      missing,
+      (chunk) => this.raw.getResolvedSignatures(chunk),
+      (node, signature) => this.cache.resolvedSignature.set(node, signature),
+    );
+  }
+
+  /** Answers a node batch method's chunks (batchAnswers), unless the server
+   * has answered the method as unknown. */
+  private batchNodes<O>(
+    method: string,
+    nodes: readonly Node[],
+    fetch: (chunk: readonly Node[]) => readonly (O | undefined)[],
+    store: (node: Node, answer: O | undefined) => void,
+  ): void {
+    if (nodes.length === 0 || this.unknownBatchMethods.has(method)) return;
+    if (!batchAnswers(nodes, fetch, store, (error) => unknownMethod(error, method)))
+      this.unknownBatchMethods.add(method);
   }
 
   /** Batches symbol queries for every identifier under roots without the
    * usual companion getTypeOfSymbol batch. Preflight uses this for AST
    * analyses that themselves inspect deferred bodies for binding identity:
-   * those scans need symbols, but do not consume the symbols' types. */
-  prefetchSymbolRoots(roots: readonly Node[]): void {
+   * those scans need symbols, but do not consume the symbols' types.
+   * Runtime-only analyses may omit erased type syntax while still walking
+   * every deferred executable body. Other callers keep the full walk. */
+  prefetchSymbolRoots(roots: readonly Node[], runtimeOnly = false): void {
     this.ensureActive();
     this.markManaged(roots);
-    this.prefetchSymbolNodes(collectNodes(roots), false, false);
+    this.prefetchSymbolNodes(collectNodes(roots, runtimeOnly ? "runtime" : "all"), false, false);
   }
 
   /** Exact-node sibling of prefetchSymbolRoots for analyses that first
@@ -377,10 +462,7 @@ export class CheckerFacade {
    * prefetch intentionally covers neither uncommon RHS kinds nor symbols
    * on non-identifiers. Descendants of symbol roots join because computed
    * `this[key]` declarations resolve the key identifier too. */
-  prefetchClassCollection(
-    typeNodes: readonly Node[],
-    symbolRoots: readonly Node[],
-  ): void {
+  prefetchClassCollection(typeNodes: readonly Node[], symbolRoots: readonly Node[]): void {
     this.ensureActive();
     this.markManaged([...typeNodes, ...symbolRoots]);
     this.prefetchExactTypeNodes(typeNodes);
@@ -397,7 +479,7 @@ export class CheckerFacade {
 
   private markManaged(roots: readonly Node[]): void {
     for (const root of roots) {
-      const sf = root.getSourceFile();
+      const sf = getSourceFileOfNode(root);
       this.cache.managedTypes.add(sf);
       this.cache.managedSymbols.add(sf);
     }
@@ -441,8 +523,8 @@ export class CheckerFacade {
   ): void {
     const symbolNodes = allNodes.filter(
       (n) =>
-        (n.kind === SyntaxKind.Identifier ||
-          (includePropertyAccess && n.kind === SyntaxKind.PropertyAccessExpression)),
+        n.kind === SyntaxKind.Identifier ||
+        (includePropertyAccess && n.kind === SyntaxKind.PropertyAccessExpression),
     );
     const nodes = symbolNodes.filter((n) => !this.cache.symbolAtLocation.has(n));
     // The same bisecting panic fence as the type sweep: tsgo panics on
@@ -474,7 +556,11 @@ export class CheckerFacade {
 
   private autoPrefetch(node: Node, kind: "types" | "symbols"): void {
     if (this.options.autoPrefetch === false) return;
-    const sf = node.getSourceFile();
+    const sf = getSourceFileOfNode(node);
+    // A referenced declaration rarely needs the rest of its library's
+    // metadata. Keep those queries direct; explicit whole-file prefetch
+    // remains available to consumers that do need the complete surface.
+    if (sf.isDeclarationFile) return;
     if (kind === "types") {
       if (!this.cache.managedTypes.has(sf)) this.prefetchTypes(sf);
     } else if (!this.cache.managedSymbols.has(sf)) {
@@ -484,9 +570,11 @@ export class CheckerFacade {
 
   getTypeAtLocation(node: Node): Type {
     this.ensureActive();
-    if (this.cache.typeAtLocation.has(node)) return this.cache.typeAtLocation.get(node) ?? this.anyType();
+    if (this.cache.typeAtLocation.has(node))
+      return this.cache.typeAtLocation.get(node) ?? this.anyType();
     this.autoPrefetch(node, "types");
-    if (this.cache.typeAtLocation.has(node)) return this.cache.typeAtLocation.get(node) ?? this.anyType();
+    if (this.cache.typeAtLocation.has(node))
+      return this.cache.typeAtLocation.get(node) ?? this.anyType();
     const type = this.raw.getTypeAtLocation(node);
     this.cache.typeAtLocation.set(node, type);
     return type ?? this.anyType();
@@ -504,7 +592,8 @@ export class CheckerFacade {
 
   getTypeOfSymbol(symbol: Ts7Symbol): Type {
     this.ensureActive();
-    if (this.cache.typeOfSymbol.has(symbol)) return this.cache.typeOfSymbol.get(symbol) ?? this.anyType();
+    if (this.cache.typeOfSymbol.has(symbol))
+      return this.cache.typeOfSymbol.get(symbol) ?? this.anyType();
     // The direct (memo-miss) path wears the same panic fence as the
     // prefetch sweep: symbols the sweep never saw (members resolved from
     // other files' d.ts) can hit the identical server panics (observed:
@@ -516,6 +605,22 @@ export class CheckerFacade {
     return type ?? this.anyType();
   }
 
+  /** A structural member walk consumes adjacent symbol types together.
+   * Bound lookahead so an early refusal cannot query an entire wide shape.
+   * Use the same panic isolation and memo as an individual field query. */
+  prefetchMemberTypes(symbols: readonly Ts7Symbol[], start: number): void {
+    this.ensureActive();
+    const missing: Ts7Symbol[] = [];
+    const end = Math.min(symbols.length, start + 32);
+    for (let i = start; i < end; i++) {
+      const symbol = symbols[i]!;
+      if (!this.cache.typeOfSymbol.has(symbol)) missing.push(symbol);
+    }
+    if (missing.length === 0) return;
+    const types = withPanicFence(missing, (chunk) => this.raw.getTypeOfSymbol(chunk));
+    missing.forEach((symbol, i) => this.cache.typeOfSymbol.set(symbol, types[i]));
+  }
+
   getAliasedSymbol(symbol: Ts7Symbol): Ts7Symbol {
     this.ensureActive();
     let aliased = this.cache.aliasedSymbol.get(symbol);
@@ -524,6 +629,14 @@ export class CheckerFacade {
       this.cache.aliasedSymbol.set(symbol, aliased);
     }
     return aliased;
+  }
+
+  /** A module symbol's exports, with the members of its `export *`
+   * declarations resolved (a symbol's own export table lists only the
+   * module's own declarations). */
+  getExportsOfModule(symbol: Ts7Symbol): readonly Ts7Symbol[] {
+    this.ensureActive();
+    return this.raw.getExportsOfModule(symbol);
   }
 
   getDeclaredTypeOfSymbol(symbol: Ts7Symbol): Type {
@@ -546,7 +659,8 @@ export class CheckerFacade {
 
   getTypeFromTypeNode(node: Node): Type {
     this.ensureActive();
-    if (this.cache.typeFromTypeNode.has(node)) return this.cache.typeFromTypeNode.get(node) ?? this.anyType();
+    if (this.cache.typeFromTypeNode.has(node))
+      return this.cache.typeFromTypeNode.get(node) ?? this.anyType();
     const type = this.raw.getTypeFromTypeNode(node as never);
     this.cache.typeFromTypeNode.set(node, type);
     return type ?? this.anyType();
@@ -570,7 +684,8 @@ export class CheckerFacade {
 
   getSignatureFromDeclaration(node: Node): Signature | undefined {
     this.ensureActive();
-    if (this.cache.signatureFromDeclaration.has(node)) return this.cache.signatureFromDeclaration.get(node);
+    if (this.cache.signatureFromDeclaration.has(node))
+      return this.cache.signatureFromDeclaration.get(node);
     const signature = this.raw.getSignatureFromDeclaration(node);
     this.cache.signatureFromDeclaration.set(node, signature);
     return signature;
@@ -578,7 +693,8 @@ export class CheckerFacade {
 
   getReturnTypeOfSignature(signature: Signature): Type {
     this.ensureActive();
-    if (this.cache.returnTypeOf.has(signature)) return this.cache.returnTypeOf.get(signature) ?? this.anyType();
+    if (this.cache.returnTypeOf.has(signature))
+      return this.cache.returnTypeOf.get(signature) ?? this.anyType();
     const type = this.raw.getReturnTypeOfSignature(signature);
     this.cache.returnTypeOf.set(signature, type);
     return type ?? this.anyType();
@@ -787,6 +903,38 @@ export class CheckerFacade {
     return this.raw.getTypeOfSymbolAtLocation(symbol, location);
   }
 
+  resolveName(
+    name: string,
+    meaning: SymbolFlags,
+    location?: Node,
+    excludeGlobals?: boolean,
+  ): Ts7Symbol | undefined {
+    this.ensureActive();
+    return this.raw.resolveName(name, meaning, location, excludeGlobals);
+  }
+
+  /** The value `node` names where it is: resolveName of its text with SymbolFlags.Value and
+   * SymbolFlags.ExportValue. */
+  getResolvedSymbol(node: Identifier): Ts7Symbol | undefined {
+    this.ensureActive();
+    return this.raw.getResolvedSymbol(node);
+  }
+
+  getAnyType(): Type {
+    this.ensureActive();
+    return this.anyType();
+  }
+
+  getNeverType(): Type {
+    this.ensureActive();
+    return this.intrinsic("never", () => this.raw.getNeverType());
+  }
+
+  getBigIntType(): Type {
+    this.ensureActive();
+    return this.intrinsic("bigint", () => this.raw.getBigIntType());
+  }
+
   getUnknownType(): Type {
     this.ensureActive();
     if (this.cache.unknownType === null) this.cache.unknownType = this.raw.getUnknownType();
@@ -835,7 +983,10 @@ export class CheckerFacade {
       const distinct: Type[] = [];
       const seen = new Set<Type>();
       for (const arm of awaited) {
-        if (arm !== undefined && !seen.has(arm)) { seen.add(arm); distinct.push(arm); }
+        if (arm !== undefined && !seen.has(arm)) {
+          seen.add(arm);
+          distinct.push(arm);
+        }
       }
       return distinct.length === 1 ? distinct[0] : undefined;
     }
@@ -849,7 +1000,7 @@ export class CheckerFacade {
    * programs see the es2025 lib's Promise (the ambient world forces it). */
   private promiseArgumentOf(type: Type): Type | null {
     if (!type.isTypeReference()) return null;
-    const name = type.getTarget()?.getSymbol()?.name;
+    const name = symbolNameOf(type.getTarget()?.getSymbol());
     if (name !== "Promise" && name !== "PromiseLike") return null;
     const args = this.getTypeArguments(type);
     return args[0] ?? null;

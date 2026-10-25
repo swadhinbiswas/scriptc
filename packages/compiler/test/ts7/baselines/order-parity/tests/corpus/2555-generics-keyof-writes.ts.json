@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2555-generics-keyof-writes.ts"
+ ],
+ "diags": []
+}

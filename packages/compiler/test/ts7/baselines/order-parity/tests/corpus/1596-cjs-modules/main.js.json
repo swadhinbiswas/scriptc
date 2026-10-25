@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1596-cjs-modules/lib.js",
+  "<repo>/tests/corpus/1596-cjs-modules/common/index.js",
+  "<repo>/tests/corpus/1596-cjs-modules/main.js"
+ ],
+ "diags": []
+}

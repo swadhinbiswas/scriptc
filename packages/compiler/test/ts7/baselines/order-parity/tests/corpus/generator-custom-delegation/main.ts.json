@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/generator-custom-delegation/iterators.js",
+  "<repo>/tests/corpus/generator-custom-delegation/main.ts"
+ ],
+ "diags": []
+}

@@ -23,8 +23,8 @@ try {
     if (load.startupCrash) throw new Error(load.startupCrash.message);
     console.log(diagnostics.length);
     if (diagnostics.length === 0) {
-      const result = lowerToIr(load.program, load.entry, load.moduleOrder, { dynamic: false, frontendServices: services, ffiImports });
-      console.log(result.stats.statementsFailed, result.stats.statementsIsland);
+      const result = lowerToIr(load.program, load.entry, load.moduleOrder, { frontendServices: services, ffiImports });
+      console.log(result.stats.statementsFailed);
       for (const diagnostic of result.diagnostics) console.error(diagnostic.code, diagnostic.message);
       if (result.module && process.argv[4]) writeFileSync(process.argv[4], serializeModule(result.module));
     }

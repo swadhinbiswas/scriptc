@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2003-generic-methods-object-literal.ts"
+ ],
+ "diags": []
+}

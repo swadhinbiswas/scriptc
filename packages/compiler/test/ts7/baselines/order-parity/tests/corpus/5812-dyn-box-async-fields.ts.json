@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5812-dyn-box-async-fields.ts"
+ ],
+ "diags": []
+}

@@ -10,20 +10,14 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   compile,
-  NODE24_FETCH_COMPAT_PROFILE,
+  node24FetchCompatProfile,
   renderDiagnostics,
   type FetchCompatEvidence,
 } from "@scriptc/compiler";
@@ -38,12 +32,8 @@ const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const fixturesRoot = join(repoRoot, "tests/fixtures/fetch");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
-const profile = NODE24_FETCH_COMPAT_PROFILE;
-function configuredInteger(
-  name: string,
-  fallback: number,
-  maximum: number,
-): number {
+const profile = node24FetchCompatProfile();
+function configuredInteger(name: string, fallback: number, maximum: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const value = Number(raw);
@@ -58,19 +48,12 @@ const conformanceSeed = configuredInteger(
   FETCH_CONFORMANCE_SEED,
   0xffff_ffff,
 );
-const conformanceTraceCount = configuredInteger(
-  "SCRIPTC_FETCH_CONFORMANCE_TRACES",
-  12,
-  100,
-);
+const conformanceTraceCount = configuredInteger("SCRIPTC_FETCH_CONFORMANCE_TRACES", 12, 100);
 const generatedSource = generateFetchConformanceProgram(profile, {
   seed: conformanceSeed,
   traceCount: conformanceTraceCount,
 });
-const sourceHash = createHash("sha256")
-  .update(generatedSource)
-  .digest("hex")
-  .slice(0, 16);
+const sourceHash = createHash("sha256").update(generatedSource).digest("hex").slice(0, 16);
 const workRoot = mkdtempSync(join(tmpdir(), "scriptc-fetch-conformance-"));
 const entry = join(workRoot, "main.js");
 
@@ -122,10 +105,7 @@ async function run(command: string, args: string[]): Promise<RunResult> {
 }
 
 async function build(backend: "llvm"): Promise<string> {
-  const outDir = join(
-    workRoot,
-    `${sourceHash}-${backend}-${sanitize ? "san" : "plain"}`,
-  );
+  const outDir = join(workRoot, `${sourceHash}-${backend}-${sanitize ? "san" : "plain"}`);
   mkdirSync(outDir, { recursive: true });
   const result = await compile(entry, {
     outDir,
@@ -181,16 +161,19 @@ function runtimeInterfaceSurface(name: string): RuntimeInterfaceSurface {
   expect(typeof value, `${name} must be a global constructor object`).toBe("function");
   const ctor = value as Function & { prototype: object };
   const prototype = ctor.prototype;
-  const ownNames = Object.getOwnPropertyNames(prototype)
-    .filter((member) => member !== "constructor");
+  const ownNames = Object.getOwnPropertyNames(prototype).filter(
+    (member) => member !== "constructor",
+  );
   const inherited: string[] = [];
   const visibleNames = new Set(ownNames);
   const symbols: string[] = [];
   const visibleSymbols = new Set<symbol>();
 
-  for (let current: object | null = prototype;
+  for (
+    let current: object | null = prototype;
     current !== null && current !== Object.prototype;
-    current = Object.getPrototypeOf(current) as object | null) {
+    current = Object.getPrototypeOf(current) as object | null
+  ) {
     if (current !== prototype) {
       for (const member of Object.getOwnPropertyNames(current)) {
         if (member === "constructor" || visibleNames.has(member)) continue;
@@ -207,8 +190,9 @@ function runtimeInterfaceSurface(name: string): RuntimeInterfaceSurface {
   }
 
   return {
-    statics: Object.getOwnPropertyNames(ctor)
-      .filter((member) => !["length", "name", "prototype"].includes(member)),
+    statics: Object.getOwnPropertyNames(ctor).filter(
+      (member) => !["length", "name", "prototype"].includes(member),
+    ),
     prototype: ownNames,
     inherited,
     symbols,
@@ -217,12 +201,15 @@ function runtimeInterfaceSurface(name: string): RuntimeInterfaceSurface {
 
 function dictionaryReads(construct: (init: object) => unknown): string[] {
   const reads: string[] = [];
-  const init = new Proxy({}, {
-    get(_target, key) {
-      reads.push(String(key));
-      return undefined;
+  const init = new Proxy(
+    {},
+    {
+      get(_target, key) {
+        reads.push(String(key));
+        return undefined;
+      },
     },
-  });
+  );
   construct(init);
   return [...new Set(reads)];
 }
@@ -247,14 +234,17 @@ describe("Node 24 fetch compatibility profile", () => {
     const ids = entries.map((entry) => entry.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(
-      entries.filter((entry) => entry.status === "static").map((entry) => entry.id).sort(),
+      entries
+        .filter((entry) => entry.status === "static")
+        .map((entry) => entry.id)
+        .sort(),
     ).toEqual(supported);
 
     for (const entry of entries) {
       if (entry.status === "static") {
         expect(entry.code, `${entry.id}: static rows have no refusal code`).toBeUndefined();
         expect(entry.reason, `${entry.id}: static rows are explained by evidence`).toBeUndefined();
-      } else if (entry.status === "dynamic-only" || entry.status === "unsupported") {
+      } else if (entry.status === "unsupported") {
         expect(entry.code, `${entry.id}: non-static rows use the stdlib fence`).toBe("SC2020");
         expect(entry.reason?.length, `${entry.id}: missing gap rationale`).toBeGreaterThan(0);
       } else {
@@ -263,7 +253,6 @@ describe("Node 24 fetch compatibility profile", () => {
       }
     }
 
-    expect(entries.some((entry) => entry.status === "dynamic-only")).toBe(true);
     expect(entries.some((entry) => entry.status === "unsupported")).toBe(true);
     expect(entries.some((entry) => entry.status === "out-of-scope")).toBe(true);
     expect(profile.inventory.excludedInterfaces.length).toBeGreaterThan(0);
@@ -283,9 +272,8 @@ describe("Node 24 fetch compatibility profile", () => {
 
     for (const owner of profile.inventory.interfaces) {
       expect(
-        entries.filter((entry) =>
-          entry.owner === owner && entry.placement === "constructor"
-        ).length,
+        entries.filter((entry) => entry.owner === owner && entry.placement === "constructor")
+          .length,
         `${owner}: constructor classification`,
       ).toBe(1);
       const actual = runtimeInterfaceSurface(owner);
@@ -316,12 +304,12 @@ describe("Node 24 fetch compatibility profile", () => {
       profile.inventory.entries
         .filter((entry) => entry.owner === owner && entry.placement === "dictionary")
         .map((entry) => entry.member);
-    expect(dictionaryReads((init) =>
-      new Request("http://example.com", init as RequestInit)
-    )).toEqual(expected("RequestInit"));
-    expect(dictionaryReads((init) =>
-      new Response(null, init as ResponseInit)
-    )).toEqual(expected("ResponseInit"));
+    expect(
+      dictionaryReads((init) => new Request("http://example.com", init as RequestInit)),
+    ).toEqual(expected("RequestInit"));
+    expect(dictionaryReads((init) => new Response(null, init as ResponseInit))).toEqual(
+      expected("ResponseInit"),
+    );
   });
 
   test("every row has unique ids and resolvable differential evidence", () => {
@@ -352,14 +340,9 @@ describe("Node 24 fetch compatibility profile", () => {
   });
 
   test("the profile member allowlists have matching operation rows", () => {
-    for (const member of [
-      ...profile.members.responseReads,
-      ...profile.members.responseCalls,
-    ]) {
+    for (const member of [...profile.members.responseReads, ...profile.members.responseCalls]) {
       expect(
-        profile.operations.some((operation) =>
-          operation.name === `Response.${member}`
-        ),
+        profile.operations.some((operation) => operation.name === `Response.${member}`),
         `Response.${member} has no compatibility row`,
       ).toBe(true);
     }
@@ -368,22 +351,20 @@ describe("Node 24 fetch compatibility profile", () => {
       ...profile.members.readableStreamCalls,
     ]) {
       expect(
-        profile.operations.some((operation) =>
-          operation.name === `ReadableStream.${member}`
-        ),
+        profile.operations.some((operation) => operation.name === `ReadableStream.${member}`),
         `ReadableStream.${member} has no compatibility row`,
       ).toBe(true);
     }
   });
 
   test("generation is deterministic and covers every registered scenario", () => {
-    expect(generateFetchConformanceProgram(profile, {
-      seed: conformanceSeed,
-      traceCount: conformanceTraceCount,
-    })).toBe(generatedSource);
-    expect(generatedScenarioIds(profile)).toEqual(
-      [...FETCH_CONFORMANCE_SCENARIOS].sort(),
-    );
+    expect(
+      generateFetchConformanceProgram(profile, {
+        seed: conformanceSeed,
+        traceCount: conformanceTraceCount,
+      }),
+    ).toBe(generatedSource);
+    expect(generatedScenarioIds(profile)).toEqual([...FETCH_CONFORMANCE_SCENARIOS].sort());
     for (const scenario of FETCH_CONFORMANCE_SCENARIOS) {
       expect(generatedSource).toContain(`// scenario: ${scenario}`);
     }
@@ -403,14 +384,10 @@ describe(
           run(binary, []),
         ]);
         if (!nativeResult.stdout.equals(nodeResult.stdout)) {
-          expect(nativeResult.stdout.toString("utf8")).toBe(
-            nodeResult.stdout.toString("utf8"),
-          );
+          expect(nativeResult.stdout.toString("utf8")).toBe(nodeResult.stdout.toString("utf8"));
           expect.unreachable("stdout differed at byte level but not after UTF-8 decoding");
         }
-        expect(normalizedStderr(nativeResult)).toBe(
-          nodeResult.stderr.toString("utf8"),
-        );
+        expect(normalizedStderr(nativeResult)).toBe(nodeResult.stderr.toString("utf8"));
         expect(nativeResult.exitCode).toBe(nodeResult.exitCode);
       },
       120_000,

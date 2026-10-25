@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5519-assert-partial-deep-typed-edges.ts"
+ ],
+ "diags": []
+}

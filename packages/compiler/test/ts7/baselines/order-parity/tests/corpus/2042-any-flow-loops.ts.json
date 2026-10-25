@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2042-any-flow-loops.ts"
+ ],
+ "diags": []
+}

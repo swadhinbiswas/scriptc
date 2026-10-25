@@ -1,0 +1,116 @@
+retired-engine-968-jsval-lift.ts:12:7 - error SC2009: values of type '{ content: any[]; role: string; }' cannot be compiled: the record shape is supported, but its member 'content' has type 'any[]', which does not compile
+
+  11 | // A record holding an any[] into an `any` slot: island object literal.
+  12 | const msg = { content, role: "user" };
+     |       ^~~
+  13 | const m: any = msg;
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:12:13 - error SC2009: values of type '{ content: any[]; role: string; }' cannot be compiled: the record shape is supported, but its member 'content' has type 'any[]', which does not compile
+
+  11 | // A record holding an any[] into an `any` slot: island object literal.
+  12 | const msg = { content, role: "user" };
+     |             ^~~~~~~~~~~~~~~~~~~~~~~~~
+  13 | const m: any = msg;
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:13:16 - error SC2004: uses of 'msg' inherit the blocker on its declaration
+
+  12 | const msg = { content, role: "user" };
+  13 | const m: any = msg;
+     |                ^~~
+  14 | console.log(`${m.role}`, `${m.content.length}`, `${m.content[0].text}`);
+
+  hint: the declaration of 'msg' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-968-jsval-lift.ts:14:29 - error SC2004: uses of 'm' inherit the blocker on its declaration
+
+  13 | const m: any = msg;
+  14 | console.log(`${m.role}`, `${m.content.length}`, `${m.content[0].text}`);
+     |                             ^~~~~~~~~~~~~~~~
+  15 | 
+
+  hint: the declaration of 'm' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-968-jsval-lift.ts:26:7 - error SC2009: values of type '{ content: any[]; role: string; }[]' cannot be compiled: the array shape is supported, but its element type '{ content: any[]; role: string; }' does not compile
+
+  25 | // element, the array itself stays static.
+  26 | const msgs = [
+     |       ^~~~
+  27 |   { content, role: "user" },
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:26:14 - error SC2009: values of type '{ content: any[]; role: string; }[]' cannot be compiled: the array shape is supported, but its element type '{ content: any[]; role: string; }' does not compile
+
+  25 | // element, the array itself stays static.
+  26 | const msgs = [
+     |              ^
+  27 |   { content, role: "user" },
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:30:24 - error SC2004: uses of 'msgs' inherit the blocker on its declaration
+
+  29 | ];
+  30 | const handles: any[] = msgs;
+     |                        ^~~~
+  31 | console.log(handles.length);
+
+  hint: the declaration of 'msgs' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-968-jsval-lift.ts:36:15 - error SC2009: values of type 'P' cannot be compiled: the union shape is supported, but its arm 'any[]' does not compile
+
+  35 | type P = any[] | string;
+  36 | function take(p: P): string {
+     |               ^
+  37 |   return "took";
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:39:13 - error SC2004: uses of 'take' inherit the blocker on its declaration
+
+  38 | }
+  39 | console.log(take(msgs), take("plain"));
+     |             ^~~~
+  40 | 
+
+  hint: the declaration of 'take' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-968-jsval-lift.ts:55:20 - error SC2011: values of type 'any' have no native representation at this site
+
+  54 | for (let i = 0; i < 2000; i = i + 1) {
+  55 |   const row: any = { content: content, n: i };
+     |                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  56 |   if (`${row.n}` === `${i}`) {
+
+  hint: use a supported typed value, or 'unknown' with a checked cast ('x as T')
+
+retired-engine-968-jsval-lift.ts:56:10 - error SC2004: uses of 'row' inherit the blocker on its declaration
+
+  55 |   const row: any = { content: content, n: i };
+  56 |   if (`${row.n}` === `${i}`) {
+     |          ^~~~~
+  57 |     acc = acc + 1;
+
+  hint: the declaration of 'row' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-968-jsval-lift.ts:59:23 - error SC2009: values of type 'any[]' cannot be compiled: the array shape is supported, but its element type 'any' does not compile
+
+  58 |   }
+  59 |   const rows: any[] = [{ content: content, role: `r${i}` }];
+     |                       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  60 |   if (rows.length === 1) {
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-968-jsval-lift.ts:60:7 - error SC2004: uses of 'rows' inherit the blocker on its declaration
+
+  59 |   const rows: any[] = [{ content: content, role: `r${i}` }];
+  60 |   if (rows.length === 1) {
+     |       ^~~~
+  61 |     acc = acc + 1;
+
+  hint: the declaration of 'rows' did not compile — fix the diagnostic reported there and these sites clear with it

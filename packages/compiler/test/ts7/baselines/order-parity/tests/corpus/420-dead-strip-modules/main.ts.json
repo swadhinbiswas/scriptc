@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/420-dead-strip-modules/side.ts",
+  "<repo>/tests/corpus/420-dead-strip-modules/lib.ts",
+  "<repo>/tests/corpus/420-dead-strip-modules/main.ts"
+ ],
+ "diags": []
+}

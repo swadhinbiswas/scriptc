@@ -1,0 +1,10 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2647-top-level-await-modules/shared.ts",
+  "<repo>/tests/corpus/2647-top-level-await-modules/left.ts",
+  "<repo>/tests/corpus/2647-top-level-await-modules/sibling.ts",
+  "<repo>/tests/corpus/2647-top-level-await-modules/right.ts",
+  "<repo>/tests/corpus/2647-top-level-await-modules/main.ts"
+ ],
+ "diags": []
+}

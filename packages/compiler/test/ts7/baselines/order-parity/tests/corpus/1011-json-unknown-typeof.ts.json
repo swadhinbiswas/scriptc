@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1011-json-unknown-typeof.ts"
+ ],
+ "diags": []
+}

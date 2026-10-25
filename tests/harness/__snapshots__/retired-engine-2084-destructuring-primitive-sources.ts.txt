@@ -1,0 +1,40 @@
+retired-engine-2084-destructuring-primitive-sources.ts:8:7 - error SC2010: destructuring 'number' values through JavaScript wrapper coercion cannot compile statically
+
+  7 | // reports the SC2010 dynamic-family choice.
+  8 | { let { toString } = 1; console.log(`${toString.call(9)}`); }
+    |       ^~~~~~~~~~~~~~~~
+  9 | {
+
+  hint: scriptc compiles program code to native instructions; runtime JavaScript evaluation is unsupported
+
+retired-engine-2084-destructuring-primitive-sources.ts:8:40 - error SC1090: Function.prototype.call on a function whose signature cannot cross the checked-value boundary (call 'toString(...)' directly) is not supported yet
+
+  7 | // reports the SC2010 dynamic-family choice.
+  8 | { let { toString } = 1; console.log(`${toString.call(9)}`); }
+    |                                        ^~~~~~~~~~~~~~~~
+  9 | {
+
+retired-engine-2084-destructuring-primitive-sources.ts:10:7 - error SC2010: destructuring 'number' values through JavaScript wrapper coercion cannot compile statically
+
+   9 | {
+  10 |   let { toFixed } = 1;
+     |       ^~~~~~~~~~~~~~~
+  11 |   console.log(`${toFixed.call(2.5, 1)}`);
+
+  hint: scriptc compiles program code to native instructions; runtime JavaScript evaluation is unsupported
+
+retired-engine-2084-destructuring-primitive-sources.ts:11:18 - error SC1090: Function.prototype.call on a function whose signature cannot cross the checked-value boundary (call 'toFixed(...)' directly) is not supported yet
+
+  10 |   let { toFixed } = 1;
+  11 |   console.log(`${toFixed.call(2.5, 1)}`);
+     |                  ^~~~~~~~~~~~~~~~~~~~
+  12 | }
+
+retired-engine-2084-destructuring-primitive-sources.ts:18:9 - error SC2011: destructuring on 'any'-typed values cannot compile statically
+
+  17 | try {
+  18 |   const { anything } = null as any;
+     |         ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  19 | } catch (e) { console.log("null throws"); }
+
+  hint: use a supported typed operation, or 'unknown' with a checked cast ('x as T')

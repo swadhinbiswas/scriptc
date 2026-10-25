@@ -1,0 +1,17 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/cjs-require-tdz/main.js"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "var require() binding 'lib' below code that can reach it (Node reads undefined before the require runs, which is not modeled — declare it with const or let, or move the require above the code that can run first) is not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/cjs-require-tdz/main.js",
+    "start": 402,
+    "end": 427
+   },
+   "milestone": "later"
+  }
+ ]
+}

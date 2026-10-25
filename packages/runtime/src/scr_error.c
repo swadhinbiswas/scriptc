@@ -33,7 +33,8 @@ static const char *const scr_error_names[SCR_ERR_COUNT] = {
     /* DOMException's DEFAULT name is "Error" too (WebIDL: the name
      * parameter defaults to "Error"); the class identity lives in the
      * vtable, never the name. */
-    "Error", "ReferenceError", "EvalError", "URIError"};
+    "Error", "ReferenceError", "EvalError", "URIError", "AggregateError", "AssertionError",
+    "SuppressedError"};
 
 void scr_error_trace(void *e, ScrTraceVisit visit, void *ctx) {
   /* name/message are strings — never collector-headered; nothing to visit. */
@@ -49,6 +50,11 @@ static void scr_error_gcfree(void *obj) {
   scr_str_release(e->code); /* NULL-safe: absent on most errors */
   scr_str_release(e->stack_frames);
   scr_str_release(e->stack);
+  scr_str_release(e->system_call);
+  scr_str_release(e->system_path);
+  scr_str_release(e->system_dest);
+  scr_str_release(e->system_message);
+  scr_str_release(e->system_code);
   if (e->error_cause && scr_error_cause_drop) scr_error_cause_drop(obj);
   scr_obj_free_note();
   scr_cyc_free(e);
@@ -71,40 +77,110 @@ static void scr_domex_gcfree(void *obj) {
   scr_error_gcfree(obj);
 }
 
+/* AggregateError teardown: the ScrError fields plus the owned errors
+ * list, dropped through the hook scr_json.c installs before any list can
+ * exist (the same split as the DOMException cause). */
+static SCR_TL void (*scr_aggregate_errors_drop)(void *obj) = NULL;
+
+void scr_aggregate_install_errors_drop(void (*fn)(void *obj)) {
+  scr_aggregate_errors_drop = fn;
+}
+
+static void scr_aggregate_gcfree(void *obj) {
+  ScrAggregateError *a = (ScrAggregateError *)obj;
+  if (a->errors != NULL && scr_aggregate_errors_drop != NULL) scr_aggregate_errors_drop(obj);
+  scr_error_gcfree(obj);
+}
+
 /* The DIRECT release stored in the builtin vtables (the compiler emits the
  * analogous sc_reld_* for user subclasses). */
+static void scr_error_destroy(void *obj) {
+  ScrError *e = (ScrError *)obj;
+  scr_str_release(e->name);
+  scr_str_release(e->message);
+  scr_str_release(e->code);
+  scr_str_release(e->stack_frames);
+  scr_str_release(e->stack);
+  scr_str_release(e->system_call);
+  scr_str_release(e->system_path);
+  scr_str_release(e->system_dest);
+  scr_str_release(e->system_message);
+  scr_str_release(e->system_code);
+  if (e->error_cause && scr_error_cause_drop) scr_error_cause_drop(obj);
+  scr_obj_free_note();
+  if (scr_error_traced) scr_cyc_free(e);
+  else free(e);
+}
+
 static void scr_error_reld(void *obj) {
   ScrError *e = (ScrError *)obj;
   if (--e->rc == 0) {
-    if (scr_error_traced) scr_cyc_on_dead(e);
-    scr_str_release(e->name);
-    scr_str_release(e->message);
-    scr_str_release(e->code); /* NULL-safe: absent on most errors */
-    scr_str_release(e->stack_frames);
-    scr_str_release(e->stack);
-    if (e->error_cause && scr_error_cause_drop) scr_error_cause_drop(obj);
-    scr_obj_free_note();
-    if (scr_error_traced) scr_cyc_free(e);
-    else free(e);
+    if (scr_error_traced) scr_cyc_dead(e);
+    scr_rc_destroy(obj, scr_error_destroy);
   } else if (scr_error_traced) {
-    scr_cyc_on_release(e); /* possible cycle root; may collect */
+    scr_cyc_released(e); /* possible cycle root; may collect */
   }
 }
 
-/* The DOMException vtable's direct release: the cause drops first, then
- * the shared ScrError teardown (through the hook — see scr_domex_gcfree). */
+static void scr_domex_destroy(void *obj) {
+  ScrDomException *d = (ScrDomException *)obj;
+  if (d->cause != NULL && scr_domex_cause_drop != NULL) scr_domex_cause_drop(obj);
+  scr_error_destroy(obj);
+}
+
+/* Both cause chains participate in the shared destruction depth budget. */
 static void scr_domex_reld(void *obj) {
   ScrDomException *d = (ScrDomException *)obj;
-  if (d->rc == 1 && d->cause != NULL && scr_domex_cause_drop != NULL) {
-    scr_domex_cause_drop(obj);
+  if (--d->rc == 0) {
+    if (scr_error_traced) scr_cyc_dead(d);
+    scr_rc_destroy(obj, scr_domex_destroy);
+  } else if (scr_error_traced) {
+    scr_cyc_released(d);
   }
-  scr_error_reld(obj);
+}
+
+static void scr_aggregate_destroy(void *obj) {
+  ScrAggregateError *a = (ScrAggregateError *)obj;
+  if (a->errors != NULL && scr_aggregate_errors_drop != NULL) scr_aggregate_errors_drop(obj);
+  scr_error_destroy(obj);
+}
+
+/* SuppressedError teardown: the ScrError fields plus the disposal
+ * snapshots scr_exc_suppress recorded for its `error` and `suppressed`. */
+static void scr_suppressed_gcfree(void *obj) {
+  scr_exc_suppressed_forget(obj);
+  scr_error_gcfree(obj);
+}
+
+static void scr_suppressed_destroy(void *obj) {
+  scr_exc_suppressed_forget(obj);
+  scr_error_destroy(obj);
+}
+
+static void scr_suppressed_reld(void *obj) {
+  ScrError *e = (ScrError *)obj;
+  if (--e->rc == 0) {
+    if (scr_error_traced) scr_cyc_dead(e);
+    scr_rc_destroy(obj, scr_suppressed_destroy);
+  } else if (scr_error_traced) {
+    scr_cyc_released(e);
+  }
+}
+
+static void scr_aggregate_reld(void *obj) {
+  ScrAggregateError *a = (ScrAggregateError *)obj;
+  if (--a->base.rc == 0) {
+    if (scr_error_traced) scr_cyc_dead(a);
+    scr_rc_destroy(obj, scr_aggregate_destroy);
+  } else if (scr_error_traced) {
+    scr_cyc_released(a);
+  }
 }
 
 /* Defaults cover only the instants before main() stamps the program's real
  * preorder intervals; release is permanent. */
 SCR_TL ScrVt scr_error_vts[SCR_ERR_COUNT] = {
-    {0, 7, &scr_error_reld}, /* Error */
+    {0, 8, &scr_error_reld}, /* Error */
     {1, 1, &scr_error_reld}, /* TypeError */
     {2, 2, &scr_error_reld}, /* RangeError */
     {3, 3, &scr_error_reld}, /* SyntaxError */
@@ -112,12 +188,14 @@ SCR_TL ScrVt scr_error_vts[SCR_ERR_COUNT] = {
     {5, 5, &scr_error_reld}, /* ReferenceError */
     {6, 6, &scr_error_reld}, /* EvalError */
     {7, 7, &scr_error_reld}, /* URIError */
+    {8, 8, &scr_aggregate_reld}, /* AggregateError */
+    {9, 9, &scr_error_reld}, /* AssertionError */
+    {10, 10, &scr_suppressed_reld}, /* SuppressedError */
 };
 
 ScrError *scr_error_retain(ScrError *e) {
   if (e && e->rc != SIZE_MAX) {
     e->rc++;
-    if (scr_error_traced) scr_cyc_mark_live(e);
   }
   return e;
 }
@@ -152,11 +230,19 @@ ScrTraceFn scr_error_trace_arg(void) {
  * that drops the cause); calloc/cyc_alloc zeroing covers the extra
  * slots' defaults (code 0, no cause). */
 static ScrError *scr_error_alloc(int kind) {
-  size_t size = kind == SCR_ERR_DOMEX ? sizeof(ScrDomException) : sizeof(ScrError);
-  void (*gcfree)(void *) = kind == SCR_ERR_DOMEX ? &scr_domex_gcfree : &scr_error_gcfree;
+  size_t size = kind == SCR_ERR_DOMEX       ? sizeof(ScrDomException)
+                : kind == SCR_ERR_AGGREGATE ? sizeof(ScrAggregateError)
+                                            : sizeof(ScrError);
+  static ScrCycType error_type = { &scr_error_trace, &scr_error_gcfree, SCR_CYC_KIND_ERROR };
+  static ScrCycType domex_type = { &scr_error_trace, &scr_domex_gcfree, SCR_CYC_KIND_DOMEXCEPTION };
+  static ScrCycType aggregate_type = { &scr_error_trace, &scr_aggregate_gcfree, SCR_CYC_KIND_ERROR };
+  static ScrCycType suppressed_type = { &scr_error_trace, &scr_suppressed_gcfree, SCR_CYC_KIND_ERROR };
   ScrError *e;
   if (scr_error_traced) {
-    e = scr_cyc_alloc(size, &scr_error_trace, gcfree);
+    e = scr_cyc_alloc(size, kind == SCR_ERR_DOMEX       ? &domex_type
+                            : kind == SCR_ERR_AGGREGATE  ? &aggregate_type
+                            : kind == SCR_ERR_SUPPRESSED ? &suppressed_type
+                                                         : &error_type);
   } else {
     e = calloc(1, size);
     if (!e) scr_error_oom();
@@ -202,7 +288,7 @@ static ScrStr *scr_error_format(ScrError *e, ScrStr *name, ScrStr *message) {
    * the code-prefix test is exact for runtime-thrown errors; a user
    * assigning an ERR_* code onto a plain Error would bracket here where
    * Node would not (documented — user code owns that spelling). */
-  bool assertion = name && e->code && e->code->len >= 4 &&
+  bool assertion = !e->native_plain && name && e->code && e->code->len >= 4 &&
                    memcmp(e->code->data, "ERR_", 4) == 0;
   if (!name || name->len == 0) {
     return message ? scr_str_retain(message) : scr_str_new("", 0);
@@ -268,6 +354,12 @@ ScrStr *scr_error_stack(ScrError *e) {
   return scr_str_retain(e->stack);
 }
 
+void scr_error_set_stack(ScrError *e, ScrStr *stack) {
+  ScrStr *replacement = scr_str_retain(stack);
+  scr_str_release(e->stack);
+  e->stack = replacement;
+}
+
 bool scr_error_is(const void *obj) {
   const ScrVt *vt = ((const ScrError *)obj)->vt;
   return scr_error_vts[SCR_ERR_ERROR].pre <= vt->pre &&
@@ -290,6 +382,61 @@ void scr_throw_error_msg(int kind, const char *message, size_t len) {
 void scr_error_set_code(ScrError *e, const char *code) {
   scr_str_release(e->code); /* NULL-safe; replace is Node's assignment */
   e->code = scr_str_new(code, strlen(code));
+}
+
+/* new AbortError(undefined, { cause: reason }) as Node's AbortController
+ * paths build it: message "The operation was aborted", code ABORT_ERR,
+ * then name AbortError as own enumerable properties. `reason` is
+ * borrowed; NULL stands for undefined. +1. */
+ScrError *scr_error_abort(struct ScrDyn *reason) {
+  ScrStr *message = scr_str_new("The operation was aborted", 25);
+  ScrError *e = scr_error_new(SCR_ERR_ERROR, message);
+  scr_str_release(message);
+  scr_str_release(e->name);
+  e->name = scr_str_new("AbortError", 10);
+  scr_error_set_code(e, "ABORT_ERR");
+  e->name_present = true;
+  e->name_enumerable = true;
+  scr_error_define_cause(e, reason ? reason : scr_dyn_undefined());
+  return e;
+}
+
+/* The error object behind an event-error message, while a fire site whose
+ * payload is an Error (not only a message) runs its listeners; the error
+ * listener adapters answer it in place of an Error built from the
+ * message. Borrowed for the duration of the fire. */
+SCR_TL ScrError *scr_event_error_payload = NULL;
+
+/* The code Node attaches to the runtime's event-error messages whose text
+ * carries no errno name: connResetException's "socket hang up" and
+ * "aborted", the TLS client's disconnect before the handshake completes,
+ * the HTTP parser's header overflow, and the TLS verification failures (the openssl reason Node reports as the code). NULL for any
+ * other message. */
+const char *scr_error_message_code(const ScrStr *msg) {
+  static const struct { const char *prefix; bool whole; const char *code; } known[] = {
+    { "socket hang up", true, "ECONNRESET" },
+    { "aborted", true, "ECONNRESET" },
+    { "Client network socket disconnected before secure TLS connection was established", true,
+      "ECONNRESET" },
+    { "Parse Error: Header overflow", true, "HPE_HEADER_OVERFLOW" },
+    { "certificate has expired", true, "CERT_HAS_EXPIRED" },
+    { "self-signed certificate in certificate chain", true, "SELF_SIGNED_CERT_IN_CHAIN" },
+    { "self-signed certificate", false, "DEPTH_ZERO_SELF_SIGNED_CERT" },
+    { "unable to verify the first certificate", false, "UNABLE_TO_VERIFY_LEAF_SIGNATURE" },
+    { "Hostname/IP does not match certificate's altnames", false, "ERR_TLS_CERT_ALTNAME_INVALID" },
+    { "error:0A000460:SSL routines:ssl3_read_bytes:tlsv1 alert no application protocol", true,
+      "ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL" },
+    { "error:0A00042E:SSL routines:ssl3_read_bytes:tlsv1 alert protocol version", true,
+      "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION" },
+    { "error:0A0000BF:SSL routines::no protocols available", true, "ERR_SSL_NO_PROTOCOLS_AVAILABLE" },
+  };
+  for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
+    size_t n = strlen(known[i].prefix);
+    if (msg->len < n || memcmp(msg->data, known[i].prefix, n) != 0) continue;
+    if (known[i].whole ? msg->len == n : (msg->len == n || msg->data[n] == ';' || msg->data[n] == ':'))
+      return known[i].code;
+  }
+  return NULL;
 }
 
 ScrStr *scr_error_code(ScrError *e) {
@@ -378,6 +525,8 @@ double scr_domex_code_of(const ScrStr *name) {
 /* The blank allocation scr_json.c's constructors fill (scr_error_alloc
  * stays private — the mode-aware sizing/teardown selection lives here). */
 ScrError *scr_domex_alloc(void) { return scr_error_alloc(SCR_ERR_DOMEX); }
+
+ScrError *scr_aggregate_alloc(void) { return scr_error_alloc(SCR_ERR_AGGREGATE); }
 
 double scr_domex_code(ScrError *e) { return ((ScrDomException *)e)->dom_code; }
 

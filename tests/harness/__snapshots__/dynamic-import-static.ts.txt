@@ -1,4 +1,4 @@
-dynamic-import-static.ts:5:24 - error SC1090: dynamic import() of computed specifiers (the module graph embeds at build time — the specifier must be a string literal) are not supported yet
+dynamic-import-static.ts:5:24 - error SC1090: dynamic import() of computed specifiers (the module graph resolves at build time — the specifier must be a string literal) are not supported yet
 
   4 | async function run(specifier: string): Promise<void> {
   5 |   const module = await import(specifier);

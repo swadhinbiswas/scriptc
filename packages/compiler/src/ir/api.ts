@@ -1,0 +1,42 @@
+/* Public IR facade. Compiler passes import their implementation owner directly. */
+export * from "./ir.js";
+export { MAY_THROW_LIB_FNS } from "./builtin-effects.js";
+export {
+  type RuntimeFeatures,
+  moduleRuntimeFeatures,
+  moduleUsesRegex,
+  moduleUsesCopying,
+  moduleUsesLegacyTextDecoder,
+  moduleUsesFileHandle,
+  moduleUsesFetch,
+  moduleUsesProcessEvents,
+  moduleUsesEmitter,
+  moduleUsesStream,
+  NPM_COMPRESS_MIN,
+  moduleUsesZlib,
+  moduleUsesDc,
+  moduleUsesAssert,
+  moduleUsesDynInvoke,
+  moduleUsesDynAsync,
+  moduleUsesDynTier,
+  moduleUsesInspect,
+  moduleUsesChildProcess,
+  moduleUsesNet,
+  moduleUsesSymbol,
+  moduleUsesBigInt,
+  moduleUsesSearchParams,
+  moduleUsesQs,
+  moduleUsesParseArgs,
+  moduleUsesFsWatch,
+  moduleUsesNodeTest,
+  moduleUsesDgram,
+  moduleUsesHttpServer,
+  moduleUsesHttp2,
+  moduleUsesTls,
+  moduleUsesTlsCa,
+} from "./runtime-features.js";
+export {
+  LIB_NONDETERMINISTIC_PREFIXES,
+  moduleLibAsyncSurface,
+  moduleLibNondeterministicSurface,
+} from "../library/ir-policy.js";

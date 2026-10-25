@@ -1,0 +1,115 @@
+retired-engine-2103-optional-tuple-elements.ts:10:13 - error SC2009: values of type '[(string | undefined)?, (number | undefined)?] | undefined' cannot be compiled: the union shape is supported, but its arm '[(string | undefined)?, (number | undefined)?]' does not compile
+
+   9 | // with the dynamic-family story (SC2011) instead of the recitation.
+  10 | function f2(options?: [string?, number?]) {
+     |             ^~~~~~~
+  11 |   let [str, num] = options || [];
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+retired-engine-2103-optional-tuple-elements.ts:16:1 - error SC2004: uses of 'f2' inherit the blocker on its declaration
+
+  15 | }
+  16 | f2();
+     | ^~
+  17 | f2(["a"]);
+
+  hint: the declaration of 'f2' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:17:1 - error SC2004: uses of 'f2' inherit the blocker on its declaration
+
+  16 | f2();
+  17 | f2(["a"]);
+     | ^~
+  18 | f2(["a", 1]);
+
+  hint: the declaration of 'f2' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:18:1 - error SC2004: uses of 'f2' inherit the blocker on its declaration
+
+  17 | f2(["a"]);
+  18 | f2(["a", 1]);
+     | ^~
+  19 | f2([]);
+
+  hint: the declaration of 'f2' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:19:1 - error SC2004: uses of 'f2' inherit the blocker on its declaration
+
+  18 | f2(["a", 1]);
+  19 | f2([]);
+     | ^~
+  20 | const t: [string?, number?] = ["x"];
+
+  hint: the declaration of 'f2' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:20:7 - error SC2001: values of type '[(string | undefined)?, (number | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  19 | f2([]);
+  20 | const t: [string?, number?] = ["x"];
+     |       ^
+  21 | console.log(t.length, `${t[0]} ${t[1]}`);
+
+retired-engine-2103-optional-tuple-elements.ts:21:13 - error SC2004: uses of 't' inherit the blocker on its declaration
+
+  20 | const t: [string?, number?] = ["x"];
+  21 | console.log(t.length, `${t[0]} ${t[1]}`);
+     |             ^~~~~~~~
+  22 | const full: [string?, number?] = ["y", 7];
+
+  hint: the declaration of 't' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:22:7 - error SC2001: values of type '[(string | undefined)?, (number | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  21 | console.log(t.length, `${t[0]} ${t[1]}`);
+  22 | const full: [string?, number?] = ["y", 7];
+     |       ^~~~
+  23 | console.log(full.length, `${full[0]} ${full[1]}`);
+
+retired-engine-2103-optional-tuple-elements.ts:23:13 - error SC2004: uses of 'full' inherit the blocker on its declaration
+
+  22 | const full: [string?, number?] = ["y", 7];
+  23 | console.log(full.length, `${full[0]} ${full[1]}`);
+     |             ^~~~~~~~~~~
+  24 | const none: [string?, number?] = [];
+
+  hint: the declaration of 'full' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:24:7 - error SC2001: values of type '[(string | undefined)?, (number | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  23 | console.log(full.length, `${full[0]} ${full[1]}`);
+  24 | const none: [string?, number?] = [];
+     |       ^~~~
+  25 | console.log(none.length);
+
+retired-engine-2103-optional-tuple-elements.ts:24:34 - error SC2001: values of type '[(string | undefined)?, (number | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  23 | console.log(full.length, `${full[0]} ${full[1]}`);
+  24 | const none: [string?, number?] = [];
+     |                                  ^~
+  25 | console.log(none.length);
+
+retired-engine-2103-optional-tuple-elements.ts:25:13 - error SC2004: uses of 'none' inherit the blocker on its declaration
+
+  24 | const none: [string?, number?] = [];
+  25 | console.log(none.length);
+     |             ^~~~~~~~~~~
+  26 | // A rest-element tuple rides the same island representation.
+
+  hint: the declaration of 'none' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-2103-optional-tuple-elements.ts:27:7 - error SC2001: values of type '[string, ...number[]]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  26 | // A rest-element tuple rides the same island representation.
+  27 | const r: [string, ...number[]] = ["head", 1, 2, 3];
+     |       ^
+  28 | console.log(r.length, `${r[0]} ${r[1]} ${r[3]}`);
+
+retired-engine-2103-optional-tuple-elements.ts:28:13 - error SC2004: uses of 'r' inherit the blocker on its declaration
+
+  27 | const r: [string, ...number[]] = ["head", 1, 2, 3];
+  28 | console.log(r.length, `${r[0]} ${r[1]} ${r[3]}`);
+     |             ^~~~~~~~
+  29 | 
+
+  hint: the declaration of 'r' did not compile — fix the diagnostic reported there and these sites clear with it

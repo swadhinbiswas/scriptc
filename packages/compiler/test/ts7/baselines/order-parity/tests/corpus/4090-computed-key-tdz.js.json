@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4090-computed-key-tdz.js"
+ ],
+ "diags": []
+}

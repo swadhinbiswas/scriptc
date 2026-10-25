@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4812-int32-wrapping-sums.ts"
+ ],
+ "diags": []
+}

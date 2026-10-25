@@ -10,7 +10,8 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import ts5 from "typescript";
 import { compile } from "@scriptc/compiler";
-import { shardSelect, shardSuffix } from "./shard.js";
+import { corpusSelect, shardSuffix } from "./shard.js";
+import { tscJsxOracleEntry, wantsTscJsx } from "./jsx-oracle.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -20,12 +21,13 @@ const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 // Same corpus, same SCRIPTC_TEST_SHARD slice as differential.test.ts (the
 // two files split identically, so a shard's compile cache serves both lanes).
 const ENTRY_EXTS = ["ts", "js", "mjs", "cjs"];
-const files = shardSelect(
+const files = corpusSelect(
   ENTRY_EXTS.flatMap((ext) => [
     ...globSync(join(corpusDir, `*.${ext}`)),
     ...globSync(join(corpusDir, `*/main.${ext}`)),
   ]).sort(),
   (f) => f.slice(corpusDir.length + 1),
+  process.env["SCRIPTC_SAN"] === "1",
 );
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 const requestedMode = process.env["SCRIPTC_LLVM_TEST_MODE"];
@@ -34,8 +36,8 @@ if (requestedMode !== undefined && requestedMode !== "release" && requestedMode 
 }
 // Combined CI lanes cover release in differential.test.ts. Standalone and
 // packaged-artifact runs retain both modes unless one is explicitly selected.
-const optimizationModes: readonly ("release" | "dev")[] = requestedMode === undefined
-  ? ["release", "dev"] : [requestedMode];
+const optimizationModes: readonly ("release" | "dev")[] =
+  requestedMode === undefined ? ["release", "dev"] : [requestedMode];
 
 // Same known-env contract as the main differential suite.
 process.env["SCRIPTC_TEST_ENV"] = "from-harness";
@@ -58,10 +60,6 @@ function expectedExitCode(file: string): number {
     if (m) return Number(m[1]);
   }
   return 0;
-}
-
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
 }
 
 async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
@@ -104,7 +102,6 @@ function comparableStderr(stderr: Buffer): Buffer {
 }
 
 const comptimeShim = pathToFileURL(join(import.meta.dirname, "comptime-shim.mjs")).href;
-const islandShim = pathToFileURL(join(import.meta.dirname, "island-shim.mjs")).href;
 
 /** differential.test.ts's twin: the Node oracle runs with
  * --experimental-transform-types for corpus programs using non-erasable
@@ -124,13 +121,19 @@ function wantsTscDecorators(file: string): boolean {
 }
 
 function nodeOracleFile(file: string): string {
+  if (wantsTscJsx(directiveHead(file))) return tscJsxOracleEntry(file, cacheDir);
   if (!wantsTscDecorators(file)) return file;
   const src = readFileSync(file, "utf8");
   const out = ts5.transpileModule(src, {
     compilerOptions: { target: ts5.ScriptTarget.ES2022, module: ts5.ModuleKind.ESNext },
     fileName: file,
   }).outputText;
-  const key = createHash("sha256").update(ts5.version).update("\0").update(src).digest("hex").slice(0, 16);
+  const key = createHash("sha256")
+    .update(ts5.version)
+    .update("\0")
+    .update(src)
+    .digest("hex")
+    .slice(0, 16);
   const path = join(cacheDir, `dec-oracle-${key}.mjs`);
   mkdirSync(cacheDir, { recursive: true });
   // Atomic publish: concurrent suites (the other flavor's full run, or
@@ -151,17 +154,20 @@ function nodeOracleArgs(file: string): string[] {
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
+  // differential.test.ts's @disallow-code-generation directive.
+  const codegen = directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l))
+    ? ["--disallow-code-generation-from-strings"]
+    : [];
   // --import makes Node load even a CJS entry through its ESM loader,
   // changing an entry throw's uncaughtException origin to unhandledRejection.
-  const shims = directiveHead(file).includes("// @no-node-shims")
-    ? [] : ["--import", comptimeShim, "--import", islandShim];
-  return [...transform, ...nodep, ...shims, nodeOracleFile(file)];
+  const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
+  return [...transform, ...nodep, ...codegen, ...shims, nodeOracleFile(file)];
 }
 
 function programInputs(file: string): string[] {
   if (!/\/main\.(ts|js|mjs|cjs)$/.test(file)) return [file];
   return [
-    ...ENTRY_EXTS.flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
+    ...[...ENTRY_EXTS, "tsx", "jsx"].flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
     ...globSync(join(file, "../**/tsconfig.json")),
     ...globSync(join(file, "../**/package.json")),
   ].sort();
@@ -170,30 +176,43 @@ function programInputs(file: string): string[] {
 async function build(file: string, optimization: "release" | "dev") {
   const hash = createHash("sha256");
   for (const f of programInputs(file)) hash.update(f).update(readFileSync(f));
-  const key = hash.update(sanitize ? "san" : "plain")
-    .update(wantsDynamic(file) ? "dyn" : "").update("llvm-" + optimization).digest("hex").slice(0, 16);
+  const key = hash
+    .update(sanitize ? "san" : "plain")
+    .update("llvm-" + optimization)
+    .digest("hex")
+    .slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
   return compile(file, {
     outPath: join(outDir, `program-llvm-${optimization}${sanitize ? "-san" : ""}`),
-    outDir, sanitize, dynamic: wantsDynamic(file), optimization,
+    outDir,
+    sanitize,
+    optimization,
   });
 }
 
 describe(`llvm differential corpus (${files.length} programs, ${optimizationModes.join("+")}${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
-  test.for(files.map((f) => [f.slice(corpusDir.length + 1), f] as const))("%s", async ([rel, file]) => {
-    const oracle = await runBinary(process.execPath, nodeOracleArgs(file));
-    const expectedExit = expectedExitCode(file);
-    expect(oracle.exitCode).toBe(expectedExit);
-    for (const optimization of optimizationModes) {
-      const result = await build(file, optimization);
-      if (!result.ok) throw new Error(`${rel} (${optimization}): ` + result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("; "));
-      expect(result.backend).toBe("llvm");
-      expect(result.llvmPath.endsWith(".ll")).toBe(true);
-      const actual = await runBinary(result.binaryPath, []);
-      expect(actual.stdout, `${optimization} stdout`).toEqual(oracle.stdout);
-      if (expectedExit === 0) expect(comparableStderr(actual.stderr), `${optimization} stderr`).toEqual(oracle.stderr);
-      expect(actual.exitCode, `${optimization} exit status`).toBe(expectedExit);
-    }
-  });
+  test.for(files.map((f) => [f.slice(corpusDir.length + 1), f] as const))(
+    "%s",
+    async ([rel, file]) => {
+      const oracle = await runBinary(process.execPath, nodeOracleArgs(file));
+      const expectedExit = expectedExitCode(file);
+      expect(oracle.exitCode).toBe(expectedExit);
+      for (const optimization of optimizationModes) {
+        const result = await build(file, optimization);
+        if (!result.ok)
+          throw new Error(
+            `${rel} (${optimization}): ` +
+              result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("; "),
+          );
+        expect(result.backend).toBe("llvm");
+        expect(result.llvmPath.endsWith(".ll")).toBe(true);
+        const actual = await runBinary(result.binaryPath, []);
+        expect(actual.stdout, `${optimization} stdout`).toEqual(oracle.stdout);
+        if (expectedExit === 0)
+          expect(comparableStderr(actual.stderr), `${optimization} stderr`).toEqual(oracle.stderr);
+        expect(actual.exitCode, `${optimization} exit status`).toBe(expectedExit);
+      }
+    },
+  );
 });

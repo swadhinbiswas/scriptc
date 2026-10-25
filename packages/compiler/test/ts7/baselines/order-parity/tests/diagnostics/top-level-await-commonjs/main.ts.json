@@ -1,0 +1,18 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "Node classifies this file as CommonJS, where this ES-module syntax marker is a SyntaxError",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts",
+    "start": 15,
+    "end": 40
+   },
+   "milestone": "later",
+   "hint": "use a .mjs/.mts extension or set the nearest package.json's \"type\" to \"module\""
+  }
+ ]
+}

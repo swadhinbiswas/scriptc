@@ -8,7 +8,9 @@ export class RuntimeOptionalLocals {
   private readonly active = new Map<IrLocal, number>();
   private readonly scopes: { generation: number; removed: Map<IrLocal, number> }[] = [];
 
-  has(local: IrLocal): boolean { return this.active.has(local); }
+  has(local: IrLocal): boolean {
+    return this.active.has(local);
+  }
 
   add(local: IrLocal): void {
     if (!this.active.has(local)) this.active.set(local, ++this.generation);

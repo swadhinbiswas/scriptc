@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2604-cycle-classes-mutual/group.ts",
+  "<repo>/tests/corpus/2604-cycle-classes-mutual/item.ts",
+  "<repo>/tests/corpus/2604-cycle-classes-mutual/main.ts"
+ ],
+ "diags": []
+}

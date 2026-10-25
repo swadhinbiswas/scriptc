@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5179-forin-typed-shapes.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3082-forward-write-unwind.ts"
+ ],
+ "diags": []
+}

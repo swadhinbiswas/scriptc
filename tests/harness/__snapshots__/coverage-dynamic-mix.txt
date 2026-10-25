@@ -1,9 +1,10 @@
 scriptc coverage tests/coverage-fixtures/dynamic-mix.ts
 
-  statements analyzed   9
-  compile statically    6  (66%)
+  statements analyzed   8
+  compile statically    7  (87%)
+    in dynamic tier     2  (operate on values typed only at runtime; --explain-dynamic lists them)
 
-  runs with --dynamic   3 sites (embeds a JS engine, ~620KB — static stays the default)
-      ×1  '__island_eval' requires the embedded dynamic engine, which this build does not include             SC2010
-      ×1  '.toPrecision()' on numbers runs in the embedded dynamic engine, which this build does not include  SC2012
-      ×1  'Number.parseFloat' runs in the embedded dynamic engine, which this build does not include          SC2012
+  blockers:
+      ×1  SC2020  'Number.prototype.toLocaleString without a locale' is part of the standard library types but has no scriptc lowering yet
+          at tests/coverage-fixtures/dynamic-mix.ts:6:12
+          hint: the default locale is the host environment's, which a compiled binary cannot carry — pass it explicitly: x.toLocaleString("en-US")

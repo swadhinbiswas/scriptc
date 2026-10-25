@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5011-lifetime-region-outside-references.ts"
+ ],
+ "diags": []
+}

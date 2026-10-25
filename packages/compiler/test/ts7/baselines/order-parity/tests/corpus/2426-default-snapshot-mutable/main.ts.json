@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2426-default-snapshot-mutable/m.ts",
+  "<repo>/tests/corpus/2426-default-snapshot-mutable/live.ts",
+  "<repo>/tests/corpus/2426-default-snapshot-mutable/main.ts"
+ ],
+ "diags": []
+}

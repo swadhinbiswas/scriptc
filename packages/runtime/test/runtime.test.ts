@@ -8,9 +8,34 @@ const execFileAsync = promisify(execFile);
 const testDir = import.meta.dirname;
 const srcDir = join(testDir, "../src");
 
-const RUNTIME_SOURCES = ["scr_number.c", "scr_bigint.c", "scr_string.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_ffi.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_url.c", "scr_url_params.c", "scr_path.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"].map(
-  (f) => join(srcDir, f),
-);
+const RUNTIME_SOURCES = [
+  "scr_number.c",
+  "scr_bigint.c",
+  "scr_string.c",
+  "scr_array.c",
+  "scr_bytes.c",
+  "scr_shared.c",
+  "scr_bytes_io.c",
+  "scr_fs_cp.c",
+  "scr_map.c",
+  "scr_closure.c",
+  "scr_ffi.c",
+  "scr_object.c",
+  "scr_union.c",
+  "scr_exception.c",
+  "scr_error.c",
+  "scr_console.c",
+  "scr_lib.c",
+  "scr_hash.c",
+  "scr_url.c",
+  "scr_url_params.c",
+  "scr_path.c",
+  "scr_json.c",
+  "scr_async.c",
+  "scr_child.c",
+  "scr_cycle.c",
+  "scr_alloc.c",
+].map((f) => join(srcDir, f));
 
 // Full runtime smoke under ASan + the RC audit: proves the API works and the
 // hand-modeled ownership discipline (the same one the LLVM emitter uses) is
@@ -20,19 +45,21 @@ test("runtime smoke.c: output exact, ASan and RC audit clean", async () => {
   await mkdir(buildDir, { recursive: true });
   const bin = join(buildDir, "smoke");
   await execFileAsync("clang", [
-    "-std=c11", "-O1", "-Wall", "-Wextra",
-    "-fsanitize=address", "-DSCR_RC_AUDIT",
+    "-std=c11",
+    "-O1",
+    "-Wall",
+    "-Wextra",
+    "-fsanitize=address",
+    "-DSCR_RC_AUDIT",
     ...(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []),
-    "-o", bin,
+    "-o",
+    bin,
     join(testDir, "smoke.c"),
     ...RUNTIME_SOURCES,
     ...(process.platform === "linux" ? ["-lm"] : []),
   ]);
   const { stdout } = await execFileAsync(bin);
   expect(stdout).toBe(
-    "hello world\n" +
-      "n = 0.30000000000000004 flag = true\n" +
-      "hellohello 10\n" +
-      "true\n",
+    "hello world\n" + "n = 0.30000000000000004 flag = true\n" + "hellohello 10\n" + "true\n",
   );
 });

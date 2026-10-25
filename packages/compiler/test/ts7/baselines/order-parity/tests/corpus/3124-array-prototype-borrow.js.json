@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3124-array-prototype-borrow.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-object-receiver-storage.js"
+ ],
+ "diags": []
+}

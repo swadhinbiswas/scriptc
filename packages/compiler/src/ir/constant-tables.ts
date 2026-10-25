@@ -29,8 +29,13 @@ function literalNumber(expr: IrExpr): number | null {
  * an uninitialized receiver and preserve the generic accessor for invalid
  * indices; the constant data must never make a not-yet-initialized array
  * observable early. No IR or runtime representation changes are needed. */
-export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, ConstantNumericTable> {
-  const candidates = new Map<string, { values: number[] | null; writes: number; reads: number; rejected: boolean }>();
+export function findConstantNumericTables(
+  mod: IrModule,
+): ReadonlyMap<string, ConstantNumericTable> {
+  const candidates = new Map<
+    string,
+    { values: number[] | null; writes: number; reads: number; rejected: boolean }
+  >();
   for (const global of mod.globals ?? []) {
     if (!global.mutable && global.type.kind === "array" && global.type.elem.kind === "f64") {
       candidates.set(global.id, { values: null, writes: 0, reads: 0, rejected: false });
@@ -40,7 +45,8 @@ export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, Co
 
   function candidateFor(expr: IrExpr) {
     return expr.kind === "varRef" && expr.type.kind === "array" && expr.type.elem.kind === "f64"
-      ? candidates.get(expr.localId) : undefined;
+      ? candidates.get(expr.localId)
+      : undefined;
   }
 
   function reject(id: string): void {
@@ -50,22 +56,30 @@ export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, Co
 
   function expr(node: IrExpr): boolean {
     switch (node.kind) {
-      case "closure": case "classRef":
+      case "closure":
+      case "classRef":
         for (const id of node.captures ?? []) reject(id);
         break;
       case "arrIntrinsic": {
         const candidate = candidateFor(node.receiver);
-        if (candidate && ((node.method === "getNumber" && node.args.length === 1) ||
-            (node.method === "length" && node.args.length === 0))) {
+        if (
+          candidate &&
+          ((node.method === "getNumber" && node.args.length === 1) ||
+            (node.method === "length" && node.args.length === 0))
+        ) {
           if (node.method === "getNumber") candidate.reads++;
           return node.args.every(expr);
         }
         break;
       }
-      case "arrayGet": case "arrayHas": case "arrayState":
+      case "arrayGet":
+      case "arrayHas":
+      case "arrayState":
         if (candidateFor(node.arr)) return expr(node.index);
         break;
-      case "varRef": case "assignExpr": case "incDec":
+      case "varRef":
+      case "assignExpr":
+      case "incDec":
         reject(node.localId);
         break;
     }
@@ -80,7 +94,12 @@ export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, Co
           candidate.writes++;
           if (candidate.writes === 1) {
             const init = node.value;
-            if (init.kind === "arrayLit" && !init.spreads?.length && init.elems.length > 0 && init.elems.length <= MAX_TABLE_ELEMENTS) {
+            if (
+              init.kind === "arrayLit" &&
+              !init.spreads?.length &&
+              init.elems.length > 0 &&
+              init.elems.length <= MAX_TABLE_ELEMENTS
+            ) {
               const values: number[] = [];
               for (const elem of init.elems) {
                 const value = literalNumber(elem);
@@ -93,7 +112,9 @@ export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, Co
         }
         break;
       }
-      case "varDecl": case "forOf": case "rethrow":
+      case "varDecl":
+      case "forOf":
+      case "rethrow":
         reject(node.localId);
         break;
     }
@@ -102,7 +123,12 @@ export function findConstantNumericTables(mod: IrModule): ReadonlyMap<string, Co
   for (const fn of mod.functions) fn.body.every(stmt);
   const tables = new Map<string, ConstantNumericTable>();
   for (const [id, candidate] of candidates) {
-    if (!candidate.rejected && candidate.writes === 1 && candidate.reads > 0 && candidate.values !== null) {
+    if (
+      !candidate.rejected &&
+      candidate.writes === 1 &&
+      candidate.reads > 0 &&
+      candidate.values !== null
+    ) {
       tables.set(id, { symbol: `sc_const_numbers_${tables.size}`, values: candidate.values });
     }
   }

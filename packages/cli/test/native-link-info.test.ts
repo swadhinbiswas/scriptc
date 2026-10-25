@@ -12,7 +12,9 @@ const require = createRequire(import.meta.url);
 const repoRoot = join(import.meta.dirname, "../../..");
 const cliEntry = join(repoRoot, "packages/cli/src/main.ts");
 const tsxLoader = join(dirname(require.resolve("tsx/package.json")), "dist/loader.mjs");
-const supported = process.platform === "darwin" && process.arch === "arm64" &&
+const supported =
+  process.platform === "darwin" &&
+  process.arch === "arm64" &&
   Number.parseInt(osRelease().split(".", 1)[0] ?? "", 10) >= 24;
 const dirs: string[] = [];
 
@@ -36,19 +38,26 @@ async function fixture() {
 
 test("print option validation is explicit", async () => {
   const { entry } = await fixture();
-  await expect(cli(["build", entry, "--print=wat"]))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("unknown print kind") });
-  await expect(cli(["build", entry, "--print=native-link-info", "--emit=llvm"]))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("requires --emit=obj") });
-  await expect(cli(["run", entry, "--print=native-link-info"]))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("is a build option") });
+  await expect(cli(["build", entry, "--print=wat"])).rejects.toMatchObject({
+    stderr: expect.stringContaining("unknown print kind"),
+  });
+  await expect(
+    cli(["build", entry, "--print=native-link-info", "--emit=llvm"]),
+  ).rejects.toMatchObject({ stderr: expect.stringContaining("requires --emit=obj") });
+  await expect(cli(["run", entry, "--print=native-link-info"])).rejects.toMatchObject({
+    stderr: expect.stringContaining("is a build option"),
+  });
 });
 
 describe.runIf(supported)("macOS arm64 native link info", () => {
   test("prints a stable cache-independent precompiled runtime recipe", async () => {
     const { entry, object } = await fixture();
     const { stdout, stderr } = await cli([
-      "build", entry, "--print=native-link-info", "-o", object,
+      "build",
+      entry,
+      "--print=native-link-info",
+      "-o",
+      object,
     ]);
     expect(stderr).toBe("");
     const info = JSON.parse(stdout) as NativeLinkInfo;
@@ -63,7 +72,7 @@ describe.runIf(supported)("macOS arm64 native link info", () => {
         minimum_os: "14.0",
       },
       program: { object, entry_symbol: "main" },
-      runtime_abi: { version: 6, marker: "scr_runtime_abi_v6" },
+      runtime_abi: { version: 44, marker: "scr_runtime_abi_v44" },
       runtime_pack: {
         kind: "precompiled",
         package: "@scriptc/runtime-darwin-arm64",
@@ -73,11 +82,13 @@ describe.runIf(supported)("macOS arm64 native link info", () => {
     });
     expect(info.runtime_pack.root).not.toContain("node_modules/.cache");
     expect(info.link.input_order.join("\n")).not.toContain("node_modules/.cache");
-    expect(info.runtime_pack.objects.map((object) => object.path)).toEqual(expect.arrayContaining([
-      "artifacts/release/runtime/default/scr_console.o",
-      "artifacts/release/runtime/default/scr_async.o",
-      "artifacts/release/runtime/default/scr_cycle.o",
-    ]));
+    expect(info.runtime_pack.objects.map((object) => object.path)).toEqual(
+      expect.arrayContaining([
+        "artifacts/release/runtime/default/scr_console.o",
+        "artifacts/release/runtime/default/scr_async.o",
+        "artifacts/release/runtime/default/scr_cycle.o",
+      ]),
+    );
     await expect(readFile(object)).resolves.toBeInstanceOf(Buffer);
   });
 
@@ -110,38 +121,50 @@ describe.runIf(supported)("macOS arm64 native link info", () => {
 
   test("an out-of-tree C-driver build consumes the reported object and runtime pack", async () => {
     const { dir, entry, object } = await fixture();
-    const { stdout } = await cli([
-      "build", entry, "--print=native-link-info", "-o", object,
-    ]);
+    const { stdout } = await cli(["build", entry, "--print=native-link-info", "-o", object]);
     const info = JSON.parse(stdout) as NativeLinkInfo;
     const executable = join(dir, "app");
     await execFileAsync("clang", [
       ...info.link.driver_flags,
       ...info.link.input_order,
       ...info.link.system_libraries.map((name) => `-l${name}`),
-      "-o", executable,
+      "-o",
+      executable,
     ]);
-    await expect(execFileAsync(executable, [], { encoding: "utf8" }))
-      .resolves.toMatchObject({ stdout: "external link\n", stderr: "" });
+    await expect(execFileAsync(executable, [], { encoding: "utf8" })).resolves.toMatchObject({
+      stdout: "external link\n",
+      stderr: "",
+    });
   }, 30_000);
 
   test("a mismatched runtime ABI fails at link time through the versioned marker", async () => {
     const { dir, entry, object } = await fixture();
     await cli(["build", entry, "--emit=obj", "-o", object]);
     const stub = join(dir, "wrong-runtime.c");
-    await writeFile(stub, [
-      "void scr_runtime_abi_v1(void) {} /* previous ABI */",
-      "void scr_console_log(void) {}",
-      "void scr_init(void) {}",
-      "void scr_lib_init(void) {}",
-      "void scr_str_release(void) {}",
-      "void scr_str_retain_v(void) {}",
-      "void scr_error_vts(void) {}",
-      "",
-    ].join("\n"));
+    await writeFile(
+      stub,
+      [
+        "void scr_runtime_abi_v1(void) {} /* previous ABI */",
+        "void scr_console_log(void) {}",
+        "void scr_init(void) {}",
+        "void scr_lib_init(void) {}",
+        "void scr_str_release(void) {}",
+        "void scr_str_retain_v(void) {}",
+        "void scr_error_vts(void) {}",
+        "",
+      ].join("\n"),
+    );
     const error = await execFileAsync("clang", [
-      "-target", "arm64-apple-macosx14.0.0", object, stub, "-o", join(dir, "bad"),
-    ]).then(() => null, (failure: { stderr?: string }) => failure);
-    expect(error?.stderr).toContain("scr_runtime_abi_v6");
+      "-target",
+      "arm64-apple-macosx14.0.0",
+      object,
+      stub,
+      "-o",
+      join(dir, "bad"),
+    ]).then(
+      () => null,
+      (failure: { stderr?: string }) => failure,
+    );
+    expect(error?.stderr).toContain("scr_runtime_abi_v44");
   });
 });

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1721-assert-throws-regex-class.ts"
+ ],
+ "diags": []
+}

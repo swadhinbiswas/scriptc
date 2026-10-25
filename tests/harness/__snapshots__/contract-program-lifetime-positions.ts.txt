@@ -1,0 +1,17 @@
+contract-program-lifetime-positions.ts:5:26 - error SC7006: the ProgramLifetime contract is not checked in this position (ProgramLifetime is checked in the implements clause of a class declaration)
+
+  4 | 
+  5 | interface Marked extends ProgramLifetime {
+    |                          ^~~~~~~~~~~~~~~
+  6 |   id: number;
+
+  hint: declare it on the class itself: class Node implements ProgramLifetime { ... }
+
+contract-program-lifetime-positions.ts:9:17 - error SC7006: the ProgramLifetime contract is not checked in this position (ProgramLifetime is checked in the implements clause of a class declaration)
+
+   8 | 
+   9 | type Lifetime = ProgramLifetime;
+     |                 ^~~~~~~~~~~~~~~
+  10 | 
+
+  hint: declare it on the class itself: class Node implements ProgramLifetime { ... }

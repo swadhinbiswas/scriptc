@@ -1,101 +1,120 @@
-/* --npm-static's bundler-emitted-CJS export surface: the getter-table
- * shapes. A bundler-emitted CJS dist exports through runtime plumbing the
- * checker cannot model — the `__export(target, { name: () => value, ... })`
- * getter table behind `module.exports = __toCommonJS(target)`, the
- * `Object.defineProperty(exports, 'n', { get })` family, and the
- * transpiler star re-exports (`__exportStar(require('./x'), exports)`,
- * `__reExport(target, require('./x'), module.exports)`). Node's CJS lexer
- * SEES those named exports (cjs-lexer.ts mirrors it exactly), so named
- * imports link under Node — but the inferred surface the opted-in
- * resolution feeds the checker is an opaque object, and every import site
- * reports "X has no exported member" (the SC0001 storm that used to gate
- * the whole build).
- *
- * THE REWRITE. For an opted-in package's CJS file whose exports come from
- * these shapes, the fs shadow (npm-static.ts) serves BOTH worlds — the
- * checker and the lowering ride one program — a text rewrite that spells
- * the same export surface in the plain CJS the whole existing machinery
- * already models:
- *
- *   - the recognized plumbing statements are SPACE-PADDED in place
- *     (newlines kept, so every original line/offset survives): the
- *     `module.exports = __toCommonJS(target)` assignment, the
- *     `__export(target, {...})` call, the star-pattern calls, the
- *     recognized defineProperty exports, and the dead esbuild annotation
- *     `0 && (module.exports = {...})` (left live it poisons the checker's
- *     alias resolution — multiple module.exports assignments make import
- *     aliases land on properties no lowering path resolves);
- *   - one canonical export table is APPENDED at the tail:
- *     `module.exports = { ...require("./star"), own: local, ... };`
- *     Each getter body the chase can follow types the export by its
- *     resolved VALUE (`() => localBinding` resolves to the binding's
- *     inferred type; member chains and scalar literals hoist to a tail
- *     const first), and every lexer-visible name the chase cannot follow
- *     falls back to a checked-dynamic `any` binding (value undefined —
- *     exactly what Node's import binds for a lexer-visible name the
- *     runtime export object never carries).
- *
- * LEXER PARITY IS THE CONTRACT: the rewritten text must answer the SAME
- * name set to cjs-lexer.ts that the original answers to Node — named
- * imports must link exactly where Node's would. The table is formatted
- * for merve's byte rules (`name: IDENT,` — value ident runs directly
- * followed by ','), star re-exports ride spread entries (recorded as
- * reexports and resolved recursively, exactly Node's union), and the
- * esbuild `__esModule: !0` marker is spelled as a deliberate SCAN STOPPER
- * so it stays lexer-invisible (Node never lexes __esModule out of
- * __toCommonJS) while member-access star entries after it are covered by
- * the spread records.
- *
- * SNAPSHOT SEMANTICS (the documented divergence): the getter table reads
- * its locals LIVE at every access; the canonical table captures values
- * ONCE, at module tail — after every top-level statement ran, so ordinary
- * modules see identical values, and only post-evaluation reassignment of
- * an exported local (the lazy-cache counter idiom) can diverge. Star
- * re-export targets load at module tail instead of their original
- * statement positions (visible only to load-order-sensitive side
- * effects). Node's __esModule marker survives on the rewritten object.
- *
- * THE IMPORT-SIDE TWIN: the same pass erases esbuild's __toESM interop
- * wrapper around EXTERNAL dependencies (`var import_x =
- * __toESM(require("x"))`, the `, 1` node-mode variant, inline
- * member-accessed forms) — see the section header at planToEsmInterop.
- * The wrapper pads down to the bare require it wraps and module-valued
- * `.default` accesses pad down to their binding, so member accesses model
- * on the required package's canonical table through the ordinary require
- * machinery. Interop the recognizers cannot finish answers `{ degrade }`:
- * the caller reports the package as an offender (naming the construct)
- * and it serves from the island — never a failed build.
- *
- * Everything here is SYNTACTIC (the owned native TypeScript AST): the chase decides only what TEXT to emit — the
- * checker then infers the types from the emitted spellings. A file whose
- * export mechanism the recognizers cannot fully account for is left
- * untouched (null): its import-site errors stay, and the frontend's
- * offender attribution degrades the PACKAGE to the island with a note. */
-
 import * as ts from "./ts7/syntax.js";
-import { bareRequireSpecOf, cjsLexedExportsOfFile, isExportsIdent, isModuleExports } from "./cjs-syntax.js";
+import {
+  bareRequireSpecOf,
+  cjsLexedExportsOfFile,
+  isExportsIdent,
+  isModuleExports,
+} from "./cjs-syntax.js";
 import { rewriteBundledFunctionImports } from "./npm-static-bundled-cjs.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
 
 /** Resolution stays with the compilation host. Syntax never reads disk or
  * starts a parser implicitly, so native and Node hosts run the same pass. */
 export interface CjsRewriteHost {
   requireTargetEsModuleStamped(fromFile: string, specifier: string): boolean;
   starTargetNames(fromFile: string, specifier: string): Set<string>;
+  /** Told when the rewritten file's tail export table stands for a live
+   * getter table the original installed before it could run another
+   * module's code (liveExportTableFirst): a module of a require cycle that
+   * captured the export object early observes exactly that table. */
+  liveExportTable?: ((filePath: string) => void) | undefined;
+  /** True for a module only ever loaded through require() (a bundle's
+   * CommonJS chunk split into its own module): no ES-module importer
+   * exists, so Node's lexer-visible name set bounds nothing and every
+   * name the export plumbing defines is part of its surface. */
+  requireOnly?: ((filePath: string) => boolean) | undefined;
+  /** Told the names Node's lexer detects in the original file that the
+   * rewritten text spells only as accessors (which the lexer skips). */
+  lexerVisibleNames?: ((filePath: string, names: readonly string[]) => void) | undefined;
+}
+
+/** True when esbuild's export object (`module.exports = __toCommonJS(T)`
+ * over a getter table `__export(T, {...})`) is installed before anything
+ * that can run another module's code, and nothing else writes the export
+ * object. Every statement before the installation is then a declaration,
+ * a directive, or the getter-table call (whose getters run only when
+ * read), and variable initializers evaluate no calls outside function
+ * bodies. The getters read live bindings, so the object a cycle partner
+ * captures early answers every later read exactly like the final table. */
+function liveExportTableFirst(
+  sf: ts.SourceFile,
+  installAt: number,
+  target: string,
+  exportTables: readonly { target: string }[],
+): boolean {
+  if (!exportTables.some((t) => t.target === target)) return false;
+  let callsOutsideFunctions = false;
+  const noCalls = (root: ts.Node): boolean => {
+    callsOutsideFunctions = false;
+    ts.walkPreorder(root, (n) => {
+      if (callsOutsideFunctions) return "stop";
+      if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n))
+        return "skip";
+      if (ts.isCallExpression(n) || ts.isNewExpression(n) || ts.isTaggedTemplateExpression(n))
+        callsOutsideFunctions = true;
+      return undefined;
+    });
+    return !callsOutsideFunctions;
+  };
+  let sawTable = false;
+  for (const stmt of sf.statements.nodes) {
+    if (tokenStartOfNode(stmt) >= installAt) return sawTable;
+    if (ts.isFunctionDeclaration(stmt) || ts.isEmptyStatement(stmt)) continue;
+    if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) continue;
+    if (ts.isVariableStatement(stmt)) {
+      if (
+        stmt.declarationList.declarations.nodes.every(
+          (d) => ts.isIdentifier(d.name) && (d.initializer === undefined || noCalls(d.initializer)),
+        )
+      )
+        continue;
+      return false;
+    }
+    if (ts.isExpressionStatement(stmt) && ts.isCallExpression(stmt.expression)) {
+      const table = exportCallOf(stmt.expression);
+      if (table !== null && table.target === target) {
+        sawTable = true;
+        continue;
+      }
+    }
+    return false;
+  }
+  return false;
 }
 
 export function isBundlerCjsCandidate(source: string): boolean {
-  return source.includes("__toCommonJS") || source.includes("__toESM")
-    || source.includes("__exportStar") || source.includes("__reExport")
-    || (source.includes("Object.defineProperty(exports") && source.includes("get"));
+  return (
+    source.includes("__toCommonJS") ||
+    source.includes("__toESM") ||
+    source.includes("__exportStar") ||
+    source.includes("__reExport") ||
+    (source.includes("Object.defineProperty(exports") && source.includes("get"))
+  );
+}
+
+/** The helper a bundler-emitted name spells. esbuild suffixes a helper
+ * that a bundled module declares again with a counter (a bundled esbuild
+ * dist inside another bundle carries `__export2`, `__toCommonJS2`, …); the
+ * recognizers below verify each call's shape, so the counter carries no
+ * meaning beyond the name collision it avoided. */
+export function bundlerHelperBase(name: string): string {
+  return /^__[A-Za-z]+\d+$/.test(name) ? name.replace(/\d+$/, "") : name;
 }
 
 /** The last NAME of a callee: bare identifier or any member chain's final
- * name (`tslib_1.__exportStar` → "__exportStar"). */
+ * name (`tslib_1.__exportStar` → "__exportStar"), helper counters dropped. */
 function calleeNameOf(call: ts.CallExpression): string | null {
   const callee = call.expression;
-  if (ts.isIdentifier(callee)) return callee.text;
-  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) return callee.name.text;
+  if (ts.isIdentifier(callee)) return bundlerHelperBase(callee.text);
+  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name))
+    return bundlerHelperBase(callee.name.text);
   return null;
+}
+
+/** True for an identifier spelling the named helper (counter-suffixed
+ * spellings included). */
+function isHelperIdent(node: ts.Node, base: string): node is ts.Identifier {
+  return ts.isIdentifier(node) && bundlerHelperBase(node.text) === base;
 }
 
 /** An entry the canonical table can carry. */
@@ -104,8 +123,12 @@ interface EntrySpec {
   name: string;
   /** "ident": VALUE is a plain identifier spelled directly in the table.
    * "hoist": VALUE is an expression text hoisted to a tail const first.
+   * "getter": VALUE is a getter body's returned expression the table
+   *   keeps as a live accessor (read on every access, like the original
+   *   getter, so a lazily initialized module still initializes at the
+   *   first read).
    * "any": the checked-dynamic fallback (`__scriptc_any`). */
-  kind: "ident" | "hoist" | "any";
+  kind: "ident" | "hoist" | "getter" | "any";
   value?: string;
 }
 
@@ -124,19 +147,43 @@ function chaseValue(e: ts.Expression): { kind: "ident" | "hoist"; text: string }
     cur.kind === ts.SyntaxKind.FalseKeyword ||
     cur.kind === ts.SyntaxKind.NullKeyword
   ) {
-    return { kind: "hoist", text: cur.getText() };
+    return { kind: "hoist", text: getTextOfNode(cur) };
   }
   // ident-rooted member chains: this.x / a.b.c / a["k"].d — side-effect
   // free reads the tail const can evaluate once.
   let walk: ts.Expression = cur;
   while (
-    (ts.isPropertyAccessExpression(walk) && walk.questionDotToken === undefined && ts.isIdentifier(walk.name)) ||
-    (ts.isElementAccessExpression(walk) && walk.questionDotToken === undefined && ts.isStringLiteral(walk.argumentExpression))
+    (ts.isPropertyAccessExpression(walk) &&
+      walk.questionDotToken === undefined &&
+      ts.isIdentifier(walk.name)) ||
+    (ts.isElementAccessExpression(walk) &&
+      walk.questionDotToken === undefined &&
+      ts.isStringLiteral(walk.argumentExpression))
   ) {
     walk = walk.expression;
   }
-  if (ts.isIdentifier(walk)) return { kind: "hoist", text: cur.getText() };
+  if (ts.isIdentifier(walk)) return { kind: "hoist", text: getTextOfNode(cur) };
   return null;
+}
+
+/** An object literal of side-effect-free member values (`exports.default
+ * = { context: context_api_1.context, metrics: metrics_api_1.metrics }`,
+ * tsc's default-export object): the tail const can build it once, like a
+ * chased value. Null for any other shape (spreads, methods, accessors,
+ * computed keys, or a value chaseValue rejects). */
+function chaseObjectLiteral(e: ts.Expression): { kind: "hoist"; text: string } | null {
+  let cur: ts.Expression = e;
+  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+  if (!ts.isObjectLiteralExpression(cur)) return null;
+  for (const prop of cur.properties.nodes) {
+    if (
+      !ts.isPropertyAssignment(prop) ||
+      !(ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) ||
+      (chaseValue(prop.initializer) === null && chaseObjectLiteral(prop.initializer) === null)
+    )
+      return null;
+  }
+  return { kind: "hoist", text: getTextOfNode(cur) };
 }
 
 /** The getter body's returned expression for the two descriptor getter
@@ -144,27 +191,30 @@ function chaseValue(e: ts.Expression): { kind: "ident" | "hoist"; text: string }
  * the arrow forms the esbuild table uses (`() => X`, `() => { return X }`). */
 function getterReturnOf(fn: ts.Node): ts.Expression | null {
   let body: ts.ConciseBody | undefined;
-  if (ts.isArrowFunction(fn) && fn.parameters.length === 0) body = fn.body;
-  else if (ts.isFunctionExpression(fn) && fn.parameters.length === 0) body = fn.body;
-  else if (ts.isMethodDeclaration(fn) && fn.parameters.length === 0 && fn.body !== undefined) body = fn.body;
+  if (ts.isArrowFunction(fn) && fn.parameters.nodes.length === 0) body = fn.body;
+  else if (ts.isFunctionExpression(fn) && fn.parameters.nodes.length === 0) body = fn.body;
+  else if (ts.isMethodDeclaration(fn) && fn.parameters.nodes.length === 0 && fn.body !== undefined)
+    body = fn.body;
   else return null;
   if (body === undefined) return null;
   if (!ts.isBlock(body)) return body; // expression-bodied arrow
-  if (body.statements.length !== 1) return null;
-  const ret = body.statements[0]!;
+  if (body.statements.nodes.length !== 1) return null;
+  const ret = body.statements.nodes[0]!;
   return ts.isReturnStatement(ret) && ret.expression !== undefined ? ret.expression : null;
 }
 
 /** The `__export(IDENT, { name: () => value, ... })` call's parts, or null.
  * Every property must be a `name: <function>` assignment (identifier or
  * string-literal name) — anything else is not the esbuild table. */
-function exportCallOf(call: ts.CallExpression): { target: string; entries: [string, ts.Expression | null][] } | null {
+function exportCallOf(
+  call: ts.CallExpression,
+): { target: string; entries: [string, ts.Expression | null][] } | null {
   if (calleeNameOf(call) !== "__export") return null;
-  if (call.arguments.length !== 2) return null;
-  const [target, table] = call.arguments as unknown as [ts.Expression, ts.Expression];
+  if (call.arguments.nodes.length !== 2) return null;
+  const [target, table] = call.arguments.nodes as unknown as [ts.Expression, ts.Expression];
   if (!ts.isIdentifier(target) || !ts.isObjectLiteralExpression(table)) return null;
   const entries: [string, ts.Expression | null][] = [];
-  for (const prop of table.properties) {
+  for (const prop of table.properties.nodes) {
     if (!ts.isPropertyAssignment(prop)) return null;
     let name: string;
     if (ts.isIdentifier(prop.name)) name = prop.name.text;
@@ -192,13 +242,17 @@ function definePropertyExportOf(
   ) {
     return null;
   }
-  if (call.arguments.length !== 3) return null;
-  const [recv, nameArg, desc] = call.arguments as unknown as [ts.Expression, ts.Expression, ts.Expression];
+  if (call.arguments.nodes.length !== 3) return null;
+  const [recv, nameArg, desc] = call.arguments.nodes as unknown as [
+    ts.Expression,
+    ts.Expression,
+    ts.Expression,
+  ];
   if (!isExportsIdent(recv) && !isModuleExports(recv)) return null;
   if (!ts.isStringLiteral(nameArg) || !ts.isObjectLiteralExpression(desc)) return null;
   const name = nameArg.text;
   let value: ts.Expression | null = null;
-  for (const p of desc.properties) {
+  for (const p of desc.properties.nodes) {
     if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name)) {
       if (p.name.text === "value") value = p.initializer;
       else if (p.name.text === "get") value = getterReturnOf(p.initializer);
@@ -206,9 +260,19 @@ function definePropertyExportOf(
       value = getterReturnOf(p);
     }
   }
-  const esModuleStamp =
-    name === "__esModule" && value !== null && value.kind === ts.SyntaxKind.TrueKeyword;
+  const esModuleStamp = name === "__esModule" && value !== null && isTrueLiteral(value);
   return { name, value, esModuleStamp };
+}
+
+/** `true`, or `!0`, its minified spelling. */
+function isTrueLiteral(expr: ts.Expression): boolean {
+  return (
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    (ts.isPrefixUnaryExpression(expr) &&
+      expr.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isNumericLiteral(expr.operand) &&
+      expr.operand.text === "0")
+  );
 }
 
 /** Space-pads [start, end) of `text` preserving newlines — the recognized
@@ -224,28 +288,6 @@ function isPlainName(name: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
 }
 
-/* ── the __toESM(require(…)) interop import ──────────────────────────────
- * esbuild's CJS output wraps every import of an EXTERNAL (unbundled)
- * dependency in its __toESM helper: `var import_x = __toESM(require("x"))`
- * (a trailing `, 1` in node mode). The wrapper's runtime semantics are
- * static facts the required target decides: `default` binds the required
- * module.exports itself (node mode, or a target whose __esModule is not
- * truthy — the plain-CJS answer) or passes through to the target's own
- * `default` export (the transpiled-ESM stamps), and every other member is
- * a getter passthrough of the target's export. So the wrapper ERASES: the
- * call pads down to the bare `require("x")` it wraps (a require binding
- * the whole existing machinery models — the edge, the inline %init, the
- * canonical-table member reads), and `.default` accesses on the binding
- * pad down to the binding itself exactly where Node's answer is the
- * module. The helper is recognized BY STRUCTURE (the cjs-lexer precedent:
- * a quirk-faithful recognizer over the vendored text, never a general
- * JS-semantics engine); a file whose interop deviates beyond recognition
- * answers a DEGRADE reason and the package falls back to the island with
- * the note — never a failed build, and never the silent alternative (an
- * unrecognized-but-live helper keeps `var __create = Object.create;`
- * alive, whose value declaration fences AT MODULE LOAD — the package
- * would crash on its first import while the report claimed it static). */
-
 interface ToEsmPlan {
   /** Wrapper/`.default` spans to space-pad (they join `neutralize`, so the
    * helper sweep sees the erased call sites as dead references). */
@@ -255,8 +297,7 @@ interface ToEsmPlan {
    * and TEXT COPIED off the source (the canonical table's hoisted getter
    * bodies) must drop the member spelling the same way. */
   moduleBindings: Set<string>;
-  /** Non-null: the file's interop deviates beyond recognition — the reason
-   * the offender note carries (the package degrades to the island). */
+
   degrade: string | null;
 }
 
@@ -270,18 +311,14 @@ interface ToEsmPlan {
  * __copyProps(…, mod) call copying onto a conditional that tests
  * isNodeMode/__esModule and defines "default" with value mod. Comments and
  * formatting are free; the SHAPE is the contract. */
-function recognizedToEsmDecl(stmt: ts.Statement): boolean {
-  if (!ts.isVariableStatement(stmt)) return false;
-  const decls = stmt.declarationList.declarations;
-  if (decls.length !== 1) return false;
-  const d = decls[0]!;
-  if (!ts.isIdentifier(d.name) || d.name.text !== "__toESM" || d.initializer === undefined) return false;
+function recognizedToEsmDecl(d: ts.VariableDeclaration): boolean {
+  if (!isHelperIdent(d.name, "__toESM") || d.initializer === undefined) return false;
   let init: ts.Expression = d.initializer;
   while (ts.isParenthesizedExpression(init)) init = init.expression;
   if (!ts.isArrowFunction(init)) return false;
-  if (init.parameters.length < 2 || init.parameters.length > 3) return false;
-  const p0 = init.parameters[0]!;
-  const p1 = init.parameters[1]!;
+  if (init.parameters.nodes.length < 2 || init.parameters.nodes.length > 3) return false;
+  const p0 = init.parameters.nodes[0]!;
+  const p1 = init.parameters.nodes[1]!;
   if (!ts.isIdentifier(p0.name) || !ts.isIdentifier(p1.name)) return false;
   const mod = p0.name.text;
   const isNodeMode = p1.name.text;
@@ -293,24 +330,24 @@ function recognizedToEsmDecl(stmt: ts.Statement): boolean {
     expr = expr.right;
   }
   while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
-  if (!ts.isCallExpression(expr) || !ts.isIdentifier(expr.expression) || expr.expression.text !== "__copyProps") return false;
-  if (expr.arguments.length < 2) return false;
-  const from = expr.arguments[1]!;
+  if (!ts.isCallExpression(expr) || !isHelperIdent(expr.expression, "__copyProps")) return false;
+  if (expr.arguments.nodes.length < 2) return false;
+  const from = expr.arguments.nodes[1]!;
   if (!ts.isIdentifier(from) || from.text !== mod) return false;
-  let to: ts.Expression = expr.arguments[0]!;
+  let to: ts.Expression = expr.arguments.nodes[0]!;
   while (ts.isParenthesizedExpression(to)) to = to.expression;
   if (!ts.isConditionalExpression(to)) return false;
-  const condText = to.condition.getText();
+  const condText = getTextOfNode(to.condition);
   if (!condText.includes(isNodeMode) || !condText.includes("__esModule")) return false;
   let stamp: ts.Expression = to.whenTrue;
   while (ts.isParenthesizedExpression(stamp)) stamp = stamp.expression;
-  if (!ts.isCallExpression(stamp) || !ts.isIdentifier(stamp.expression) || stamp.expression.text !== "__defProp") return false;
-  if (stamp.arguments.length !== 3) return false;
-  const nameArg = stamp.arguments[1]!;
+  if (!ts.isCallExpression(stamp) || !isHelperIdent(stamp.expression, "__defProp")) return false;
+  if (stamp.arguments.nodes.length !== 3) return false;
+  const nameArg = stamp.arguments.nodes[1]!;
   if (!ts.isStringLiteral(nameArg) || nameArg.text !== "default") return false;
-  const desc = stamp.arguments[2]!;
+  const desc = stamp.arguments.nodes[2]!;
   if (!ts.isObjectLiteralExpression(desc)) return false;
-  return desc.properties.some(
+  return desc.properties.nodes.some(
     (p) =>
       ts.isPropertyAssignment(p) &&
       ts.isIdentifier(p.name) &&
@@ -322,37 +359,44 @@ function recognizedToEsmDecl(stmt: ts.Statement): boolean {
 
 const TO_ESM_SHAPE_DEGRADE =
   "its shipped JS calls the __toESM bundler-interop helper but spells it in a shape the " +
-  "recognizer cannot verify — the package serves from the island instead";
+  "recognizer cannot verify";
 const TO_ESM_ESCAPE_DEGRADE =
   "a __toESM(require(…)) bundler-interop object escapes into a use the static rewrite cannot " +
-  "follow (only module-scope bindings and direct member reads compile) — the package serves " +
-  "from the island instead";
+  "follow (only module-scope bindings and direct member reads compile)";
 const TO_ESM_ARG_DEGRADE =
   "it calls the __toESM bundler-interop helper on something other than require(…) of a string " +
-  "literal — the package serves from the island instead";
+  "literal";
 const TO_ESM_MIXED_DEGRADE =
-  "its bundler-emitted export surface cannot be respelled around its __toESM interop imports " +
-  "— the package serves from the island instead";
+  "its bundler-emitted export surface cannot be respelled around its __toESM interop imports";
 
 /** The interop-erasure plan for one CJS file (see the section header). */
 function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteHost): ToEsmPlan {
   const pads: { start: number; end: number }[] = [];
   const moduleBindings = new Set<string>();
   const plan: ToEsmPlan = { pads, moduleBindings, degrade: null };
-  const fail = (reason: string): ToEsmPlan => ({ pads: [], moduleBindings: new Set(), degrade: reason });
+  const fail = (reason: string): ToEsmPlan => ({
+    pads: [],
+    moduleBindings: new Set(),
+    degrade: reason,
+  });
 
-  const declStmts = sf.statements.filter(
-    (s) =>
-      ts.isVariableStatement(s) &&
-      s.declarationList.declarations.some(
-        (d) => ts.isIdentifier(d.name) && d.name.text === "__toESM",
-      ),
-  );
+  // Top-level declarators of the helper, any statement shape (minified
+  // dists share one `var` among several helpers), by spelling.
+  const decls = new Map<string, ts.VariableDeclaration[]>();
+  for (const s of sf.statements.nodes) {
+    if (!ts.isVariableStatement(s)) continue;
+    for (const d of s.declarationList.declarations.nodes) {
+      if (!isHelperIdent(d.name, "__toESM")) continue;
+      const list = decls.get(d.name.text);
+      if (list === undefined) decls.set(d.name.text, [d]);
+      else list.push(d);
+    }
+  }
   const refs: ts.Identifier[] = [];
   const calls: ts.CallExpression[] = [];
   const collect = (n: ts.Node): void => {
-    if (ts.isIdentifier(n) && n.text === "__toESM") refs.push(n);
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "__toESM") calls.push(n);
+    if (isHelperIdent(n, "__toESM")) refs.push(n);
+    if (ts.isCallExpression(n) && isHelperIdent(n.expression, "__toESM")) calls.push(n);
   };
   ts.walkPreorder(sf, collect);
   if (calls.length === 0 && refs.length === 0) return plan;
@@ -360,25 +404,27 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
   // a helper that escapes as a VALUE is outside the recognized shape.
   const callees = new Set<ts.Node>(calls.map((c) => c.expression));
   const declNames = new Set<ts.Node>();
-  for (const s of declStmts) {
-    for (const d of (s as ts.VariableStatement).declarationList.declarations) {
-      if (ts.isIdentifier(d.name) && d.name.text === "__toESM") declNames.add(d.name);
-    }
-  }
+  for (const list of decls.values()) for (const d of list) declNames.add(d.name);
   if (refs.some((r) => !callees.has(r) && !declNames.has(r))) return fail(TO_ESM_ESCAPE_DEGRADE);
   if (calls.length === 0) return plan; // declared but never called — dead helper
-  if (declStmts.length !== 1 || !recognizedToEsmDecl(declStmts[0]!)) return fail(TO_ESM_SHAPE_DEGRADE);
+  // Every spelling a call uses must be declared exactly once, in the
+  // recognized shape.
+  for (const call of calls) {
+    const list = decls.get((call.expression as ts.Identifier).text);
+    if (list === undefined || list.length !== 1 || !recognizedToEsmDecl(list[0]!))
+      return fail(TO_ESM_SHAPE_DEGRADE);
+  }
 
   /** Module-scope interop bindings: name → whether `.default` IS the
    * module (pad the access) rather than a member read of its `default`. */
   const bindings = new Map<string, boolean>();
   for (const call of calls) {
-    const arg0 = call.arguments[0];
+    const arg0 = call.arguments.nodes[0];
     const spec = arg0 !== undefined ? bareRequireSpecOf(arg0) : null;
-    if (spec === null || call.arguments.length > 2) return fail(TO_ESM_ARG_DEGRADE);
+    if (spec === null || call.arguments.nodes.length > 2) return fail(TO_ESM_ARG_DEGRADE);
     let isNodeMode = false;
-    if (call.arguments.length === 2) {
-      const modeArg = call.arguments[1]!;
+    if (call.arguments.nodes.length === 2) {
+      const modeArg = call.arguments.nodes[1]!;
       if (ts.isNumericLiteral(modeArg)) isNodeMode = Number(modeArg.text) !== 0;
       else if (modeArg.kind === ts.SyntaxKind.TrueKeyword) isNodeMode = true;
       else if (modeArg.kind === ts.SyntaxKind.FalseKeyword) isNodeMode = false;
@@ -393,14 +439,22 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
       child = parent;
       parent = parent.parent;
     }
-    if (ts.isVariableDeclaration(parent) && parent.initializer === child && ts.isIdentifier(parent.name)) {
+    if (
+      ts.isVariableDeclaration(parent) &&
+      parent.initializer === child &&
+      ts.isIdentifier(parent.name)
+    ) {
       if (bindings.has(parent.name.text)) return fail(TO_ESM_ESCAPE_DEGRADE);
       bindings.set(parent.name.text, defaultIsModule);
       if (defaultIsModule) moduleBindings.add(parent.name.text);
-    } else if (ts.isPropertyAccessExpression(parent) && parent.expression === child && ts.isIdentifier(parent.name)) {
+    } else if (
+      ts.isPropertyAccessExpression(parent) &&
+      parent.expression === child &&
+      ts.isIdentifier(parent.name)
+    ) {
       if (parent.name.text === "default" && defaultIsModule) {
         if (!readOnlyAccess(parent)) return fail(TO_ESM_ESCAPE_DEGRADE);
-        pads.push({ start: child.getEnd(), end: parent.getEnd() });
+        pads.push({ start: child.end, end: parent.end });
       }
     } else {
       return fail(TO_ESM_ESCAPE_DEGRADE);
@@ -408,15 +462,16 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
     // the wrapper itself: callee + '(' down, and everything after the
     // require argument (`, 1` included) — the bare require survives at its
     // original offsets.
-    pads.push({ start: call.getStart(sf), end: arg0!.getStart(sf) });
-    pads.push({ start: arg0!.getEnd(), end: call.getEnd() });
+    pads.push({ start: tokenStartOfNode(call), end: tokenStartOfNode(arg0!) });
+    pads.push({ start: arg0!.end, end: call.end });
   }
 
   if (bindings.size > 0) {
     // Binding safety: the erased binding must be declared exactly once and
     // never written — the `.default` mapping below matches receivers by
     // NAME (syntactic, like the rest of this file), so a shadow or a
-    // reassignment would silently change what a padded access reads.
+    // reassignment would change what a padded access reads without a
+    // diagnostic.
     const declCount = new Map<string, number>();
     const bump = (name: string): void => {
       if (bindings.has(name)) declCount.set(name, (declCount.get(name) ?? 0) + 1);
@@ -429,7 +484,10 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
         ts.isIdentifier(n.name)
       ) {
         bump(n.name.text);
-      } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name !== undefined) {
+      } else if (
+        (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) &&
+        n.name !== undefined
+      ) {
         bump(n.name.text);
       } else if (
         ts.isBinaryExpression(n) &&
@@ -441,7 +499,8 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
         violated = true;
       } else if (
         (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
-        (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
+        (n.operator === ts.SyntaxKind.PlusPlusToken ||
+          n.operator === ts.SyntaxKind.MinusMinusToken) &&
         ts.isIdentifier(n.operand) &&
         bindings.has(n.operand.text)
       ) {
@@ -465,7 +524,7 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
           violated = true;
           return;
         }
-        pads.push({ start: n.expression.getEnd(), end: n.getEnd() });
+        pads.push({ start: n.expression.end, end: n.end });
       }
     };
     ts.walkPreorder(sf, padDefaults);
@@ -504,7 +563,7 @@ const RESERVED_KEYS = new Set(["__proto__"]);
  * nothing to fix) — serve the file untouched. A `{ degrade }` answer means
  * the file carries a bundler-interop construct the recognizers cannot
  * finish: the caller reports the PACKAGE as an offender with the reason
- * and the fallback loop islands it — never a failed build. */
+ * and the selection loop records a package refusal. */
 export function rewriteBundlerCjsSyntax(
   sf: ts.SourceFile,
   filePath: string,
@@ -515,17 +574,20 @@ export function rewriteBundlerCjsSyntax(
 
   // ESM bundles can contain closed CommonJS function factories. Recognize
   // those before refusing interop that needs a dynamic module namespace.
-  if (ts.isExternalModule(sf)) {
+  // TypeScript forces every `.cjs` file to be an external module
+  // (isFileForcedToBeModuleByFormat), yet Node always loads one as
+  // CommonJS: the extension, not that flag, decides the format there.
+  if (!filePath.endsWith(".cjs") && ts.isExternalModule(sf)) {
     const bundled = rewriteBundledFunctionImports(source, sf);
     if (bundled !== null) return bundled;
-    return source.includes("__toESM(")
-        ? {
-            degrade:
-              "its ES-module dist routes an external dependency through the __toESM " +
-              "bundler-interop helper, which has no static story in ESM output — the " +
-              "package serves from the island instead",
-          }
-      : null;
+    if (!source.includes("__toESM(")) return null;
+    return {
+      degrade: source.includes("__commonJS")
+        ? "its ES-module bundle reaches bundled CommonJS modules through the __commonJS and " +
+          "__toESM bundler-interop helpers, which cannot compile natively in ESM output"
+        : "its ES-module dist routes an external dependency through the __toESM " +
+          "bundler-interop helper, which cannot compile natively in ESM output",
+    };
   }
 
   // The __toESM interop pass (see the section header): wrapper call sites
@@ -560,16 +622,25 @@ export function rewriteBundlerCjsSyntax(
     if (!starSpecsInOrder.includes(spec)) starSpecsInOrder.push(spec);
   };
 
-  for (const stmt of sf.statements) {
+  for (const stmt of sf.statements.nodes) {
     if (!ts.isExpressionStatement(stmt)) continue;
     const e = stmt.expression;
     // `module.exports = <rhs>`
-    if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken && isModuleExports(e.left)) {
+    if (
+      ts.isBinaryExpression(e) &&
+      e.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isModuleExports(e.left)
+    ) {
       const rhs = e.right;
-      if (ts.isCallExpression(rhs) && calleeNameOf(rhs) === "__toCommonJS" && rhs.arguments.length === 1 && ts.isIdentifier(rhs.arguments[0]!)) {
-        esbuildMainTarget = (rhs.arguments[0] as ts.Identifier).text;
-        tablePos = stmt.getStart(sf);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+      if (
+        ts.isCallExpression(rhs) &&
+        calleeNameOf(rhs) === "__toCommonJS" &&
+        rhs.arguments.nodes.length === 1 &&
+        ts.isIdentifier(rhs.arguments.nodes[0]!)
+      ) {
+        esbuildMainTarget = (rhs.arguments.nodes[0] as ts.Identifier).text;
+        tablePos = tokenStartOfNode(stmt);
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -602,9 +673,9 @@ export function rewriteBundlerCjsSyntax(
           names,
           finalRhs: cur,
           viaBareExports,
-          pos: stmt.getStart(sf),
-          start: stmt.getStart(sf),
-          end: stmt.getEnd(),
+          pos: tokenStartOfNode(stmt),
+          start: tokenStartOfNode(stmt),
+          end: stmt.end,
         });
         continue; // classified later (only when a rewrite actually happens)
       }
@@ -624,7 +695,7 @@ export function rewriteBundlerCjsSyntax(
         isModuleExports(inner.left) &&
         ts.isObjectLiteralExpression(inner.right)
       ) {
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -635,28 +706,28 @@ export function rewriteBundlerCjsSyntax(
     const table = exportCallOf(e);
     if (table !== null) {
       exportTables.push(table);
-      neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+      neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
       sawBundleShape = true;
       continue;
     }
     // `__exportStar(require('spec'), exports);` — the tsc/tslib spelling —
     // and `__export(require('spec'))`, the legacy twin.
-    if ((name === "__exportStar" || name === "__export") && e.arguments.length >= 1) {
-      const spec = bareRequireSpecOf(e.arguments[0]!);
+    if ((name === "__exportStar" || name === "__export") && e.arguments.nodes.length >= 1) {
+      const spec = bareRequireSpecOf(e.arguments.nodes[0]!);
       if (spec !== null) {
         addStarSpec(spec);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
     }
     // `__reExport(TARGET, require('spec')[, module.exports]);` — esbuild's
     // `export * from` plumbing.
-    if (name === "__reExport" && e.arguments.length >= 2) {
-      const spec = bareRequireSpecOf(e.arguments[1]!);
+    if (name === "__reExport" && e.arguments.nodes.length >= 2) {
+      const spec = bareRequireSpecOf(e.arguments.nodes[1]!);
       if (spec !== null) {
         addStarSpec(spec);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -665,7 +736,7 @@ export function rewriteBundlerCjsSyntax(
     const def = definePropertyExportOf(e);
     if (def !== null) {
       if (def.esModuleStamp) {
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         // the canonical table re-stamps it (lexer-visibly — merve detects
         // this defineProperty form, so parity wants a visible entry)
         continue;
@@ -673,17 +744,22 @@ export function rewriteBundlerCjsSyntax(
       const chased = def.value !== null ? chaseValue(def.value) : null;
       if (chased !== null) {
         definePropEntries.push({ name: def.name, value: def.value });
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
       }
-      // unchaseable descriptor: LEAVE the statement (its runtime fence is
-      // loud where an undefined-valued entry would be a silent lie); the
+      // unchaseable descriptor: LEAVE the statement (its runtime fence
+      // throws where an undefined-valued entry would be a wrong result); the
       // name still types through the any-fallback below.
       continue;
     }
   }
 
   const lexed = cjsLexedExportsOfFile(sf);
+  if (host.requireOnly?.(filePath) === true) {
+    for (const t of exportTables) for (const [name] of t.entries) lexed.exports.add(name);
+    for (const d of definePropEntries) lexed.exports.add(d.name);
+    for (const m of memberStmts) for (const name of m.names) lexed.exports.add(name);
+  }
   let emitTable = sawBundleShape && (lexed.exports.size > 0 || lexed.reexports.length > 0);
 
   const starSpecs: string[] = [];
@@ -722,7 +798,14 @@ export function rewriteBundlerCjsSyntax(
       ...exportTables.filter((t) => t.target !== esbuildMainTarget),
     ];
     for (const t of tablesOrdered) {
-      for (const [name, value] of t.entries) claim(name, classify(name, value));
+      for (const [name, value] of t.entries) {
+        const spec = classify(name, value);
+        // The table feeding module.exports keeps a getter it cannot chase
+        // as a live accessor rather than a snapshot.
+        if (spec.kind === "any" && value !== null && t.target === esbuildMainTarget)
+          claim(name, { name, kind: "getter", value: getTextOfNode(value) });
+        else claim(name, spec);
+      }
     }
     for (const d of definePropEntries) claim(d.name, classify(d.name, d.value));
 
@@ -744,7 +827,9 @@ export function rewriteBundlerCjsSyntax(
     for (const m of memberStmts) {
       let cur: ts.Expression = m.finalRhs;
       while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-      const isVoidInit = cur.kind === ts.SyntaxKind.VoidExpression || (ts.isIdentifier(cur) && cur.text === "undefined");
+      const isVoidInit =
+        cur.kind === ts.SyntaxKind.VoidExpression ||
+        (ts.isIdentifier(cur) && cur.text === "undefined");
       const discarded = tablePos !== null && (m.pos < tablePos || m.viaBareExports);
       if (!isVoidInit) {
         // Only side-effect-free RHS shapes may be neutralized (identifiers,
@@ -752,7 +837,7 @@ export function rewriteBundlerCjsSyntax(
         // anything else keeps the file untouched (the offender path owns
         // it: neutralizing would drop an evaluation, keeping it meets the
         // lowering's discard fence at load).
-        const chased = chaseValue(cur);
+        const chased = chaseValue(cur) ?? chaseObjectLiteral(cur);
         if (chased === null) {
           return toEsm.pads.length > 0 ? { degrade: TO_ESM_MIXED_DEGRADE } : null;
         }
@@ -771,11 +856,16 @@ export function rewriteBundlerCjsSyntax(
      * fence the whole statement). Everything else snapshots via a tail
      * const. */
     const immutableTopLevel = new Set<string>();
-    for (const stmt of sf.statements) {
-      if (ts.isFunctionDeclaration(stmt) && stmt.name !== undefined) immutableTopLevel.add(stmt.name.text);
-      else if (ts.isClassDeclaration(stmt) && stmt.name !== undefined) immutableTopLevel.add(stmt.name.text);
-      else if (ts.isVariableStatement(stmt) && (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0) {
-        for (const d of stmt.declarationList.declarations) {
+    for (const stmt of sf.statements.nodes) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name !== undefined)
+        immutableTopLevel.add(stmt.name.text);
+      else if (ts.isClassDeclaration(stmt) && stmt.name !== undefined)
+        immutableTopLevel.add(stmt.name.text);
+      else if (
+        ts.isVariableStatement(stmt) &&
+        (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0
+      ) {
+        for (const d of stmt.declarationList.declarations.nodes) {
           if (ts.isIdentifier(d.name)) immutableTopLevel.add(d.name.text);
         }
       }
@@ -789,7 +879,8 @@ export function rewriteBundlerCjsSyntax(
       const names = host.starTargetNames(filePath, spec);
       let refVar: string | null = null;
       for (const n of names) {
-        if (n === "default" || n === "__esModule" || entries.has(n) || RESERVED_KEYS.has(n)) continue;
+        if (n === "default" || n === "__esModule" || entries.has(n) || RESERVED_KEYS.has(n))
+          continue;
         if (starMembers.some((m) => m.name === n)) continue; // earlier spec wins
         if (refVar === null) {
           refVar = `__scriptc_r${i}`;
@@ -831,20 +922,51 @@ export function rewriteBundlerCjsSyntax(
    * function values whose bodies defer per the JS function-poison rule. */
   {
     const HELPER_NAMES = new Set([
-      "__create", "__defProp", "__defProps", "__getOwnPropDesc", "__getOwnPropDescs",
-      "__getOwnPropNames", "__getOwnPropSymbols", "__getProtoOf", "__hasOwnProp",
-      "__propIsEnum", "__export", "__copyProps", "__reExport", "__toESM", "__toCommonJS",
-      "__exportStar", "__createBinding", "__setModuleDefault", "__importStar", "__importDefault",
+      "__create",
+      "__defProp",
+      "__defProps",
+      "__getOwnPropDesc",
+      "__getOwnPropDescs",
+      "__getOwnPropNames",
+      "__getOwnPropSymbols",
+      "__getProtoOf",
+      "__hasOwnProp",
+      "__propIsEnum",
+      "__export",
+      "__copyProps",
+      "__reExport",
+      "__toESM",
+      "__toCommonJS",
+      "__commonJS",
+      "__esm",
+      "__exportStar",
+      "__createBinding",
+      "__setModuleDefault",
+      "__importStar",
+      "__importDefault",
     ]);
+    /* Helper declarators by name. A minified dist shares one `var` among
+     * several helpers (`var __getProtoOf=…,__hasOwnProp=…;`): each
+     * declarator is its own candidate, and the statement pads whole only
+     * once every declarator in it is dead. */
     const helperDecls = new Map<string, { start: number; end: number }>();
-    for (const stmt of sf.statements) {
+    const helperStmts: ts.VariableStatement[] = [];
+    for (const stmt of sf.statements.nodes) {
       if (!ts.isVariableStatement(stmt)) continue;
-      const decls = stmt.declarationList.declarations;
-      if (decls.length !== 1) continue;
-      const d = decls[0]!;
-      if (ts.isIdentifier(d.name) && HELPER_NAMES.has(d.name.text)) {
-        helperDecls.set(d.name.text, { start: stmt.getStart(sf), end: stmt.getEnd() });
+      const decls = stmt.declarationList.declarations.nodes;
+      let anyHelper = false;
+      for (const d of decls) {
+        if (!ts.isIdentifier(d.name) || !HELPER_NAMES.has(bundlerHelperBase(d.name.text))) continue;
+        if (helperDecls.has(d.name.text)) continue; // redeclared: keep the first, never sweep twice
+        anyHelper = true;
+        helperDecls.set(
+          d.name.text,
+          decls.length === 1
+            ? { start: tokenStartOfNode(stmt), end: stmt.end }
+            : { start: tokenStartOfNode(d), end: d.end },
+        );
       }
+      if (anyHelper && decls.length > 1) helperStmts.push(stmt);
     }
     // every identifier occurrence of a helper name outside its own
     // declarator name node, position-recorded for the span test
@@ -852,17 +974,18 @@ export function rewriteBundlerCjsSyntax(
     const record = (node: ts.Node): void => {
       if (ts.isIdentifier(node) && helperDecls.has(node.text)) {
         const parent = node.parent;
-        if (parent !== undefined && ts.isVariableDeclaration(parent) && parent.name === node) return;
+        if (parent !== undefined && ts.isVariableDeclaration(parent) && parent.name === node)
+          return;
         const list = refs.get(node.text);
-        if (list === undefined) refs.set(node.text, [node.getStart(sf)]);
-        else list.push(node.getStart(sf));
+        if (list === undefined) refs.set(node.text, [tokenStartOfNode(node)]);
+        else list.push(tokenStartOfNode(node));
       }
     };
     ts.walkPreorder(sf, record);
     const dead = [...neutralize];
     const inDead = (pos: number): boolean => dead.some((s) => pos >= s.start && pos < s.end);
     const removed = new Set<string>();
-    for (let changed = true; changed; ) {
+    for (let changed = true; changed;) {
       changed = false;
       for (const [name, span] of helperDecls) {
         if (removed.has(name)) continue;
@@ -877,8 +1000,39 @@ export function rewriteBundlerCjsSyntax(
         }
       }
     }
+    // A swept declarator of a shared statement pads with its separating
+    // comma, and the statement pads whole once every declarator is dead:
+    // padding the bare declarator span would leave a dangling comma.
+    const declaratorSpans = new Set<{ start: number; end: number }>();
+    const declaratorPads: { start: number; end: number }[] = [];
+    for (const stmt of helperStmts) {
+      const decls = stmt.declarationList.declarations.nodes;
+      const deadAt = decls.map((d) => {
+        if (!ts.isIdentifier(d.name) || !removed.has(d.name.text)) return false;
+        const span = helperDecls.get(d.name.text)!;
+        if (span.start !== tokenStartOfNode(d)) return false;
+        declaratorSpans.add(span);
+        return true;
+      });
+      if (deadAt.every((x) => x)) {
+        declaratorPads.push({ start: tokenStartOfNode(stmt), end: stmt.end });
+        continue;
+      }
+      // Dead declarators before the last live one take their trailing
+      // comma; the dead tail after it pads from that declarator's end.
+      const lastLive = deadAt.lastIndexOf(false);
+      for (let i = 0; i < decls.length; i++) {
+        if (!deadAt[i]) continue;
+        const d = decls[i]!;
+        declaratorPads.push(
+          i < lastLive
+            ? { start: tokenStartOfNode(d), end: tokenStartOfNode(decls[i + 1]!) }
+            : { start: decls[lastLive]!.end, end: d.end },
+        );
+      }
+    }
     neutralize.length = 0;
-    neutralize.push(...dead);
+    neutralize.push(...dead.filter((span) => !declaratorSpans.has(span)), ...declaratorPads);
   }
 
   /* ── emission ─────────────────────────────────────────────────────── */
@@ -889,6 +1043,15 @@ export function rewriteBundlerCjsSyntax(
   }
 
   if (!emitTable) return text; // interop pads only — nothing appends
+
+  if (
+    esbuildMainTarget !== null &&
+    tablePos !== null &&
+    memberStmts.length === 0 &&
+    definePropEntries.length === 0 &&
+    liveExportTableFirst(sf, tablePos, esbuildMainTarget, exportTables)
+  )
+    host.liveExportTable?.(filePath);
 
   const lines: string[] = [""];
   const hasAnyFallback = [...entries.values()].some((s) => s.kind === "any");
@@ -921,6 +1084,8 @@ export function rewriteBundlerCjsSyntax(
       const v = `__scriptc_e${hoistN++}`;
       hoists.push(`const ${v} = ${dropInteropDefault(spec.value!)};`);
       plainParts.push(`${keyOf(spec.name)}: ${v},`);
+    } else if (spec.kind === "getter") {
+      plainParts.push(`get ${keyOf(spec.name)}() { return ${dropInteropDefault(spec.value!)}; },`);
     } else {
       plainParts.push(`${keyOf(spec.name)}: __scriptc_any,`);
     }
@@ -940,8 +1105,18 @@ export function rewriteBundlerCjsSyntax(
   const spreadParts = [...starSpecs].reverse().map((s) => `...require(${JSON.stringify(s)}),`);
   const esModulePart = lexed.exports.has("__esModule") ? "__esModule: true," : "";
   const memberParts = starMembers.map(
-    (m) => `${keyOf(m.name)}: ${m.ref}${isPlainName(m.name) ? `.${m.name}` : `[${JSON.stringify(m.name)}]`},`,
+    (m) =>
+      `${keyOf(m.name)}: ${m.ref}${isPlainName(m.name) ? `.${m.name}` : `[${JSON.stringify(m.name)}]`},`,
   );
-  lines.push(`module.exports = {${spreadParts.join("")}${plainParts.join("")}${esModulePart}${memberParts.join("")}};`);
+  lines.push(
+    `module.exports = {${spreadParts.join("")}${plainParts.join("")}${esModulePart}${memberParts.join("")}};`,
+  );
+  /* Node's lexer skips accessors (and stops reading an object literal at
+   * the first one), so a canonical table with accessor entries hides
+   * names the original showed it (esbuild's dead annotation): the host
+   * keeps the original's lexer answer, so ES-module importers link
+   * exactly as they do against the original. */
+  if ([...entries.values()].some((spec) => spec.kind === "getter"))
+    host.lexerVisibleNames?.(filePath, [...lexed.exports]);
   return text + lines.join("\n") + "\n";
 }

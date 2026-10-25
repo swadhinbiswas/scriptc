@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4062-cycle-tdz-read/probe.ts",
+  "<repo>/tests/corpus/4062-cycle-tdz-read/limits.ts",
+  "<repo>/tests/corpus/4062-cycle-tdz-read/main.ts"
+ ],
+ "diags": []
+}

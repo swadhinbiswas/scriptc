@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/checked-array-flat/operations.mjs",
+  "<repo>/tests/corpus/checked-array-flat/main.ts"
+ ],
+ "diags": []
+}

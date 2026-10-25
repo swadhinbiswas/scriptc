@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1698-stream-uncaught-error.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2166-cjs-getter-this/lib.cjs",
+  "<repo>/tests/corpus/2166-cjs-getter-this/main.cjs"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5791-dyn-constant-key-read-sites.ts"
+ ],
+ "diags": []
+}

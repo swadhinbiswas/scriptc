@@ -11,7 +11,10 @@ vi.mock("node:fs", async () => {
   return {
     ...actual,
     readFileSync: (path: Parameters<typeof actual.readFileSync>[0], ...args: unknown[]) => {
-      if (mockedPackage.version !== null && /[\\/]packages[\\/]compiler[\\/]package\.json$/.test(String(path))) {
+      if (
+        mockedPackage.version !== null &&
+        /[\\/]packages[\\/]compiler[\\/]package\.json$/.test(String(path))
+      ) {
         return JSON.stringify({ version: mockedPackage.version });
       }
       return Reflect.apply(actual.readFileSync, actual, [path, ...args]);

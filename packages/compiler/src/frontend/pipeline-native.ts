@@ -1,8 +1,7 @@
-import { runFrontend, type Frontend } from "./pipeline.js";
+import { runFrontend, type Frontend, type FrontendOptions } from "./pipeline.js";
 import { loadProgram } from "./program.js";
 import { FrontendServices, type ComptimeEvaluator } from "./services.js";
 import { createNativeTs7Api } from "./ts7/native-api.js";
-import { emitRuntimeTypeScript } from "../native/runtime-typescript.js";
 
 /** Native callers supply the installed TS7 executable explicitly. The
  * returned frontend owns its final program and shared syntax services;
@@ -14,19 +13,35 @@ export function runNativeFrontend(
   externalTypes?: Readonly<Record<string, string>>,
   evaluateComptime?: ComptimeEvaluator,
   libraryNpmStatic: readonly string[] = [],
+  options: FrontendOptions = {},
 ): Frontend {
-  const services = new FrontendServices((options) => createNativeTs7Api({ ...options, executable }), process.cwd(), evaluateComptime,
-    undefined, (path, source, format) => emitRuntimeTypeScript(executable, path, source, format));
+  const services = new FrontendServices(
+    (options) => createNativeTs7Api({ ...options, executable }),
+    process.cwd(),
+    evaluateComptime,
+    undefined,
+  );
   try {
-    const frontend = runFrontend(entryPath, (path, options) => loadProgram(path, services, {
-      npmStatic: options.npmStatic ?? [],
-      externalTypes: Object.entries(options.externalTypes ?? {}),
-    }), npmStatic, externalTypes, libraryNpmStatic);
+    const frontend = runFrontend(
+      entryPath,
+      (path, options) =>
+        loadProgram(path, services, {
+          npmStatic: options.npmStatic ?? [],
+          externalTypes: Object.entries(options.externalTypes ?? {}),
+        }),
+      npmStatic,
+      externalTypes,
+      libraryNpmStatic,
+      options,
+    );
     return {
       ...frontend,
       dispose: () => {
-        try { frontend.dispose(); }
-        finally { services.close(); }
+        try {
+          frontend.dispose();
+        } finally {
+          services.close();
+        }
       },
     };
   } catch (error) {

@@ -29,7 +29,9 @@ describe("native code-generation targets", () => {
       throw new Error("unexpected host libc probe");
     });
     for (const [platform, arch, release] of [
-      ["darwin", "arm64", "24.0.0"], ["darwin", "x64", "24.0.0"], ["win32", "x64", "10.0.0"],
+      ["darwin", "arm64", "24.0.0"],
+      ["darwin", "x64", "24.0.0"],
+      ["win32", "x64", "10.0.0"],
     ] as const) {
       expect(targets.nativeCodegenTarget({}, platform, arch, release)).not.toBeNull();
       expect(targets.nativeCodegenTargetRefusal({}, platform, arch, release)).toBeNull();
@@ -40,30 +42,51 @@ describe("native code-generation targets", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  test.each(["gnu", "musl"] as const)("probes the %s host libc once across target and helper selection", async (libc) => {
-    vi.resetModules();
-    const targets = await import("./targets.js");
-    const report = vi.spyOn(process.report, "getReport").mockReturnValue({
-      header: libc === "gnu" ? { glibcVersionRuntime: "2.36" } : {},
-    } as ReturnType<typeof process.report.getReport>);
-    const target = libc === "gnu" ? LINUX_X64_GNU_TARGET : LINUX_X64_MUSL_TARGET;
-    expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0")).toEqual(target);
-    expect(targets.nativeCodegenTargetRefusal({}, "linux", "x64", "6.8.0")).toBeNull();
-    expect(targets.nativeHelperForTarget(target, "linux", "x64")?.packageName).toBe(`@scriptc/llvm-linux-x64-${libc}`);
-    expect(targets.nativeCodegenTarget({ SCRIPTC_TARGET: "wasm32-wasi" }, "linux", "x64", "6.8.0")).toEqual(WASM32_WASI_TARGET);
-    expect(report).toHaveBeenCalledTimes(1);
+  test.each(["gnu", "musl"] as const)(
+    "probes the %s host libc once across target and helper selection",
+    async (libc) => {
+      vi.resetModules();
+      const targets = await import("./targets.js");
+      const report = vi.spyOn(process.report, "getReport").mockReturnValue({
+        header: libc === "gnu" ? { glibcVersionRuntime: "2.36" } : {},
+      } as ReturnType<typeof process.report.getReport>);
+      const target = libc === "gnu" ? LINUX_X64_GNU_TARGET : LINUX_X64_MUSL_TARGET;
+      expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0")).toEqual(target);
+      expect(targets.nativeCodegenTargetRefusal({}, "linux", "x64", "6.8.0")).toBeNull();
+      expect(targets.nativeHelperForTarget(target, "linux", "x64")?.packageName).toBe(
+        `@scriptc/llvm-linux-x64-${libc}`,
+      );
+      expect(
+        targets.nativeCodegenTarget({ SCRIPTC_TARGET: "wasm32-wasi" }, "linux", "x64", "6.8.0"),
+      ).toEqual(WASM32_WASI_TARGET);
+      expect(report).toHaveBeenCalledTimes(1);
 
-    // Explicit host descriptions remain independent of the process memo.
-    expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0", "gnu")).toEqual(LINUX_X64_GNU_TARGET);
-    expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0", "musl")).toEqual(LINUX_X64_MUSL_TARGET);
-    expect(report).toHaveBeenCalledTimes(1);
-  });
+      // Explicit host descriptions remain independent of the process memo.
+      expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0", "gnu")).toEqual(
+        LINUX_X64_GNU_TARGET,
+      );
+      expect(targets.nativeCodegenTarget({}, "linux", "x64", "6.8.0", "musl")).toEqual(
+        LINUX_X64_MUSL_TARGET,
+      );
+      expect(report).toHaveBeenCalledTimes(1);
+    },
+  );
 
   test("matches Clang's narrow integer ABI independently of the build host", () => {
-    for (const target of [MACOS_ARM64_TARGET, MACOS_X64_TARGET, LINUX_X64_GNU_TARGET, LINUX_X64_MUSL_TARGET, WASM32_WASI_TARGET]) {
+    for (const target of [
+      MACOS_ARM64_TARGET,
+      MACOS_X64_TARGET,
+      LINUX_X64_GNU_TARGET,
+      LINUX_X64_MUSL_TARGET,
+      WASM32_WASI_TARGET,
+    ]) {
       expect(ffiExtendsNarrowIntegers(target.llvmTriple, "win32", "x64")).toBe(true);
     }
-    for (const target of [LINUX_ARM64_GNU_TARGET, LINUX_ARM64_MUSL_TARGET, WINDOWS_X64_MSVC_TARGET]) {
+    for (const target of [
+      LINUX_ARM64_GNU_TARGET,
+      LINUX_ARM64_MUSL_TARGET,
+      WINDOWS_X64_MSVC_TARGET,
+    ]) {
       expect(ffiExtendsNarrowIntegers(target.llvmTriple, "darwin", "arm64")).toBe(false);
     }
     expect(ffiExtendsNarrowIntegers("aarch64-apple-ios", "linux", "arm64")).toBe(true);
@@ -79,55 +102,107 @@ describe("native code-generation targets", () => {
     expect(nativeCodegenTarget({}, "darwin", "arm64", "24.0.0")).toEqual(MACOS_ARM64_TARGET);
     expect(nativeCodegenTarget({}, "darwin", "x64", "24.0.0")).toEqual(MACOS_X64_TARGET);
     expect(nativeCodegenTarget({}, "linux", "x64", "6.8.0", "gnu")).toEqual(LINUX_X64_GNU_TARGET);
-    expect(nativeCodegenTarget({}, "linux", "arm64", "6.8.0", "gnu")).toEqual(LINUX_ARM64_GNU_TARGET);
+    expect(nativeCodegenTarget({}, "linux", "arm64", "6.8.0", "gnu")).toEqual(
+      LINUX_ARM64_GNU_TARGET,
+    );
     expect(nativeCodegenTarget({}, "linux", "x64", "6.8.0", "musl")).toEqual(LINUX_X64_MUSL_TARGET);
-    expect(nativeCodegenTarget({}, "linux", "arm64", "6.8.0", "musl")).toEqual(LINUX_ARM64_MUSL_TARGET);
+    expect(nativeCodegenTarget({}, "linux", "arm64", "6.8.0", "musl")).toEqual(
+      LINUX_ARM64_MUSL_TARGET,
+    );
     expect(nativeCodegenTarget({}, "win32", "x64", "10.0.0")).toEqual(WINDOWS_X64_MSVC_TARGET);
     expect(nativeCodegenTarget({}, "darwin", "arm64", "23.6.0")).toBeNull();
     expect(nativeCodegenTarget({}, "linux", "ia32", "6.8.0")).toBeNull();
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: "x86_64-linux-musl" }, "linux", "x64", "6.8.0", "musl"))
-      .toEqual(LINUX_X64_MUSL_TARGET);
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: "aarch64-linux-musl" }, "linux", "arm64", "6.8.0", "musl"))
-      .toEqual(LINUX_ARM64_MUSL_TARGET);
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: "wasm32-wasi" }, "darwin", "x64", "24.0.0"))
-      .toEqual(WASM32_WASI_TARGET);
-    expect(nativeCodegenTarget(
-      { SCRIPTC_TARGET: "aarch64-apple-ios" }, "darwin", "arm64", "24.0.0",
-    ))
-      .toEqual(IOS_ARM64_TARGET);
+    expect(
+      nativeCodegenTarget({ SCRIPTC_TARGET: "x86_64-linux-musl" }, "linux", "x64", "6.8.0", "musl"),
+    ).toEqual(LINUX_X64_MUSL_TARGET);
+    expect(
+      nativeCodegenTarget(
+        { SCRIPTC_TARGET: "aarch64-linux-musl" },
+        "linux",
+        "arm64",
+        "6.8.0",
+        "musl",
+      ),
+    ).toEqual(LINUX_ARM64_MUSL_TARGET);
+    expect(
+      nativeCodegenTarget({ SCRIPTC_TARGET: "wasm32-wasi" }, "darwin", "x64", "24.0.0"),
+    ).toEqual(WASM32_WASI_TARGET);
+    expect(
+      nativeCodegenTarget({ SCRIPTC_TARGET: "aarch64-apple-ios" }, "darwin", "arm64", "24.0.0"),
+    ).toEqual(IOS_ARM64_TARGET);
   });
 
   test("refusals name the unsupported host or cross target", () => {
     expect(nativeCodegenTargetRefusal({}, "linux", "ia32", "6.8.0")).toContain("linux ia32");
-    expect(nativeCodegenTargetRefusal({}, "darwin", "arm64", "23.6.0"))
-      .toContain("requires macOS 15.0 or newer");
-    expect(nativeCodegenTargetRefusal(
-      { SCRIPTC_TARGET: "riscv64-linux-gnu" },
-      "darwin",
-      "arm64",
-      "24.0.0",
-    )).toContain("SCRIPTC_TARGET=riscv64-linux-gnu");
+    expect(nativeCodegenTargetRefusal({}, "darwin", "arm64", "23.6.0")).toContain(
+      "requires macOS 15.0 or newer",
+    );
+    expect(
+      nativeCodegenTargetRefusal(
+        { SCRIPTC_TARGET: "riscv64-linux-gnu" },
+        "darwin",
+        "arm64",
+        "24.0.0",
+      ),
+    ).toContain("SCRIPTC_TARGET=riscv64-linux-gnu");
   });
 
   test("cross targets select the host helper and a target linker", () => {
-    const cross = nativeCodegenTarget({ SCRIPTC_TARGET: "x86_64-linux-gnu.2.36" }, "darwin", "arm64", "24.0.0")!;
-    expect(cross).toMatchObject({ name: "linux-x64-gnu", defaultLinker: "zig", linkerTargetTriple: "x86_64-linux-gnu.2.36" });
-    expect(nativeHelperForTarget(cross, "darwin", "arm64")?.packageName).toBe("@scriptc/llvm-darwin-arm64");
-    expect(nativeHelperForTarget(MACOS_ARM64_TARGET, "win32", "x64")?.packageName).toBe("@scriptc/llvm-win32-x64-msvc");
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: "aarch64-linux-android" }, "win32", "x64", "10.0.0")).toEqual(ANDROID_ARM64_TARGET);
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: "aarch64-apple-ios-simulator" }, "darwin", "arm64", "24.0.0")).toEqual(IOS_SIMULATOR_ARM64_TARGET);
+    const cross = nativeCodegenTarget(
+      { SCRIPTC_TARGET: "x86_64-linux-gnu.2.36" },
+      "darwin",
+      "arm64",
+      "24.0.0",
+    )!;
+    expect(cross).toMatchObject({
+      name: "linux-x64-gnu",
+      defaultLinker: "zig",
+      linkerTargetTriple: "x86_64-linux-gnu.2.36",
+    });
+    expect(nativeHelperForTarget(cross, "darwin", "arm64")?.packageName).toBe(
+      "@scriptc/llvm-darwin-arm64",
+    );
+    expect(nativeHelperForTarget(MACOS_ARM64_TARGET, "win32", "x64")?.packageName).toBe(
+      "@scriptc/llvm-win32-x64-msvc",
+    );
+    expect(
+      nativeCodegenTarget({ SCRIPTC_TARGET: "aarch64-linux-android" }, "win32", "x64", "10.0.0"),
+    ).toEqual(ANDROID_ARM64_TARGET);
+    expect(
+      nativeCodegenTarget(
+        { SCRIPTC_TARGET: "aarch64-apple-ios-simulator" },
+        "darwin",
+        "arm64",
+        "24.0.0",
+      ),
+    ).toEqual(IOS_SIMULATOR_ARM64_TARGET);
     for (const target of [IOS_ARM64_TARGET, IOS_SIMULATOR_ARM64_TARGET, ANDROID_ARM64_TARGET]) {
       expect(target.supports).toEqual({ asm: true, obj: true, exe: false, library: true });
     }
   });
 
-  test.each(["x64", "arm64"])("GNU %s release links honor an explicit libc floor on the same host", (architecture) => {
-    const triple = `${architecture === "x64" ? "x86_64" : "aarch64"}-linux-gnu.2.34`;
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: triple }, "linux", architecture, "6.8.0", "gnu"))
-      .toMatchObject({ minimumOs: "glibc 2.34", defaultLinker: "zig", defaultLinkerArgs: ["cc"], linkerTargetTriple: triple });
-    expect(nativeCodegenTarget({ SCRIPTC_TARGET: triple.replace(".2.34", "") }, "darwin", "arm64", "24.0.0"))
-      .toMatchObject({ minimumOs: "glibc 2.34", linkerTargetTriple: triple });
-  });
+  test.each(["x64", "arm64"])(
+    "GNU %s release links honor an explicit libc floor on the same host",
+    (architecture) => {
+      const triple = `${architecture === "x64" ? "x86_64" : "aarch64"}-linux-gnu.2.34`;
+      expect(
+        nativeCodegenTarget({ SCRIPTC_TARGET: triple }, "linux", architecture, "6.8.0", "gnu"),
+      ).toMatchObject({
+        minimumOs: "glibc 2.34",
+        defaultLinker: "zig",
+        defaultLinkerArgs: ["cc"],
+        linkerTargetTriple: triple,
+      });
+      expect(
+        nativeCodegenTarget(
+          { SCRIPTC_TARGET: triple.replace(".2.34", "") },
+          "darwin",
+          "arm64",
+          "24.0.0",
+        ),
+      ).toMatchObject({ minimumOs: "glibc 2.34", linkerTargetTriple: triple });
+    },
+  );
 
   test("owns helper executable linker arguments in the target specification", () => {
     expect(MACOS_ARM64_TARGET.executableLinkerArgs).toEqual([
@@ -153,6 +228,8 @@ describe("native code-generation targets", () => {
     expect(windowsSubsystemLinkerArgs("win32", "console")).toEqual([]);
     expect(windowsSubsystemLinkerArgs("win32", "gui")).toEqual(["-Wl,--subsystem,windows"]);
     expect(() => windowsSubsystemLinkerArgs("linux", "gui")).toThrow("Windows executable target");
-    expect(() => windowsSubsystemLinkerArgs("win32", "other" as "gui")).toThrow("unknown Windows subsystem");
+    expect(() => windowsSubsystemLinkerArgs("win32", "other" as "gui")).toThrow(
+      "unknown Windows subsystem",
+    );
   });
 });

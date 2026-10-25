@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2975-bigint-default-radix.ts"
+ ],
+ "diags": []
+}

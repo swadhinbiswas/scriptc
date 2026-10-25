@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/optional-flag-comparisons.ts"
+ ],
+ "diags": []
+}

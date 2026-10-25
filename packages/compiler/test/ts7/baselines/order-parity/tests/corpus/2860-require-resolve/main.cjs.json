@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2860-require-resolve/main.cjs"
+ ],
+ "diags": []
+}

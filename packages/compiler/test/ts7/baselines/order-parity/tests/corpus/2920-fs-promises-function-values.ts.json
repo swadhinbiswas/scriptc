@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2920-fs-promises-function-values.ts"
+ ],
+ "diags": []
+}

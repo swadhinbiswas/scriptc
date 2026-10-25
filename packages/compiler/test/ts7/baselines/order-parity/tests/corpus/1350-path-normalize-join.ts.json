@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1350-path-normalize-join.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/intl-grapheme-conformance/cases.ts",
+  "<repo>/tests/corpus/intl-grapheme-conformance/main.ts"
+ ],
+ "diags": []
+}

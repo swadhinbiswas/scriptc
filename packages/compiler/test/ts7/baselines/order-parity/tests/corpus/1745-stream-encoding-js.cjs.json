@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1745-stream-encoding-js.cjs"
+ ],
+ "diags": []
+}

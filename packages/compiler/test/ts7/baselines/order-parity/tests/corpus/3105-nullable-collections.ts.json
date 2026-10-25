@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3105-nullable-collections.ts"
+ ],
+ "diags": []
+}

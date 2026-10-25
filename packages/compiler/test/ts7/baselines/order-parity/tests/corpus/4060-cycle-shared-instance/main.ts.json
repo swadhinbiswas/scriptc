@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4060-cycle-shared-instance/report.ts",
+  "<repo>/tests/corpus/4060-cycle-shared-instance/inventory.ts",
+  "<repo>/tests/corpus/4060-cycle-shared-instance/main.ts"
+ ],
+ "diags": []
+}

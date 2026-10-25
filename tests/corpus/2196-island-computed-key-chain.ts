@@ -1,4 +1,3 @@
-// @dynamic
 // Island destructuring-assignment chains accept FOLDED computed keys
 // (2105's static-fold rule: pure key expressions whose checker type
 // spells one property name — consts, enum members, templates of

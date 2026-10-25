@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/constant-module-globals/consts.ts",
+  "<repo>/tests/corpus/constant-module-globals/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-inferred-callback-exports/internal.js",
+  "<repo>/tests/corpus/js-inferred-callback-exports/facade.js",
+  "<repo>/tests/corpus/js-inferred-callback-exports/main.js"
+ ],
+ "diags": []
+}

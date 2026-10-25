@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/951-modules-diamond/shared.ts",
+  "<repo>/tests/corpus/951-modules-diamond/a.ts",
+  "<repo>/tests/corpus/951-modules-diamond/b.ts",
+  "<repo>/tests/corpus/951-modules-diamond/main.ts"
+ ],
+ "diags": []
+}

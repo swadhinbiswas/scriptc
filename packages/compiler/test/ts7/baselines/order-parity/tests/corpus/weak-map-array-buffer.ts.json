@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/weak-map-array-buffer.ts"
+ ],
+ "diags": []
+}

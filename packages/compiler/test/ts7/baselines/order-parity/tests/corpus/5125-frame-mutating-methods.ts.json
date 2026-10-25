@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5125-frame-mutating-methods.ts"
+ ],
+ "diags": []
+}

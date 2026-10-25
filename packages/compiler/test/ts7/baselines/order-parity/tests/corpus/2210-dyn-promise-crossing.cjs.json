@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2210-dyn-promise-crossing.cjs"
+ ],
+ "diags": []
+}

@@ -2,24 +2,46 @@
 title: "Platform Support"
 ---
 
-## Owned LLVM targets
+By default, `scriptc build` produces an executable for the machine you are building on. To build for another operating system, another architecture, or WebAssembly, set `SCRIPTC_TARGET` to the target you want. This page lists the supported platforms and shows how to cross-compile for each one.
 
-The compiler runs natively and bundles its TypeScript checker and LLVM helper. Outputs selected with <code>--emit=ir|llvm|asm|obj</code> need no Node installation or external compiler, archiver, linker, or SDK. Supported assembly/object targets are macOS arm64/x64 (macOS 14.0 artifacts; helper needs macOS 15+), Linux x64/arm64 glibc, Windows x64 MSVC, Linux x64/arm64 musl, and WASI Preview 1. Executables additionally need the platform linker and SDK/sysroot; the helper emits the program object and the packaged runtime supplies objects/archives. Runtime development with <code>--sanitize</code> requires an external LLVM toolchain and a C compiler for instrumentation. Object output retains undefined runtime references and is not a library archive.
+<span id="owned-llvm-targets" />
 
-## Cross-compilation via zig
+## Supported platforms
 
-The installed compiler includes its host runtime pack. Other runtime packs are optional project dependencies, pinned to the same version as <code>scriptc --version</code>. Install the appropriate <code>@scriptc/runtime-&lt;target&gt;</code> package, such as <code>@scriptc/runtime-linux-arm64-gnu</code> or <code>@scriptc/runtime-wasm32-wasi</code>, and run the compiler from your project. You can also set <code>SCRIPTC_RUNTIME_PACK</code> to a pack directory, including with standalone compiler archives. Adding a pack does not require reinstalling the compiler. Assembly and object output do not require a runtime pack.
+The compiler runs on:
 
-GNU/Linux compiler distributions and runtime packs support glibc 2.34 or newer. The LLVM helper is statically linked and does not require the build machine's libc or C++ runtime to be installed.
+- macOS 15 or later on arm64 and x64.
+- Linux on arm64 and x64, with glibc 2.34 or later or with musl.
+- Windows on x64.
 
-The installed host LLVM helper emits cross-target program objects and the matching runtime pack supplies precompiled support objects. Install [zig](https://ziglang.org) for Linux, Windows, and WASI cross-linking, then select the output target:
+It can build:
 
-<dl>
-  <dt><code>SCRIPTC_TARGET=&lt;triple&gt;</code></dt>
-  <dd>The target triple; GNU/Linux targets include a glibc version.</dd>
-</dl>
+- Executables for macOS (arm64, x64; macOS 14.0 minimum), Linux (arm64, x64; glibc or musl), and Windows (x64).
+- WebAssembly modules for WASI Preview 1.
+- Static libraries for iOS and Android apps, in [library mode](#ios-and-android-arm64-library-mode).
+
+Building an executable needs a linker and the platform's SDK or system libraries: clang from the Xcode Command Line Tools on macOS, clang on glibc-based Linux, and [zig](https://ziglang.org) on Windows, on musl-based Linux, and for WASI, Android, and cross-compiled targets. Set `SCRIPTC_LINKER` to use a different linker driver. Assembly and object output (`--emit=asm` or `--emit=obj`) need no external tools.
+
+<span id="cross-compilation-via-zig" />
+
+## Cross-compile
+
+The installed compiler can build for its own platform out of the box. To build for another target:
+
+1. Install [zig](https://ziglang.org), which scriptc uses to link executables for other targets.
+2. Add the target's runtime pack to your project, at the same version as `scriptc --version`. Runtime packs are named `@scriptc/runtime-<target>`, for example `@scriptc/runtime-linux-arm64-gnu` or `@scriptc/runtime-wasm32-wasi`.
+3. Run `scriptc build` from your project with `SCRIPTC_TARGET` set to the target triple.
+
+```console
+$ npm install --save-dev @scriptc/runtime-linux-arm64-gnu@0.3.0
+$ SCRIPTC_TARGET=aarch64-linux-gnu.2.36 scriptc build fib.ts -o fib-linux >/dev/null
+```
+
+You can also point `SCRIPTC_RUNTIME_PACK` at a runtime pack directory, which is useful with the standalone compiler archives. Adding a pack doesn't require reinstalling the compiler.
 
 ### Linux (arm64, x86_64)
+
+GNU/Linux triples can name the minimum glibc version, `2.34` (the default) or `2.36`:
 
 ```console
 $ SCRIPTC_TARGET=aarch64-linux-gnu.2.36 scriptc build fib.ts -o fib-linux
@@ -27,7 +49,9 @@ $ file fib-linux
 fib-linux: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 2.0.0, with debug_info, not stripped
 ```
 
-The runtime has native Linux backends throughout: the event loop is epoll (kqueue on macOS), the server stack and TLS (with distro CA-bundle probing) and `fs.watch` all have Linux implementations, verified against Linux Node in a container-based differential lane. `x86_64-linux-gnu.2.36` works the same way. For Alpine containers, use `<arch>-linux-musl`; Zig produces a statically linked executable for either AArch64 or x86_64, and the same static runtime surface is verified against Node on Alpine.
+`x86_64-linux-gnu.2.36` works the same way. For Alpine and other musl-based systems, use `aarch64-linux-musl` or `x86_64-linux-musl`; these produce statically linked executables.
+
+Linux executables use the native Linux implementations of the event loop (epoll), servers, TLS (with the system's CA bundle), and `fs.watch`, and they are tested against Node.js on Linux, including Alpine.
 
 ### Windows (x86_64)
 
@@ -37,21 +61,44 @@ $ file fib.exe
 fib.exe: PE32+ executable (console) x86-64, for MS Windows
 ```
 
-The full corpus runs in a differential lane against Windows Node, including `--dynamic` programs and `child_process`. The Windows fixture lanes also exercise real loopback traffic through `net`, `http`, `https`, `tls`, `http2`, `dgram`, and `dns`, plus the native `fetch` implementation (including redirects, streaming bodies, compression, cancellation, and proxy handling).
+Windows executables support `child_process`, `net`, `http`, `https`, `tls`, `http2`, `dgram`, `dns`, and `fetch`, and they are tested against Node.js on Windows.
 
-Windows executable builds use the console subsystem by default. Set <code>--windows-subsystem=gui</code> for an application that owns its own window so Windows does not open an extra console window. This selects the PE subsystem at link time.
+Executables open a console window by default. For an application that shows its own window, build with `--windows-subsystem=gui` so Windows doesn't open an extra console.
 
-### iOS and Android (arm64, library mode)
+<span id="webassembly-wasi-preview-1" />
 
-Three mobile triples build **library-mode static archives** for an embedding app to link — a mobile app is the executable, so `scriptc build` without `--lib` rejects these targets with `SC3002`:
+### WebAssembly (WASI)
+
+WASI is a cross-compile target, so it needs [zig](https://ziglang.org) and the `@scriptc/runtime-wasm32-wasi` runtime pack, as described in [Cross-compile](#cross-compilation-via-zig). Install the runtime pack in your project at the same version as `scriptc --version`. Without it, the build fails with `SC3003`.
+
+Set `SCRIPTC_TARGET=wasm32-wasi` to build a standalone `.wasm` module:
+
+```console
+$ npm install --save-dev @scriptc/runtime-wasm32-wasi@0.3.5
+$ SCRIPTC_TARGET=wasm32-wasi scriptc build hello.ts >/dev/null
+$ SCRIPTC_TARGET=wasm32-wasi scriptc run hello.ts
+hello, world
+```
+
+Without `-o`, the module is written to `.scriptc/hello.wasm`. `scriptc run` runs it with Node.js's WASI implementation, so it needs Node.js 24 or later on your `PATH`. It passes through stdio and environment variables, makes the current directory available as `/`, and maps the host's temporary directory to `/tmp`. You can run a built module in any other WASI Preview 1 runtime too.
+
+WASI modules support the same language features as native executables, including async functions, promises, generators, timers, stdin and readline, and filesystem callbacks and promises. WASI Preview 1 has no sockets, process spawning, signals, network interfaces, or file watching, so networking and `fetch`, child processes, signal APIs, `os.networkInterfaces()`, the `os` host facts without a WASI equivalent (`cpus()`, `hostname()`, `freemem()`, `loadavg()`, `uptime()`, `getPriority()`), and `fs.watch` fail the build with `SC3002`. `--sanitize` and native FFI aren't available for WASI.
+
+To build a module that a web or native application calls into, see [WebAssembly Modules](/docs/wasm).
+
+<span id="ios-and-android-arm64-library-mode" />
+
+### iOS and Android (arm64)
+
+On mobile, the app is the executable, so scriptc builds a static library that the app links. Use library mode with one of these targets:
 
 <dl>
   <dt><code>SCRIPTC_TARGET=aarch64-apple-ios</code></dt>
-  <dd>iOS device archives (Mach-O, arm64). Requires a macOS host. The runtime pack was built with Xcode's iPhoneOS SDK. Every object carries <code>LC_BUILD_VERSION</code> with minimum OS 15.0.</dd>
+  <dd>iOS devices. Requires a macOS host. Minimum iOS 15.0.</dd>
   <dt><code>SCRIPTC_TARGET=aarch64-apple-ios-simulator</code></dt>
-  <dd>iOS simulator archives (Mach-O, arm64, simulator platform). Requires a macOS host. The runtime pack was built with Xcode's iPhoneSimulator SDK. Same iOS 15.0 minimum.</dd>
+  <dd>The iOS simulator on Apple silicon. Requires a macOS host. Minimum iOS 15.0.</dd>
   <dt><code>SCRIPTC_TARGET=aarch64-linux-android</code></dt>
-  <dd>Android archives (ELF, arm64) compiled against the NDK's bionic headers at API level 26 — the embedder's <code>minSdkVersion</code> must be 26 or higher. Creating the archive uses the precompiled Android runtime pack; the embedding app uses the NDK for its final link.</dd>
+  <dd>Android devices, built against API level 26; the app's <code>minSdkVersion</code> must be 26 or higher. Builds from any supported host with zig.</dd>
 </dl>
 
 ```console
@@ -59,23 +106,14 @@ $ SCRIPTC_TARGET=aarch64-apple-ios scriptc build --lib --profile app.profile.jso
 $ SCRIPTC_TARGET=aarch64-linux-android scriptc build --lib --profile app.profile.json
 ```
 
-The full library-mode feature set applies: profile-declared exports and ABI entry points, host-callback channels (`callbacks` + `abi.callback_register_symbol`), contract sidecars, determinism fences, `abi.localize_runtime` (multi-instance archives — Mach-O localization runs the macOS host linker for both iOS platforms; Android rides the same in-process ELF localization as the Linux cross targets), and `abi.instance_per_thread` (thread-instanced state). The archive's external-symbol contract is unchanged: undefined references only to the target's C/math runtime and system APIs, resolved by Xcode's link against the selected SDK or the NDK clang link at API 26+. Simulator and emulator execution of the archive probes is part of the test matrix; device-architecture archives are build- and link-verified.
-
-### WebAssembly (WASI Preview 1)
-
-Set <code>SCRIPTC_TARGET=wasm32-wasi</code> to produce a standalone <code>.wasm</code> module. Without <code>-o</code>, <code>scriptc build hello.ts</code> writes <code>.scriptc/hello.wasm</code>. Compilation does not require Node. <code>scriptc run</code> requires Node.js 24 or newer on <code>PATH</code> to host the module with Node's WASI implementation, inherits stdio and environment, preopens the current working directory as <code>/</code>, and maps the host platform's temporary directory to the guest's <code>/tmp</code>. A built module can run in another WASI Preview 1 host instead.
-
-WASI is a production LLVM target with the same language tiers as the native targets. Its 32-bit LLVM ABI supports collections, closures, exceptions, classes, checked dynamic values, async/await, promises, synchronous and asynchronous generators, timers, stdin/readline events, process-exit listeners, filesystem callbacks and promises, and the <code>--dynamic</code> QuickJS island.
-
-The remaining executable boundary is host capability, not language coverage. WASI Preview 1 has no portable socket, process-spawn, OS-signal, network-interface, or filesystem-notification APIs. Networking/fetch, child processes, signal APIs, <code>os.networkInterfaces()</code>, and <code>fs.watch</code> therefore fail before linking with diagnostic <code>SC3002</code>. <code>--sanitize</code> and native FFI are unavailable too. Filesystem behavior is bounded by the host's preopens, and process/OS introspection follows WASI's reduced model.
+The library profile declares the exported functions, the host callbacks the library can call, and options such as running several independent instances in one app (`abi.localize_runtime`) or one instance per thread (`abi.instance_per_thread`). Xcode or the Android NDK performs the final link against the platform SDK. Building these targets without `--lib` fails with `SC3002`, and library builds don't support async functions, promises, or timers.
 
 ## Cross-target limits
 
-- `--sanitize` is a host-build lane.
-- On <code>wasm32-wasi</code>, <code>scriptc build --lib --profile</code> emits a callable Wasm reactor instead of a static archive. See [WebAssembly Modules](/docs/wasm) for exports, host imports, initialization, and memory ownership.
-- Mobile triples are library-mode-only: standalone executable builds reject with <code>SC3002</code>, and only the library-admissible surface (the async-free static tier a library archive links) is supported there.
-- iOS targets build on macOS hosts only (Mach-O localization uses the host linker); Android archives build from any supported host with Zig.
-- WASI cannot host APIs for capabilities missing from Preview 1, as described above.
+- `--sanitize` is available only when building for the host platform.
+- Native FFI inputs (objects and archives) must already be built for the target; scriptc doesn't translate them.
+- iOS targets build only on macOS hosts.
+- WASI builds can't use APIs that need capabilities WASI Preview 1 lacks, as described above.
 
 ## Summary
 
@@ -83,40 +121,40 @@ The remaining executable boundary is host capability, not language coverage. WAS
   <thead>
     <tr>
       <th>Platform</th>
-      <th>How</th>
-      <th>Status</th>
+      <th>How to build</th>
+      <th>Notes</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td>macOS arm64 / x64</td>
-      <td>native host helper + runtime pack</td>
-      <td>Full surface, <code>--dynamic</code>, sanitizer lane (external C route)</td>
+      <td>Build on a Mac</td>
+      <td>Needs the Xcode Command Line Tools. Supports <code>--sanitize</code>.</td>
     </tr>
     <tr>
       <td>Linux arm64 / x86_64</td>
-      <td>native host helper + runtime pack; <code>SCRIPTC_TARGET=&lt;arch&gt;-linux-musl</code> selects musl</td>
-      <td>Static and dynamic surfaces incl. servers, TLS, fetch, fs.watch, and child_process; executable linking needs the matching libc/sysroot</td>
+      <td>Build on Linux, or <code>SCRIPTC_TARGET=&lt;arch&gt;-linux-gnu</code> or <code>&lt;arch&gt;-linux-musl</code></td>
+      <td>Servers, TLS, <code>fetch</code>, <code>fs.watch</code>, and <code>child_process</code>. musl builds are statically linked.</td>
     </tr>
     <tr>
       <td>Windows x86_64</td>
-      <td>native x64 MSVC helper + runtime pack</td>
-      <td>Static and dynamic surfaces incl. servers, TLS, fetch, and child_process; executable linking uses Zig’s Windows sysroot</td>
+      <td>Build on Windows, or <code>SCRIPTC_TARGET=x86_64-windows-gnu</code></td>
+      <td>Servers, TLS, <code>fetch</code>, and <code>child_process</code>. Links with zig's Windows sysroot.</td>
     </tr>
     <tr>
       <td>iOS arm64 (device and simulator)</td>
-      <td><code>SCRIPTC_TARGET=aarch64-apple-ios</code> or <code>aarch64-apple-ios-simulator</code>, macOS host with Xcode</td>
-      <td>Library mode only (<code>--lib</code>): static archives for Xcode projects, iOS 15.0 minimum; multi-instance and thread-instanced profiles; simulator-executed test matrix</td>
+      <td><code>SCRIPTC_TARGET=aarch64-apple-ios</code> or <code>aarch64-apple-ios-simulator</code> on macOS</td>
+      <td>Library mode only. Static libraries for Xcode projects, iOS 15.0 minimum.</td>
     </tr>
     <tr>
       <td>Android arm64</td>
-      <td><code>SCRIPTC_TARGET=aarch64-linux-android</code>, any supported host with Zig</td>
-      <td>Library mode only (<code>--lib</code>): static archives for Gradle/NDK projects, API level 26 minimum; multi-instance and thread-instanced profiles; emulator-executed test matrix</td>
+      <td><code>SCRIPTC_TARGET=aarch64-linux-android</code> with zig</td>
+      <td>Library mode only. Static libraries for Gradle and NDK projects, API level 26 minimum.</td>
     </tr>
     <tr>
-      <td>WebAssembly / WASI Preview 1</td>
-      <td>matching host helper + WASI runtime pack</td>
-      <td>Production LLVM target; full language and dynamic tiers, bounded by WASI P1 host capabilities</td>
+      <td>WebAssembly (WASI Preview 1)</td>
+      <td><code>SCRIPTC_TARGET=wasm32-wasi</code></td>
+      <td>Full language support. APIs that need sockets, processes, signals, or file watching are unavailable.</td>
     </tr>
   </tbody>
 </table>

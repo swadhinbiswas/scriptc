@@ -1,0 +1,13 @@
+npm-program-type-error/main.ts:3:10 - error SC0001: Module '"sqlish"' has no exported member 'open'.
+
+  2 | // SC2013 refusals of the npm packages the program imports.
+  3 | import { open } from "sqlish";
+    |          ^~~~
+  4 | import { route } from "routerish";
+
+npm-program-type-error/main.ts:7:13 - error SC0001: Expected 2 arguments, but got 1.
+
+  6 | console.log(open(":memory:"));
+  7 | console.log(route("/users"));
+    |             ^~~~~
+  8 | 

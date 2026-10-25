@@ -1,0 +1,14 @@
+import { Readable } from "node:stream";
+const log: string[] = [];
+const p = Readable.from(["a", "b"]).toArray().then((a: unknown) => log.push(`toArray ${String(a)}`));
+const q = Readable.from(["x", "y"]).some((c: string) => { log.push(`some ${c}`); return c === "x"; }).then((v: boolean) => log.push(`some -> ${v}`));
+const r = Readable.from(["1", "2"]).every((c: string) => { log.push(`every ${c}`); return c !== "2"; }).then((v: boolean) => log.push(`every -> ${v}`));
+const s = Readable.from(["k", "l"]).find((c: string) => c === "l").then((v: unknown) => log.push(`find -> ${String(v)}`));
+const t = Readable.from(["m", "n"]).forEach((c: string) => { log.push(`each ${c}`); }).then(() => log.push("forEach done"));
+const u = Readable.from(["p", "q"]).reduce((acc: string, c: string) => acc + c, ">").then((v: string) => log.push(`reduce -> ${v}`));
+let i = 0;
+const hop = (): void => { if (i++ < 40) { log.push(`hop ${i}`); Promise.resolve().then(hop); } };
+Promise.resolve().then(hop);
+await Promise.all([p, q, r, s, t, u]);
+await new Promise<void>((res) => setTimeout(res, 5));
+console.log(log.join("\n"));

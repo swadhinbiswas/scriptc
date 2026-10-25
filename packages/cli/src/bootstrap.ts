@@ -22,7 +22,10 @@ try {
 function packageVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   try {
-    return (JSON.parse(requireText(join(here, "..", "package.json"))) as { version?: string }).version ?? "unknown";
+    return (
+      (JSON.parse(requireText(join(here, "..", "package.json"))) as { version?: string }).version ??
+      "unknown"
+    );
   } catch {
     return "unknown";
   }
@@ -36,7 +39,9 @@ function requireText(path: string): string {
 }
 
 async function tryFastPath(): Promise<number | null> {
-  let parsed: ReturnType<typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>>;
+  let parsed: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >;
   try {
     parsed = parseArgs({ options: CLI_OPTIONS, allowPositionals: true, allowNegative: true });
   } catch {
@@ -52,18 +57,36 @@ async function tryFastPath(): Promise<number | null> {
     return values.help ? 0 : 1;
   }
   const [command, inputArg] = positionals;
+  if (command === "coverage") return coverageFastPath(values, inputArg, positionals.length);
   if (
-    (command !== "build" && command !== "run") || inputArg === undefined ||
+    (command !== "build" && command !== "run") ||
+    inputArg === undefined ||
     (values.emit !== undefined && values.emit !== "exe") ||
     values.print !== undefined ||
     values["emit-ir"] ||
-    values.lib || values["provenance-sources"] ||
-    (values["external-types"] ?? []).length > 0
-  ) return null;
+    values.lib ||
+    values["provenance-sources"] ||
+    // The full compiler keys these builds by the profile's bytes.
+    values["profile-generate"] !== undefined ||
+    values["profile-use"] !== undefined ||
+    values.sparse ||
+    // The full compiler resolves `native` against the build host.
+    values["target-cpu"] !== undefined ||
+    (values["external-types"] ?? []).length > 0 ||
+    // The full CLI validates the Node island policy flags.
+    hasNodeIslandFlags(values)
+  )
+    return null;
   const backend = values.backend;
   if (backend !== undefined && backend !== "llvm") return null;
   const optimization = values.optimization;
-  if (optimization !== undefined && optimization !== "release" && optimization !== "dev") return null;
+  if (
+    optimization !== undefined &&
+    optimization !== "release" &&
+    optimization !== "dev" &&
+    optimization !== "speed"
+  )
+    return null;
   const npmRaw = (values["npm-static"] ?? [])
     .flatMap((value) => value.split(","))
     .map((value) => value.trim())
@@ -88,11 +111,8 @@ async function tryFastPath(): Promise<number | null> {
   const input = resolve(inputArg);
   const outDir = values.out ? dirname(resolve(values.out)) : join(dirname(input), ".scriptc");
   const stem = basename(input).replace(/\.(ts|mts|cts|js|mjs|cjs|c|ll)$/, "");
-  const defaultName = buildPlatform === "win32"
-    ? `${stem}.exe`
-    : buildPlatform === "wasi"
-      ? `${stem}.wasm`
-      : stem;
+  const defaultName =
+    buildPlatform === "win32" ? `${stem}.exe` : buildPlatform === "wasi" ? `${stem}.wasm` : stem;
   const outPath = values.out ? resolve(values.out) : join(outDir, defaultName);
   const ffiPath = values.ffi === undefined ? null : resolve(values.ffi);
   const ffiBytes = ffiPath === null ? null : await readFile(ffiPath).catch(() => null);
@@ -102,39 +122,52 @@ async function tryFastPath(): Promise<number | null> {
   // full compiler. Otherwise a valid helper/runtime-pack cache entry has a
   // different target/compiler identity and bootstrap must unnecessarily load
   // the whole compiler graph to rediscover it.
-  const helperRuntimePackTarget = !values.sanitize
-    ? startup.precompiledRuntimePackTarget()
-    : null;
+  const helperRuntimePackTarget = !values.sanitize ? startup.precompiledRuntimePackTarget() : null;
   const helperObjectRoute = helperRuntimePackTarget !== null;
+  // The full compiler reports a checker it cannot find.
+  let checker: string | undefined;
+  try {
+    checker = startup.checkerCacheIdentity();
+  } catch {
+    return null;
+  }
   const hit = await startup.readRoutedExecutableCache(root, {
     entryPath: input,
     outDir,
     outPath,
     emitIr: values["emit-ir"],
     sanitize: values.sanitize,
-    dynamic: values.dynamic,
     backend: "llvm",
-    ...(optimization === "dev" ? { optimization: "dev" as const } : {}),
+    ...(optimization === "dev" || optimization === "speed" ? { optimization } : {}),
     ...(values.strip ? { strip: true as const } : {}),
+    ...(values["detached-exit"] ? { detachedExit: true as const } : {}),
+    ...(checker === undefined ? {} : { checker }),
     npmStatic,
     ffiProfile: ffiPath === null ? null : { path: ffiPath, bytes: ffiBytes! },
     target: `${process.env["SCRIPTC_TARGET"] ?? "native"}:${buildPlatform}:${process.arch}:${
       helperObjectRoute ? "runtime-pack" : "driver-tu"
     }`,
-    compiler: [helperObjectRoute
-      ? startup.resolvePlatformLinker(process.env, helperRuntimePackTarget.defaultLinker)
-      : (process.env["SCRIPTC_CC"] ?? "clang")],
-    nativeEnvironment: () => helperObjectRoute
-      ? startup.executableLinkerEnvironmentFingerprint(
-        process.env,
-        helperRuntimePackTarget.defaultLinker,
-      )
-      : startup.executableNativeEnvironmentFingerprint(),
+    compiler: [
+      helperObjectRoute
+        ? startup.resolvePlatformLinker(process.env, helperRuntimePackTarget.defaultLinker)
+        : (process.env["SCRIPTC_CC"] ?? "clang"),
+    ],
+    nativeEnvironment: () =>
+      helperObjectRoute
+        ? startup.executableLinkerEnvironmentFingerprint(
+            process.env,
+            helperRuntimePackTarget.defaultLinker,
+          )
+        : startup.executableNativeEnvironmentFingerprint(),
     nodeVersion: process.version,
   });
   if (hit === null) return null;
   if (!values["keep-llvm"]) await rm(hit.llvmPath, { force: true });
   if (command === "build") {
+    // A cached build repeats its performance warning (SC6101).
+    const performance = hit.performance ?? [];
+    if (performance.length > 0 && values["dynamic-tier-warning"] !== false)
+      process.stderr.write(startup.renderPerformanceWarnings(performance) + "\n");
     process.stdout.write(`${outPath}\n`);
     return 0;
   }
@@ -149,6 +182,82 @@ async function tryFastPath(): Promise<number | null> {
       }
     });
   });
+}
+
+function hasNodeIslandFlags(
+  values: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >["values"],
+): boolean {
+  return (
+    values["node-islands"] !== undefined ||
+    (values["node-island"] ?? []).length > 0 ||
+    (values.native ?? []).length > 0 ||
+    values.node !== undefined ||
+    values["explain-island"] !== undefined ||
+    values["strict-user-js"]
+  );
+}
+
+/** An unchanged program's coverage verdict replays from the verdict cache
+ * without loading the compiler graph. Anything else (a miss, a comment-only
+ * edit, options the replay does not cover) defers to the full CLI. */
+async function coverageFastPath(
+  values: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >["values"],
+  inputArg: string | undefined,
+  positionalCount: number,
+): Promise<number | null> {
+  const print = values.print;
+  const failOn = values["fail-on"];
+  if (
+    inputArg === undefined ||
+    positionalCount !== 2 ||
+    (print !== undefined && print !== "diagnostics") ||
+    (failOn !== undefined && failOn !== "blockers" && failOn !== "divergences") ||
+    values.emit !== undefined ||
+    values.strip ||
+    values["detached-exit"] ||
+    values["target-cpu"] !== undefined ||
+    values.lib ||
+    values.profile !== undefined ||
+    values.ffi !== undefined ||
+    values.backend !== undefined ||
+    values.optimization !== undefined ||
+    values["windows-subsystem"] !== undefined ||
+    values["provenance-sources"] ||
+    values["emit-ir"] ||
+    (values["npm-static"] ?? []).length > 0 ||
+    (values["external-types"] ?? []).length > 0 ||
+    // The replay covers the default Node island policy only.
+    hasNodeIslandFlags(values)
+  )
+    return null;
+  let startup: typeof import("@scriptc/compiler/startup-cache");
+  try {
+    startup = await import("@scriptc/compiler/startup-cache");
+  } catch {
+    return null;
+  }
+  const hit = await startup.readCoverageVerdict(resolve(inputArg), {}).catch(() => null);
+  if (hit === null) return null;
+  const { coverage, sourceTexts } = hit;
+  if (values["dynamic-tier-warning"] === false) delete coverage.performance;
+  if (print === "diagnostics") {
+    const envelope = startup.coverageEnvelope(coverage, {
+      compilerVersion: packageVersion(),
+      sourceTexts,
+      ...(failOn === undefined ? {} : { failOn }),
+    });
+    process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+  } else {
+    const color = process.stdout.isTTY ?? false;
+    process.stdout.write(
+      startup.renderCoverage(coverage, { color, sourceTexts, root: process.cwd() }) + "\n",
+    );
+  }
+  return startup.coveragePasses(coverage, failOn) ? 0 : 1;
 }
 
 const fastExit = await tryFastPath();

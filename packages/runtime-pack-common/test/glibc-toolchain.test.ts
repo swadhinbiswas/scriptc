@@ -12,8 +12,7 @@ test.each([
     archiver: "zig",
     archiverArgs: ["ar"],
     targetArgs: ["-target", target],
-    compilerFlags: ["-fno-sanitize=undefined"],
-    forbiddenArtifactStrings: ["__isoc23_", "__ubsan_"],
+    forbiddenArtifactStrings: ["__isoc23_"],
   });
 });
 

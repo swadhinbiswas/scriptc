@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2701-import-meta/module with space.mjs",
+  "<repo>/tests/corpus/2701-import-meta/main.mjs"
+ ],
+ "diags": []
+}

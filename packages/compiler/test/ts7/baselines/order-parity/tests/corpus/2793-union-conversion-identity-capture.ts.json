@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2793-union-conversion-identity-capture.ts"
+ ],
+ "diags": []
+}

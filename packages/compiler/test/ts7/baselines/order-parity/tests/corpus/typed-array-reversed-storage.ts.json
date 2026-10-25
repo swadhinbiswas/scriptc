@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-array-reversed-storage.ts"
+ ],
+ "diags": []
+}

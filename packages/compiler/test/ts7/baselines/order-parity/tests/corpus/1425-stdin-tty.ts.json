@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1425-stdin-tty.ts"
+ ],
+ "diags": []
+}

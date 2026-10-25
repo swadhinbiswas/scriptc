@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2404-kill-throw-catch.ts"
+ ],
+ "diags": []
+}

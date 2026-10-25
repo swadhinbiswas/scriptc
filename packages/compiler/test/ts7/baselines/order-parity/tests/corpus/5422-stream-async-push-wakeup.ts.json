@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5422-stream-async-push-wakeup.ts"
+ ],
+ "diags": []
+}

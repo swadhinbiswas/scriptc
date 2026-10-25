@@ -4,6 +4,7 @@ import {
   geistdocsMetaSchema,
 } from "@vercel/geistdocs/source-config";
 import { defineDocs, type DefaultMDXOptions } from "fumadocs-mdx/config";
+import { partialsLastModified } from "./src/lib/partials-last-modified";
 import { headingId, remarkDocsConventions } from "./src/lib/remark-docs";
 import { docsShikiTheme } from "./src/lib/shiki-theme";
 
@@ -17,6 +18,7 @@ export const docs = defineDocs({
 });
 
 const config = defineGeistdocsSourceConfig({
+  plugins: [partialsLastModified()],
   mdxOptions: {
     remarkHeadingOptions: { slug: (_root, _heading, text) => headingId(text) },
     remarkPlugins: [remarkDocsConventions],

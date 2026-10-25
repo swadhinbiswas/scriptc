@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2788-array-missing-builtin-conversions.ts"
+ ],
+ "diags": []
+}

@@ -6,7 +6,11 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const HEADER = Buffer.from("SCDSYM01");
 
-export function needsDarwinDebugSymbols(platform: string, optimization?: string, strip = false): boolean {
+export function needsDarwinDebugSymbols(
+  platform: string,
+  optimization?: string,
+  strip = false,
+): boolean {
   return platform === "darwin" && optimization === "dev" && !strip;
 }
 
@@ -30,7 +34,8 @@ export async function readDarwinDebugSymbols(binary: string): Promise<Buffer> {
 }
 
 export async function installDarwinDebugSymbols(bytes: Buffer, binary: string): Promise<void> {
-  if (bytes.length < 12 || !bytes.subarray(0, 8).equals(HEADER)) throw new Error("invalid cached dSYM");
+  if (bytes.length < 12 || !bytes.subarray(0, 8).equals(HEADER))
+    throw new Error("invalid cached dSYM");
   const plistEnd = 12 + bytes.readUInt32LE(8);
   if (plistEnd <= 12 || plistEnd >= bytes.length) throw new Error("invalid cached dSYM sizes");
   const current = await readDarwinDebugSymbols(binary).catch(() => null);

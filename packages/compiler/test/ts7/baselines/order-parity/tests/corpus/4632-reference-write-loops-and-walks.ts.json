@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4632-reference-write-loops-and-walks.ts"
+ ],
+ "diags": []
+}

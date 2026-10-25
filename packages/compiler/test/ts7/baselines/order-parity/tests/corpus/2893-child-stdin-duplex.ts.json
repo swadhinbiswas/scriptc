@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2893-child-stdin-duplex.ts"
+ ],
+ "diags": []
+}

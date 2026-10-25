@@ -1,4 +1,3 @@
-// @dynamic
 // padStart/padEnd with the fill omitted: Node pads with spaces — the
 // frontend completes the default and the island executes the same call.
 console.log(`[${"ab".padEnd(5)}]`);

@@ -14,10 +14,16 @@ const bin = join(testDir, "build", "test_string");
 beforeAll(async () => {
   await mkdir(join(testDir, "build"), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-O1", "-Wall", "-Wextra",
-    "-fsanitize=address", "-DSCR_RC_AUDIT", "-DSCR_SIDX_TEST",
+    "-std=c11",
+    "-O1",
+    "-Wall",
+    "-Wextra",
+    "-fsanitize=address",
+    "-DSCR_RC_AUDIT",
+    "-DSCR_SIDX_TEST",
     ...(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []),
-    "-o", bin,
+    "-o",
+    bin,
     join(testDir, "test_string.c"),
     join(testDir, "../src/scr_string.c"),
     join(testDir, "../src/scr_number.c"),
@@ -27,49 +33,38 @@ beforeAll(async () => {
     // Checked-value collection equality shares the native JSON value runtime.
     join(testDir, "../src/scr_json.c"),
     join(testDir, "../src/scr_map.c"),
+    join(testDir, "../src/scr_union.c"),
     join(testDir, "../src/scr_bigint.c"),
     join(testDir, "../src/scr_closure.c"),
     join(testDir, "../src/scr_bytes.c"),
+    join(testDir, "../src/scr_shared.c"),
+    join(testDir, "../src/scr_lib.c"),
+    join(testDir, "../src/scr_hash.c"),
+    join(testDir, "../src/scr_console.c"),
+    join(testDir, "../src/scr_path.c"),
+    join(testDir, "../src/scr_url.c"),
+    join(testDir, "../src/scr_url_params.c"),
     join(testDir, "../src/scr_error.c"),
     join(testDir, "../src/scr_exception.c"),
     join(testDir, "../src/scr_object.c"),
     join(testDir, "../src/scr_cycle.c"),
+    join(testDir, "../src/scr_alloc.c"),
     ...(process.platform === "linux" ? ["-lm"] : []),
   ]);
 });
 
 // Runs against the committed case file generated from Node via
-// gen-string-cases.mjs. The test below also verifies the checked-in oracle
-// against the generator, so an accidental stale result cannot be masked by
-// the platform-specific native-runtime allowlist. Covers UTF-16
+// gen-string-cases.mjs. The first test below also verifies the checked-in
+// oracle against the generator, so a stale result cannot pass. Covers UTF-16
 // length/charCodeAt/indexOf/includes/startsWith/endsWith/slice/repeat/
 // trim/trimStart/trimEnd/split/padStart/padEnd/charAt plus parseInt over
 // ASCII, Latin-1, CJK, astral, and combining-mark strings, including the
 // documented lone-surrogate → U+FFFD divergence.
 //
-// On macOS every committed case matches byte-for-byte. On Linux (glibc,
-// measured on the sandbox-suite lane's AL2023 clang 15) exactly two
-// parseInt cases — giant base-36 inputs whose magnitude assembly rides
-// libm — land one ulp away from V8's correctly-rounded conversion.
-// scr_number.c is pinned and shared across every consumer, so the
-// divergence is documented HERE as an allowlist keyed by exact input and
-// exact divergent output: a third value, a new failing case, or a future
-// conversion fix all fail loudly.
-const LINUX_PARSEINT_ULP: ReadonlyMap<string, string> = new Map([
-  [
-    // parseInt("9007199254740993", 36): Node 1.9896986116031812e+24,
-    // glibc lane 1.9896986116031807e+24.
-    "parseInt(39303037313939323534373430393933 ; 36)",
-    "312e39383936393836313136303331383037652b3234",
-  ],
-  [
-    // parseInt("123456789012345678901234567890", 36):
-    // Node 1.436287679432363e+45, glibc lane 1.4362876794323633e+45.
-    "parseInt(313233343536373839303132333435363738393031323334353637383930 ; 36)",
-    "312e34333632383736373934333233363333652b3435",
-  ],
-]);
-
+// parseInt cases whose Node answer differs between arm64 and x64 are
+// recorded once per architecture ("parseInt.arm64" / "parseInt.x64", see
+// ARCH_PARSEINT in gen-string-cases.mjs), so the generated file is the same
+// on either machine and the C harness checks this architecture's answer.
 test("committed string oracle matches Node", async () => {
   const caseFile = join(testDir, "string-cases.txt");
   const [{ stdout }, committed] = await Promise.all([
@@ -78,7 +73,10 @@ test("committed string oracle matches Node", async () => {
     }),
     readFile(caseFile, "utf8"),
   ]);
-  expect(committed).toBe(stdout);
+  const generated = stdout.split("\n");
+  const expected = committed.split("\n");
+  expect(generated).toHaveLength(expected.length);
+  expect(generated.filter((line, index) => line !== expected[index])).toEqual([]);
 });
 
 test("string methods match Node on committed oracle cases", async () => {
@@ -86,39 +84,15 @@ test("string methods match Node on committed oracle cases", async () => {
     (v) => ({ stderr: v.stderr }),
     (e: Error & { stderr?: string }) => ({ stderr: e.stderr ?? "" }),
   );
-  const stderr = r.stderr.trim();
-  if (process.platform !== "linux") {
-    expect(stderr).toMatch(/^(\d+)\/\1 cases passed$/);
-    return;
-  }
-  const lines = stderr.split("\n");
-  const mismatches = lines.filter((l) => l.startsWith("MISMATCH "));
-  for (const line of mismatches) {
-    const m = /^MISMATCH (.+) expected=[0-9a-f]* got=([0-9a-f]*)$/.exec(line);
-    expect(m, `unparseable mismatch line: ${line}`).not.toBeNull();
-    expect(LINUX_PARSEINT_ULP.get(m![1]!), line).toBe(m![2]);
-  }
-  // The harness prints at most 20 mismatch lines; the pass-count tail is
-  // the ground truth that NOTHING beyond the printed (allowlisted) set
-  // failed.
-  const t = /^(\d+)\/(\d+) cases passed$/.exec(lines.at(-1) ?? "");
-  expect(t, `missing pass-count line: ${lines.at(-1)}`).not.toBeNull();
-  expect(Number(t![2]) - Number(t![1]), "failed-case count").toBe(mismatches.length);
-  expect(mismatches.length).toBeLessThanOrEqual(LINUX_PARSEINT_ULP.size);
+  expect(r.stderr.trim()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 
-// repeat(count) with count < 0 or Infinity is a RangeError in JS; scriptc
-// has no exceptions, so the runtime must print the error and abort().
-test.each(["--crash-repeat", "--crash-repeat-inf"])(
-  "repeat RangeError aborts (%s)",
-  async (mode) => {
-    const err = await execFileAsync(bin, [mode]).then(
-      () => {
-        throw new Error("expected scr_str_repeat to abort");
-      },
-      (e: Error & { signal?: string; stderr?: string }) => e,
-    );
-    expect(err.signal).toBe("SIGABRT");
-    expect(err.stderr).toContain("scriptc: RangeError: Invalid count value");
-  },
-);
+// repeat(count) with count < 0 or Infinity is Node's catchable RangeError
+// ("Invalid count value: -1"); the runtime leaves it pending.
+test.each([
+  ["--crash-repeat", "-1"],
+  ["--crash-repeat-inf", "Infinity"],
+])("repeat throws a catchable RangeError (%s)", async (mode, shown) => {
+  const { stderr } = await execFileAsync(bin, [mode]);
+  expect(stderr).toContain(`Uncaught RangeError: Invalid count value: ${shown}`);
+});

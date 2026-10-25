@@ -8,6 +8,7 @@ const file = join(directory, name);
 writeFileSync(file, "héllo");
 appendFileSync(file, " 世界");
 console.log("read", readFileSync(file, "utf8"));
+console.log("bytes", readFileSync(file).toString("utf8"));
 console.log("stat", statSync(file).isFile(), statSync(directory).isDirectory());
 console.log("names", readdirSync(directory).includes(name));
 const entries = readdirSync(directory, { withFileTypes: true });

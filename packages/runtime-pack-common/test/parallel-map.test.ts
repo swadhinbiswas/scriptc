@@ -3,14 +3,17 @@ import { parallelMap } from "../scripts/parallel-map.mjs";
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
 test("build tasks overlap within their budget and retain manifest order", async () => {
   const first = deferred();
   const secondStarted = deferred();
-  let active = 0, peak = 0;
+  let active = 0,
+    peak = 0;
   const completed: number[] = [];
   const work = parallelMap([0, 1, 2, 3], 2, async (item: number) => {
     active++;
@@ -40,7 +43,14 @@ test("failed builds finish in-flight compilers before staging cleanup can run", 
     await running.promise;
   });
   const checked = expect(work).rejects.toBe(failure);
-  void work.then(() => { finished = true; }, () => { finished = true; });
+  void work.then(
+    () => {
+      finished = true;
+    },
+    () => {
+      finished = true;
+    },
+  );
   await Promise.resolve();
   expect(finished).toBe(false);
   expect(seen).toEqual([0, 1]);
@@ -51,6 +61,11 @@ test("failed builds finish in-flight compilers before staging cleanup can run", 
 });
 
 test("empty build queues finish and malformed concurrency fails", async () => {
-  expect(await parallelMap([], 2, () => { throw new Error("unexpected task"); })).toEqual([]);
-  for (const width of [0, -1, 1.5, NaN, Infinity]) await expect(parallelMap([0], width, () => 0)).rejects.toThrow("invalid build concurrency");
+  expect(
+    await parallelMap([], 2, () => {
+      throw new Error("unexpected task");
+    }),
+  ).toEqual([]);
+  for (const width of [0, -1, 1.5, NaN, Infinity])
+    await expect(parallelMap([0], width, () => 0)).rejects.toThrow("invalid build concurrency");
 });

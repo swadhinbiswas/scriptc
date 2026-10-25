@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/optional-callback-arity.ts"
+ ],
+ "diags": []
+}

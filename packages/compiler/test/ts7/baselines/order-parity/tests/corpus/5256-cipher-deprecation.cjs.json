@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5256-cipher-deprecation.cjs"
+ ],
+ "diags": []
+}

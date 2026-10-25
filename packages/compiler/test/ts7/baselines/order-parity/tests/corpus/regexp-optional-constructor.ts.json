@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/regexp-optional-constructor.ts"
+ ],
+ "diags": []
+}

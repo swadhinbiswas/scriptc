@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2483-recursive-record-cycles.ts"
+ ],
+ "diags": []
+}

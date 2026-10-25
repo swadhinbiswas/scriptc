@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2120-package-self-import/sib.ts",
+  "<repo>/tests/corpus/2120-package-self-import/main.ts"
+ ],
+ "diags": []
+}

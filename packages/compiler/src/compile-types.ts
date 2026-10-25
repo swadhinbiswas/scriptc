@@ -1,7 +1,12 @@
+import type { TargetCpu } from "./backend/target-cpu.js";
 import type { WindowsSubsystem } from "./backend/targets.js";
 import type { NativeLinkInfo } from "./backend/native-link-info.js";
+import type { NativeOptimization } from "./backend/optimization.js";
+import type { NativeProfileMatch } from "./backend/native-profile.js";
 import type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import type { CoverageInput } from "./coverage/report.js";
+import type { TierMode } from "./frontend/tier-analysis.js";
+import type { NodeIslandOptions } from "./node-islands/policy.js";
 
 export type CompileOutputKind = "ir" | "llvm" | "asm" | "obj" | "exe";
 
@@ -16,30 +21,41 @@ export interface CompileBaseOptions {
    * The CLI's deprecated --emit-ir flag supplies this option. */
   emitIr?: boolean;
   sanitize?: boolean;
-  /** Embed the dynamic-island engine (--dynamic). Off = the static default:
-   * island constructs are diagnostics and nothing about codegen or linking
-   * changes. */
-  dynamic?: boolean;
   /** LLVM is the production code generator. */
   backend?: "llvm";
   /** Native optimization posture. Release is the shipped -O2 default; dev
    * uses -O0, source line tables, and stable multi-TU object caching for
-   * large LLVM programs. Darwin executables include an adjacent .dSYM. */
-  optimization?: "release" | "dev";
+   * large LLVM programs. Darwin executables include an adjacent .dSYM. Speed
+   * is -O2 plus size-for-speed optimizations (larger executables, longer
+   * builds); release output never depends on them. */
+  optimization?: NativeOptimization;
   /** Remove symbol/debug payload from an executable at link time. */
   strip?: boolean;
   /** Windows PE executable subsystem. Console is the default; GUI suppresses
    * automatic console-window creation. Only valid for Windows executables. */
   windowsSubsystem?: WindowsSubsystem;
-  /** --npm-static: package names whose shipped, unminified JS compiles
-   * STATICALLY as program modules (inference types the bodies; statements
-   * the lowering cannot prove become runtime fences). "auto" opts in every
-   * directly-imported package passing the eligibility heuristics (own
-   * .d.ts, unminified JS, no build-transform markers). A package whose
-   * preflight refuses marks itself an offender and falls back to the
-   * island (--dynamic) or the requires-dynamic diagnostic (static builds)
-   * — never a silent misbuild. Off by default: nothing changes without
-   * the flag. */
+  /** On Linux, hand the address-space teardown after `process.exit` to a
+   * helper process so the parent sees the exit sooner. The helper keeps the
+   * executable mapped and the memory charged for up to ~100 ms after exit.
+   * Executables only; no effect on other platforms. */
+  detachedExit?: boolean;
+  /** The x86-64 microarchitecture level the executable's code may require
+   * (`x86-64-v2` to `x86-64-v4`). The program's functions are compiled for
+   * that level, and the executable then runs only on CPUs that support it.
+   * Unset or `baseline`, the code runs on any x86-64 CPU. x86-64 targets
+   * only; the runtime pack keeps its baseline code. */
+  targetCpu?: TargetCpu;
+  /** Instrument the executable for profile-guided optimization. Each run
+   * writes a raw profile to this path pattern (`%p` expands to the process
+   * id; `LLVM_PROFILE_FILE` overrides the pattern at run time). Linux
+   * executables only. */
+  profileGenerate?: string;
+  /** Optimize the executable with this indexed profile (`scriptc
+   * merge-profiles`). Code the profile does not describe, or describes
+   * from an older version of the program, is optimized as without one. */
+  profileUse?: string;
+
+  /** Eligible packages compile automatically. Explicit names override automatic selection heuristics. */
   npmStatic?: readonly string[] | "auto";
   /** Outbound native FFI manifest. Its signature-only TypeScript bindings
    * lower to direct C ABI calls. Source outputs retain those declarations;
@@ -48,6 +64,10 @@ export interface CompileBaseOptions {
   /** Attach the machine-readable external link recipe to an object result.
    * Valid only with outputKind "obj"; it never invokes a linker. */
   nativeLinkInfo?: boolean;
+  /** `--tier` (frontend/tier-analysis.ts). "static-only" keeps every demotion
+   * request a refusal (design invariant I2). Until demotion lands both modes
+   * compile exactly as before. */
+  tier?: TierMode;
 }
 
 /** Executable compile options. This remains the compatibility type for the
@@ -82,7 +102,8 @@ export type CompileArtifact =
       path: string;
       translationUnitPath: string;
       backend: "llvm";
-
+      /** How a `profileUse` build's profile matched the program's functions. */
+      profileMatch?: NativeProfileMatch;
     };
 
 export type CompileFailure = {
@@ -91,8 +112,21 @@ export type CompileFailure = {
   sourceTexts: Map<string, string>;
 };
 
+/** Non-failing findings of a successful build: divergence warnings
+ * (SC6xxx — sites that compile but can behave differently from Node), with
+ * the sources they point into. Present only when the build lowered the
+ * program and found at least one; a cache hit that skips lowering carries
+ * none (`scriptc coverage` always reports them). */
+export interface CompileWarnings {
+  warnings?: ScrDiagnostic[];
+  sourceTexts?: Map<string, string>;
+}
+
 export type CompileSourceResult =
-  | { ok: true; artifact: Extract<CompileArtifact, { kind: "ir" | "llvm" | "asm" | "obj" }> }
+  | ({
+      ok: true;
+      artifact: Extract<CompileArtifact, { kind: "ir" | "llvm" | "asm" | "obj" }>;
+    } & CompileWarnings)
   | CompileFailure;
 
 /** Historical executable result shape retained for source compatibility. */
@@ -103,7 +137,6 @@ export type CompileResult =
       llvmPath: string;
       irPath?: string;
       backend: "llvm";
-
     }
   | CompileFailure;
 
@@ -111,7 +144,7 @@ export type CompileExecutableResult =
   /** The generated LLVM source is retained beside the executable. */
   | (Extract<CompileResult, { ok: true }> & {
       artifact: Extract<CompileArtifact, { kind: "exe" }>;
-    })
+    } & CompileWarnings)
   | CompileFailure;
 
 /** Result union for callers that choose outputKind dynamically. */
@@ -131,16 +164,20 @@ export type CompileLibraryResult =
   /** `sidecarPath` is present exactly when the profile declares a
    * `sidecar` section: the contract JSON written beside the archive by
    * the same invocation (ask 2). */
-  | { ok: true; archivePath: string; llvmPath: string; backend: "llvm"; irPath?: string; sidecarPath?: string }
+  | {
+      ok: true;
+      archivePath: string;
+      llvmPath: string;
+      backend: "llvm";
+      irPath?: string;
+      sidecarPath?: string;
+    }
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
 
 export interface AnalyzeOptions {
-  /** Analyze as a --dynamic build (island constructs lower instead of
-   * producing requires-dynamic diagnostics). */
-  dynamic?: boolean;
   /** --npm-static (see CompileOptions.npmStatic): the analysis compiles
    * opted-in packages' JS as program modules and the coverage report
-   * carries each package's static/fallback status. */
+   * carries each package's native/refused status. */
   npmStatic?: readonly string[] | "auto";
   /** Analyze with the outbound native bindings from this FFI manifest. */
   ffiProfilePath?: string;
@@ -149,6 +186,17 @@ export interface AnalyzeOptions {
    * to analyze project code, but imported runtime values remain explicit
    * SC1010 blockers rather than being counted as executable. */
   externalTypes?: Readonly<Record<string, string>>;
+  /** `--tier` (see CompileBaseOptions.tier). */
+  tier?: TierMode;
+  /** `--explain-dynamic`: attach the tier-assignment report
+   * (CoverageInput.tiers). Such analyses bypass the verdict cache. */
+  explainDynamic?: boolean;
+  /** `--wasm <file>`: WebAssembly module files the program loads that its
+   * sources do not name (absolute paths); reported with the discovered ones. */
+  wasm?: readonly string[];
+  /** The Node island policy's command-line half (report-only: coverage
+   * reports which packages and modules would run in a Node island). */
+  nodeIslands?: NodeIslandOptions;
 }
 
 export interface AnalyzeResult {

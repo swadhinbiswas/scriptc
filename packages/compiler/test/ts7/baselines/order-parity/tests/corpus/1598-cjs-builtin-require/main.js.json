@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1598-cjs-builtin-require/main.js"
+ ],
+ "diags": []
+}

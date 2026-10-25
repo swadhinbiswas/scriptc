@@ -33,11 +33,27 @@ export interface Ts7ServerTiming {
 }
 
 function emptyTotals(): Ts7TimingTotals {
-  return { requestCount: 0, roundTripMs: 0, bytesSent: 0, bytesReceived: 0, serverTimeMs: 0, transportOverheadMs: 0, nodesMaterialized: 0, sourceFilesFetched: 0, nodesFetched: 0 };
+  return {
+    requestCount: 0,
+    roundTripMs: 0,
+    bytesSent: 0,
+    bytesReceived: 0,
+    serverTimeMs: 0,
+    transportOverheadMs: 0,
+    nodesMaterialized: 0,
+    sourceFilesFetched: 0,
+    nodesFetched: 0,
+  };
 }
 
 function copyRequest(sample: Ts7RequestTiming): Ts7RequestTiming {
-  return { method: sample.method, roundTripMs: sample.roundTripMs, bytesSent: sample.bytesSent, bytesReceived: sample.bytesReceived, timestamp: sample.timestamp };
+  return {
+    method: sample.method,
+    roundTripMs: sample.roundTripMs,
+    bytesSent: sample.bytesSent,
+    bytesReceived: sample.bytesReceived,
+    timestamp: sample.timestamp,
+  };
 }
 
 /** Small bounded request history. Returned measurements own their records,
@@ -48,7 +64,13 @@ export class Ts7Timing {
 
   constructor(readonly enabled: boolean) {}
 
-  record(method: string, roundTripMs: number, bytesSent: number, bytesReceived: number, timestamp: number): void {
+  record(
+    method: string,
+    roundTripMs: number,
+    bytesSent: number,
+    bytesReceived: number,
+    timestamp: number,
+  ): void {
     if (!this.enabled) return;
     const totals = this.totals;
     totals.requestCount++;
@@ -89,5 +111,8 @@ export class Ts7Timing {
     return { enabled: this.enabled, totals, recentRequests };
   }
 
-  reset(): void { this.totals = emptyTotals(); this.recent.length = 0; }
+  reset(): void {
+    this.totals = emptyTotals();
+    this.recent.length = 0;
+  }
 }

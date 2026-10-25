@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2617-enum-static-field-import/a.ts",
+  "<repo>/tests/corpus/2617-enum-static-field-import/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4953-regex-compiled-backtracking.ts"
+ ],
+ "diags": []
+}

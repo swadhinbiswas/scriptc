@@ -1,4 +1,3 @@
-// @dynamic
 // JSON.stringify of ISLAND values — the error-inspection catch-22: the
 // value has no static shape to serialize (SC1090) and `as unknown` is
 // refused too (SC1101), yet inspecting an island error object is the

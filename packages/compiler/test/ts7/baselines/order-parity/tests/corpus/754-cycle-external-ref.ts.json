@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/754-cycle-external-ref.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1447-stdin-closed-events.ts"
+ ],
+ "diags": []
+}

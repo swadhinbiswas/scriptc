@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4806-uint32-loop-accumulators.ts"
+ ],
+ "diags": []
+}

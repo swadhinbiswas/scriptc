@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1559-conditional-spread-index-merge.ts"
+ ],
+ "diags": []
+}

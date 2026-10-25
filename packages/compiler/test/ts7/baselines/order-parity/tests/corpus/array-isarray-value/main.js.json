@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-isarray-value/main.js"
+ ],
+ "diags": []
+}

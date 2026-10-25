@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5565-fs-dirent-untyped.mjs"
+ ],
+ "diags": []
+}

@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import { rewriteBundlerCjsExports } from "./npm-static-rewrite.js";
 
-const fixture = readFileSync(new URL("../../../../tests/fixtures/npm-static/node_modules/bundled-function/index.js", import.meta.url), "utf8");
+const fixture = readFileSync(
+  new URL(
+    "../../../../tests/fixtures/npm-static/node_modules/bundled-function/index.js",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 function rewritten(source: string): string {
   const result = rewriteBundlerCjsExports(source, "/example/node_modules/bundle/index.js");
@@ -12,16 +18,22 @@ function rewritten(source: string): string {
 }
 
 function run(source: string) {
-  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
+    encoding: "utf8",
+  });
   expect(result.error).toBeUndefined();
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 test("preserves function identity, anonymous names, regexp allocation, and source locations", () => {
-  const source = fixture + '\nconsole.log(same(), first.default.name, matches("aaa"), matches("xyz"), first.default() === second.default());';
+  const source =
+    fixture +
+    '\nconsole.log(same(), first.default.name, matches("aaa"), matches("xyz"), first.default() === second.default());';
   const result = rewritten(source);
   expect(result.length).toBe(source.length);
-  expect([...result.matchAll(/\r?\n/g)].map((m) => m.index)).toEqual([...source.matchAll(/\r?\n/g)].map((m) => m.index));
+  expect([...result.matchAll(/\r?\n/g)].map((m) => m.index)).toEqual(
+    [...source.matchAll(/\r?\n/g)].map((m) => m.index),
+  );
   const oracle = run(source);
   expect(oracle.status).toBe(0);
   expect(run(result)).toEqual(oracle);
@@ -37,21 +49,30 @@ test("keeps shared helper dependencies live", () => {
 });
 
 test("matches comments and equivalent string escapes without changing bundle behavior", () => {
-  const source = fixture.replaceAll('"default"', "'de\\u0066ault'")
-    .replace("var __create =", "var /* binding */ __create =")
-    + '\nconsole.log(same(), matches("aa"));';
+  const source =
+    fixture
+      .replaceAll('"default"', "'de\\u0066ault'")
+      .replace("var __create =", "var /* binding */ __create =") +
+    '\nconsole.log(same(), matches("aa"));';
   expect(run(rewritten(source))).toEqual(run(source));
 });
 
 test.each([
-  ["factory effects", (s: string) => s.replace("module.exports = () =>", 'console.log("initializing"); module.exports = () =>')],
+  [
+    "factory effects",
+    (s: string) =>
+      s.replace("module.exports = () =>", 'console.log("initializing"); module.exports = () =>'),
+  ],
   ["factory capture", (s: string) => s.replace("() => /a+/g", "() => module.exports")],
   ["receiver", (s: string) => s.replace("() => /a+/g", "function () { return this; }")],
   ["arguments", (s: string) => s.replace("() => /a+/g", "() => arguments")],
   ["helper drift", (s: string) => s.replace("return to;", 'console.log("effect"); return to;')],
   ["return line terminator", (s: string) => s.replace("return to;", "return\nto;")],
   ["return comment terminator", (s: string) => s.replace("return to;", "return/*\n*/to;")],
-  ["arrow line terminator", (s: string) => s.replace("(mod, isNodeMode, target) =>", "(mod, isNodeMode, target)\n=>")],
+  [
+    "arrow line terminator",
+    (s: string) => s.replace("(mod, isNodeMode, target) =>", "(mod, isNodeMode, target)\n=>"),
+  ],
   ["helper operator drift", (s: string) => s.replace("mod != null", "mod !== null")],
   ["helper dependency drift", (s: string) => s.replace("Object.create", "Object.freeze")],
   ["namespace escape", (s: string) => s + "\nconsole.log(first === second);"],
@@ -62,14 +83,30 @@ test.each([
   ["intrinsic shadow", (s: string) => s + "\nvar Object;"],
   ["intrinsic mutation", (s: string) => s + "\nObject.create = () => ({});"],
   ["direct eval", (s: string) => s + '\nconsole.log(eval("require_pattern()"));'],
-  ["exported factory", (s: string) => s.replace("var require_pattern =", "export var require_pattern =")],
+  [
+    "exported factory",
+    (s: string) => s.replace("var require_pattern =", "export var require_pattern ="),
+  ],
   ["exported namespace", (s: string) => s.replace("var first =", "export var first =")],
-  ["late helper", (s: string) => s.replace("var __create = Object.create;", "") + "\nvar __create = Object.create;"],
+  [
+    "late helper",
+    (s: string) =>
+      s.replace("var __create = Object.create;", "") + "\nvar __create = Object.create;",
+  ],
   ["factory escape", (s: string) => s + "\nexport { require_pattern };"],
   ["factory reassignment", (s: string) => s + "\nrequire_pattern = () => () => /b/;"],
   ["namespace shadow", (s: string) => s + "\nfunction shadow(first) { return first.default; }"],
   ["non-node mode", (s: string) => s.replace("require_pattern(), 1", "require_pattern(), 0")],
-  ["early factory call", (s: string) => s.replace("var require_pattern =", "var early = __toESM(require_pattern(), 1);\nvar require_pattern =")],
+  [
+    "early factory call",
+    (s: string) =>
+      s.replace(
+        "var require_pattern =",
+        "var early = __toESM(require_pattern(), 1);\nvar require_pattern =",
+      ),
+  ],
 ] as const)("refuses %s", (_name, change) => {
-  expect(rewriteBundlerCjsExports(change(fixture), "/example/node_modules/bundle/index.js")).toEqual({ degrade: expect.stringContaining("__toESM") });
+  expect(
+    rewriteBundlerCjsExports(change(fixture), "/example/node_modules/bundle/index.js"),
+  ).toEqual({ degrade: expect.stringContaining("__toESM") });
 });

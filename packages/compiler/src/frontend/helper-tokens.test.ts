@@ -27,13 +27,35 @@ test.each([
   ['"default"', '"default;s3:foo;"'],
   ['"default"', '"default\\0"'],
   ["mod", "mod other"],
+  ["cb[0]", "cb[1]"],
+  ["cb[1]", "cb[10]"],
 ])("retains a semantic difference between %s and %s", (a, b) => {
   expect(helperTokens(a)).not.toBe(helperTokens(b));
 });
 
 test.each([
-  "/* unfinished", '"unfinished', '"line\nbreak"', "'\\xzz'", "'\\u0'", "'\\u{}'", "'\\u{110000}'",
-  "'\\01'", "'\\1'", "'\\8'", "`template`", "/regexp/", "0", "0x10", "a / b", "\\u0061", "café", "#name",
+  "/* unfinished",
+  '"unfinished',
+  '"line\nbreak"',
+  "'\\xzz'",
+  "'\\u0'",
+  "'\\u{}'",
+  "'\\u{110000}'",
+  "'\\01'",
+  "'\\1'",
+  "'\\8'",
+  "`template`",
+  "/regexp/",
+  "0x10",
+  "07",
+  "1.5",
+  "1e3",
+  "1n",
+  "1_000",
+  "a / b",
+  "\\u0061",
+  "café",
+  "#name",
 ])("refuses unsupported or malformed helper tokens: %s", (source) => {
   expect(helperTokens(source)).toBeNull();
 });

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/final-field-borrows.ts"
+ ],
+ "diags": []
+}

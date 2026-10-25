@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2481-mutual-recursive-records.ts"
+ ],
+ "diags": []
+}

@@ -2,9 +2,15 @@
 title: "WebAssembly Modules"
 ---
 
-Compile a reusable module with <code>SCRIPTC_TARGET=wasm32-wasi</code> and <code>scriptc build --lib --profile</code>. The output is a WASI Preview 1 reactor: a <code>.wasm</code> file with callable exports, named host imports, and its own memory. Application code runs as compiled Wasm, without an embedded JavaScript engine.
+A WebAssembly module lets a web page or another application call functions written in TypeScript. Use it when you want to run compiled logic, such as a simulation, a parser, or geometry processing, inside a host that owns the user interface. To build a program that runs on its own under a WASI runtime instead, see [WebAssembly (WASI)](/docs/platforms#webassembly-wasi-preview-1).
 
-Your web application owns loading, browser events, animation scheduling, and rendering. It supplies the module's imports and calls its exports. scriptc does not generate a web application or a graphics adapter.
+You build a module in library mode, with `SCRIPTC_TARGET=wasm32-wasi` and `scriptc build --lib --profile`. The result is a WASI Preview 1 reactor: a `.wasm` file with callable exports, named imports for host callbacks, and its own memory. Your application loads the module, supplies its imports, calls its exports, and handles events, scheduling, and rendering.
+
+Module builds need [zig](https://ziglang.org) and the `@scriptc/runtime-wasm32-wasi` runtime pack in your project, at the same version as `scriptc --version`. See [Cross-compile](/docs/platforms#cross-compilation-via-zig).
+
+```console
+$ npm install --save-dev @scriptc/runtime-wasm32-wasi@0.3.5
+```
 
 ## Define the interface
 
@@ -37,11 +43,17 @@ export function step(delta: number): number {
 }
 ```
 
-Build with the <code>wasm32-wasi</code> target and select the output with <code>-o counter.wasm</code>. Without <code>-o</code>, the output is <code>.scriptc/counter.wasm</code> beside the profile. The compiler API's <code>compileLibrary()</code> returns this path in <code>archivePath</code>, matching the existing native library API.
+Build the module:
 
-The profile uses the native library schema. <code>sink_register_symbol</code> and <code>callback_register_symbol</code> name native registration functions; a Wasm reactor does not export them. Wasm binds callbacks during instantiation and delivers panics through <code>scriptc.panic</code>.
+```console
+$ SCRIPTC_TARGET=wasm32-wasi scriptc build --lib --profile counter.json -o counter.wasm
+```
 
-Set <code>"optimization": "dev"</code> in the profile to disable release optimization. Eligible npm dependencies are attempted automatically. A profile may add <code>"npm_static": ["three"]</code> to explicitly attempt compilation from a package's source, including packages without bundled declarations. Unsupported reachable code still produces a compiler diagnostic.
+Without `-o`, the output is `.scriptc/counter.wasm` beside the profile. The compiler API's `compileLibrary()` returns this path in `archivePath`, as it does for native libraries.
+
+The profile uses the same schema as native library builds. <code>sink_register_symbol</code> and <code>callback_register_symbol</code> name native registration functions; a Wasm reactor does not export them. Wasm binds callbacks during instantiation and delivers panics through <code>scriptc.panic</code>.
+
+Set `"optimization": "dev"` in the profile to turn off release optimization. npm dependencies compile automatically, as in executables. Add `"npm_static": ["three"]` to name packages explicitly, like the [`--npm-static`](/docs/dependencies#explicit-package-selection) option. Unsupported code that the module reaches still produces a compiler diagnostic.
 
 ## Instantiate and initialize
 
@@ -84,11 +96,13 @@ After initialization, <code>counter_step(2)</code> returns <code>2</code>, and a
     <tr><td><code>i64</code>, <code>u64</code></td><td>JavaScript BigInt. The existing library integer checks and proofs restrict values to the exact JavaScript number range.</td></tr>
     <tr><td><code>string</code>, <code>bytes</code> parameters</td><td>Two i32 arguments: byte offset and byte length. Strings use UTF-8. Entry parameters are copied into runtime-owned values.</td></tr>
     <tr><td><code>string</code>, <code>bytes</code> results</td><td>Two extra i32 arguments identify writable four-byte output slots. The function writes the result pointer and byte length there, in little-endian order.</td></tr>
+    <tr><td><code>cstring</code> parameters</td><td>One i32 argument: the byte offset of NUL-terminated UTF-8 text. The text is copied into a runtime-owned string; malformed UTF-8 becomes U+FFFD. A zero pointer traps with <code>SC4012</code>.</td></tr>
+    <tr><td><code>cstring</code> results</td><td>An i32 result: the byte offset of NUL-terminated UTF-8 text in the result arena. A result containing U+0000 traps with <code>SC4015</code> instead of being truncated.</td></tr>
     <tr><td><code>void</code></td><td>No result.</td></tr>
   </tbody>
 </table>
 
-The native profile's direction restrictions still apply: u8/u32/i32 are export parameters and callback scalars; i64/u64 are export-only. Callback results must be scalars or void. Callback string/byte parameters are borrowed only for the duration of that callback; copy them before retaining them in the host.
+The native library rules about directions still apply: u8/u32/i32 are export parameters and callback scalars; i64/u64 are export-only. Callback results must be scalars or void. Callback string/byte parameters are borrowed only for the duration of that callback; copy them before retaining them in the host. A <code>cstring</code> callback parameter is one i32 pointer to NUL-terminated text, borrowed the same way; a value containing U+0000 traps with <code>SC4015</code>. The <code>cstring</code> class requires <code>"profile_format": 2</code>. In native libraries it is a <code>const char *</code> with the same rules.
 
 Allocate host input buffers and output slots with <code>scriptc_alloc(size)</code>; a zero result indicates allocation failure. Release each allocation exactly once with <code>scriptc_free(pointer)</code>. Only free pointers returned by <code>scriptc_alloc</code>. These allocations remain live across application calls, initialization, and collection until freed.
 
@@ -102,4 +116,4 @@ A compiled trap or escaped exception calls <code>scriptc.panic(pointer, length)<
 
 Host callbacks run synchronously. They must return before calling any application export, initialization, collection, allocation, or free on the same instance. Reentry is rejected. Copy callback data and schedule subsequent work after the outer call returns. The web app can call a frame export from <code>requestAnimationFrame</code> and render its results through Canvas, WebGL, or WebGPU.
 
-See [Limitations](/docs/limitations) for browser graphics and library-mode boundaries.
+See [Limitations](/docs/limitations#browser-embedding) for browser graphics and library-mode restrictions.

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2658-top-level-await-sync-completion/dep.ts",
+  "<repo>/tests/corpus/2658-top-level-await-sync-completion/main.ts"
+ ],
+ "diags": []
+}

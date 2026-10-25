@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5840-promise-with-resolvers-js.js"
+ ],
+ "diags": []
+}

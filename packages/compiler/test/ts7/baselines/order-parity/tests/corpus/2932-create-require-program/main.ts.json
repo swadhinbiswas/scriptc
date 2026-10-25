@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2932-create-require-program/local.cjs",
+  "<repo>/tests/corpus/2932-create-require-program/factory.cjs",
+  "<repo>/tests/corpus/2932-create-require-program/side.cjs",
+  "<repo>/tests/corpus/2932-create-require-program/main.ts"
+ ],
+ "diags": []
+}

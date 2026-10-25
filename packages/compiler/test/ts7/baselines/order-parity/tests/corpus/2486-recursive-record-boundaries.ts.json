@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2486-recursive-record-boundaries.ts"
+ ],
+ "diags": []
+}

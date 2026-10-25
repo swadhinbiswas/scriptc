@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { BlockBuilder } from "./blocks.js";
+import { BlockBuilder, volatileSlotAccess } from "./blocks.js";
 import { f64Lit } from "./common.js";
 
 test("entry allocations precede instructions and temporaries stay unique", () => {
@@ -10,7 +10,9 @@ test("entry allocations precede instructions and temporaries stay unique", () =>
   blocks.line(`${first} = fadd double 0.0, 1.0`);
   blocks.entryAllocas.push(`${second} = alloca double`);
   blocks.terminate("ret void");
-  expect(blocks.render()).toBe(`entry:\n  ${second} = alloca double\n  ${first} = fadd double 0.0, 1.0\n  ret void`);
+  expect(blocks.render()).toBe(
+    `entry:\n  ${second} = alloca double\n  ${first} = fadd double 0.0, 1.0\n  ret void`,
+  );
 });
 
 test("terminators suppress dead instructions and keep their first target", () => {
@@ -38,11 +40,14 @@ test("debug attachments precede instruction comments and skip comment-only lines
   blocks.line('; comment "quotes" ; remain text');
   blocks.line('call void @f(ptr @"name;part") ; instruction comment');
   blocks.terminate("ret void ; tail");
-  expect(blocks.render()).toBe([
-    "entry:", '  ; comment "quotes" ; remain text',
-    '  call void @f(ptr @"name;part"), !dbg !7 ; instruction comment',
-    "  ret void, !dbg !7 ; tail",
-  ].join("\n"));
+  expect(blocks.render()).toBe(
+    [
+      "entry:",
+      '  ; comment "quotes" ; remain text',
+      '  call void @f(ptr @"name;part"), !dbg !7 ; instruction comment',
+      "  ret void, !dbg !7 ; tail",
+    ].join("\n"),
+  );
 });
 
 test("changing a debug location affects only subsequent instructions", () => {
@@ -85,7 +90,13 @@ test("counted loops expose one increment path and preserve nested block endings"
 test("inclusive loops and nested loops keep labels separate", () => {
   const blocks = new BlockBuilder();
   blocks.countedLoop(f64Lit(2), (outer) => {
-    blocks.countedLoop(outer, (inner) => { blocks.line(`call void @consume(double ${inner})`); }, "ole");
+    blocks.countedLoop(
+      outer,
+      (inner) => {
+        blocks.line(`call void @consume(double ${inner})`);
+      },
+      "ole",
+    );
   });
   blocks.terminate("ret void");
   const text = blocks.render();
@@ -94,4 +105,35 @@ test("inclusive loops and nested loops keep labels separate", () => {
   expect(text).toContain("fcmp olt double");
   expect(text).toContain("fcmp ole double");
   expect(text.match(/alloca double/g)).toHaveLength(2);
+});
+
+test("volatile slots render their loads and stores volatile and nothing else", () => {
+  const slots = new Set(["%sc_l_a_0"]);
+  expect(volatileSlotAccess("  %t1 = load ptr, ptr %sc_l_a_0 ; a", slots)).toBe(
+    "  %t1 = load volatile ptr, ptr %sc_l_a_0 ; a",
+  );
+  expect(volatileSlotAccess("  store ptr %t1, ptr %sc_l_a_0, !dbg !7", slots)).toBe(
+    "  store volatile ptr %t1, ptr %sc_l_a_0, !dbg !7",
+  );
+  expect(volatileSlotAccess("  store ptr null, ptr %sc_l_a_0", slots)).toBe(
+    "  store volatile ptr null, ptr %sc_l_a_0",
+  );
+  // Other addresses, a slot stored as a value, prefixes and other opcodes.
+  for (const line of [
+    "  %t2 = load ptr, ptr %sc_l_a_01",
+    "  store ptr %sc_l_a_0, ptr %sc_l_b_0",
+    "  %t3 = getelementptr inbounds ptr, ptr %sc_l_a_0, i64 1",
+    "  call void @scr_box_release(ptr %sc_l_a_0)",
+    "  %t4 = load volatile ptr, ptr %sc_l_a_0",
+  ])
+    expect(volatileSlotAccess(line, slots)).toBe(line);
+
+  const blocks = new BlockBuilder();
+  blocks.volatileSlots = slots;
+  blocks.entryAllocas.push("%sc_l_a_0 = alloca ptr");
+  blocks.line("store ptr null, ptr %sc_l_a_0");
+  blocks.terminate("ret void");
+  expect(blocks.render()).toBe(
+    "entry:\n  %sc_l_a_0 = alloca ptr\n  store volatile ptr null, ptr %sc_l_a_0\n  ret void",
+  );
 });

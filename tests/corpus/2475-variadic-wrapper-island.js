@@ -1,4 +1,3 @@
-// @dynamic
 // The wrapper-rebuild idiom: a JS variadic arrow returned as a VALUE (the
 // rest binding is the engine's own arguments array), an argument slot
 // rewritten with a spread-built island literal, and the wrapped function

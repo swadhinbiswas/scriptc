@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4140-array-callback-split-visit.ts"
+ ],
+ "diags": []
+}

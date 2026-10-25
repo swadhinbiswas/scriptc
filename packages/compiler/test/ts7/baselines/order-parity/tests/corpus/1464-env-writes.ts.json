@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1464-env-writes.ts"
+ ],
+ "diags": []
+}

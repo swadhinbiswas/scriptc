@@ -1,93 +1,5 @@
-/* Node's CommonJS named-export DETECTABILITY test — the compile-time
- * answer to "which names can `import { x } from './cjs.js'` actually
- * link?". Node never executes a CJS module to build its ESM facade: it
- * lexes the source with its vendored CJS lexer (Node v24.15.0 vendors
- * deps/merve, the native `cjs_lexer` binding that replaced the
- * cjs-module-lexer wasm build; the detection patterns are FROZEN by
- * upstream policy) and only the names that lexer detects become named
- * exports. The checker sees the real export table, so it happily binds
- * names the lexer cannot see — `module.exports = { a: 7 }` type-checks a
- * named import of `a` that Node refuses at link time with a SyntaxError.
- * This module mirrors merve's detection so the compiler can answer
- * exactly what Node answers — for the program's own CJS files (program.ts
- * gates the ESM instantiate graph) AND for the --dynamic island's embedded
- * npm modules (npm.ts synthesizes each CJS facade from this lexer, so an
- * embedded named import fails exactly where Node's would).
- *
- * The syntax pass consumes an owned native TypeScript AST. Detection still
- * reads raw source wherever merve's byte quirks demand it; parser semantics
- * never replace Node's export-detectability rules.
- *
- * The port is deliberately quirk-faithful — these all match probed Node
- * v24.15.0 behavior, not what a clean reimplementation would choose:
- *  - `module.exports = { ... }` props scan LEFT TO RIGHT and the scan
- *    STOPS at the first prop it cannot shape — names added before the
- *    stop are kept, everything after is invisible. `{ vis: v, lit: 7 }`
- *    exports `vis` only; `{ lit: 7, vis: v }` exports nothing.
- *  - A prop VALUE must start with an identifier-ish token (an identifier,
- *    keyword, `require(...)` call — anything whose first character is
- *    [A-Za-z_$] or non-ASCII). Literals (`7`, `"s"`, backticks, arrows'
- *    `(`) stop the scan WITHOUT adding the key.
- *  - After an accepted value the lexer consumes ONE identifier run and
- *    requires the very next CHARACTER to be `,` or `}` — `a: b, c: d`
- *    keeps both, `a: b , c: d` keeps only `a` (the space stops the scan),
- *    `a: o.x` / `a: f()` keep `a` and stop.
- *  - A `require('spec')` VALUE adds the key, records the spec as a
- *    REEXPORT, and stops the scan unconditionally — `{ a: require('x'),
- *    b: v }` exports `a` plus x's names, never `b`. Trailing tokens on the
- *    require (`.foo`, `()`, `|| y`) change nothing.
- *  - `get name() {...}` stops the scan cold (no add); `set name(v) {}`
- *    adds the literal name "set" and stops; `async name() {}` adds
- *    "async" and stops; a plain method `name() {}` adds `name` and stops.
- *  - `exports.NAME = ` / `module.exports.NAME = ` / the ['string'] forms
- *    match ANYWHERE in the file — nested functions, dead branches — with
- *    no scope analysis, and nothing ever removes a detected name.
- *  - `module.exports = require('./x')` records a REEXPORT whenever the
- *    require call is the LEADING token of the right-hand side — trailers
- *    (`.foo`, `()`, `|| {}`, `? a : b`) are ignored, but a leading `(`
- *    breaks the match (`(require('x'))` records nothing). Node resolves
- *    each reexport and unions the target's detected names when the target
- *    is itself CommonJS. Every `module.exports =` assignment CLEARS the
- *    pending reexport list first — including star-pattern reexports
- *    recorded earlier — so only reexports at or after the last assignment
- *    count, while detected export NAMES accumulate across everything.
- *  - `Object.defineProperty(exports, 'n', {...})` adds `n` for the exact
- *    descriptor shapes merve accepts: optional leading `enumerable: true`
- *    then `value:` (anything), or a getter whose whole body is `return
- *    IDENT` / `return IDENT.IDENT` / `return IDENT['str']` and which is
- *    the descriptor's last property. Unlike cjs-module-lexer 2.2.0, a
- *    NON-matching defineProperty of the same name elsewhere does NOT
- *    poison the valid one (probed: Node keeps the export).
- *  - The transpiler star-reexport patterns ARE detected (tsc/babel output
- *    all over npm depends on them):
- *      · `__export(require('x'))` / `__exportStar(require('x'), exports)`
- *        — callee is the bare identifier or any member chain ending in
- *        one of those two exact names, at TOP LEVEL (brace depth 0 — an
- *        unbraced `if (c) __exportStar(...)` still counts, a braced block
- *        does not), and the source bytes must read `NAME(require` with NO
- *        whitespace or comment between the name, the `(`, and `require`
- *        (probed: one space kills the match; spaces anywhere inside the
- *        require call are fine).
- *      · The Babel copy loop: a top-level `var/const/let ID =
- *        [_interopRequireWildcard(]require('x')[)]` (ID the FIRST
- *        declarator; `_interopRequireWildcard` bare and byte-adjacent to
- *        `(require` like the star form) linked by ID to a top-level
- *        `Object.keys(ID).forEach(function (KEY) {...})` whose body is
- *        byte-for-byte one of merve's copy shapes: the `if (KEY ===
- *        'default' || KEY === '__esModule') return;` filter (exact order,
- *        unbraced return) with optional hasOwnProperty / in-exports
- *        guards, or the single `if (KEY !== 'default' [&& !hasOwn]) copy`
- *        form; the copy either `EXPORTS[KEY] = ID[KEY]` or the
- *        enumerable-getter defineProperty. Named callbacks, arrow
- *        callbacks, braced returns, and reordered filters all miss.
- *        The reexport's clearing position is the LOOP's, not the var's.
- * NOT modeled: cjs-module-lexer 2.2.0's phantom "get" export for an
- * identifier-named getter in the table (`{ get a() {} }` exports nothing
- * in Node — but `get [k]() {}` / `get "a"() {}` DO export the word "get",
- * because the name token stops the lexer after it took `get` as a
- * shorthand key). */
-
 import * as ts from "./ts7/syntax.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 
 export interface CjsLexedExports {
   /** Names Node's lexer detects in THIS file (no reexport resolution). */
@@ -119,7 +31,7 @@ function identRunEnd(text: string, pos: number): number {
  * a `a`-escaped name parses to the same AST as its plain spelling,
  * but merve reads bytes and stops at the backslash. */
 function sourceSpellsIdentifier(node: ts.Node, sf: ts.SourceFile): boolean {
-  const ch = sf.text[node.getStart(sf)];
+  const ch = sf.text[tokenStartOfNode(node)];
   return ch !== undefined && isIdentStartChar(ch);
 }
 
@@ -128,16 +40,16 @@ function sourceSpellsIdentifier(node: ts.Node, sf: ts.SourceFile): boolean {
  * defineProperty getter's `return IDENT.IDENT` because `this` lexes as an
  * identifier run — probed), escapes and private names do not. */
 function isIdentTokenNode(node: ts.Node, sf: ts.SourceFile): boolean {
-  const start = node.getStart(sf);
+  const start = tokenStartOfNode(node);
   const ch = sf.text[start];
-  return ch !== undefined && isIdentStartChar(ch) && identRunEnd(sf.text, start) === node.getEnd();
+  return ch !== undefined && isIdentStartChar(ch) && identRunEnd(sf.text, start) === node.end;
 }
 
 /** The identifier run at the node's START — the whole name when its
  * spelling is plain, the byte prefix merve consumed when a unicode escape
  * interrupts the run mid-name. */
 function identPrefixOf(node: ts.Node, sf: ts.SourceFile): string {
-  const start = node.getStart(sf);
+  const start = tokenStartOfNode(node);
   return sf.text.slice(start, identRunEnd(sf.text, start));
 }
 
@@ -145,8 +57,8 @@ function identPrefixOf(node: ts.Node, sf: ts.SourceFile): string {
 export function bareRequireSpecOf(e: ts.Node): string | null {
   if (!ts.isCallExpression(e) || e.questionDotToken !== undefined) return null;
   if (!ts.isIdentifier(e.expression) || e.expression.text !== "require") return null;
-  if (e.arguments.length !== 1) return null;
-  const arg = e.arguments[0]!;
+  if (e.arguments.nodes.length !== 1) return null;
+  const arg = e.arguments.nodes[0]!;
   return ts.isStringLiteral(arg) ? arg.text : null;
 }
 
@@ -173,17 +85,17 @@ export function isModuleExports(e: ts.Expression): boolean {
  * follows — so the recognizer descends the leftmost-child chain while it
  * still starts where `e` starts. A ParenthesizedExpression breaks the
  * chain naturally (its child starts after the `(`), matching merve. */
-function leadingRequireOf(e: ts.Expression, sf: ts.SourceFile): { spec: string; end: number } | null {
-  const start = e.getStart(sf);
+function leadingRequireOf(e: ts.Expression): { spec: string; end: number } | null {
+  const start = tokenStartOfNode(e);
   let cur: ts.Node = e;
   for (;;) {
     const spec = bareRequireSpecOf(cur);
-    if (spec !== null && cur.getStart(sf) === start) return { spec, end: cur.getEnd() };
+    if (spec !== null && tokenStartOfNode(cur) === start) return { spec, end: cur.end };
     let first: ts.Node | undefined;
     ts.forEachChild(cur, (c) => {
       first ??= c;
     });
-    if (first === undefined || first.getStart(sf) !== start) return null;
+    if (first === undefined || tokenStartOfNode(first) !== start) return null;
     cur = first;
   }
 }
@@ -214,9 +126,14 @@ function nextMeaningfulChar(text: string, pos: number): string {
 /** The `module.exports = { ... }` table scan — merve's tryParseLiteralExports
  * over the AST. Adds detected names to `out`, appends reexports (spread /
  * value requires) to `reexports`, stops at the first unshapeable prop. */
-function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, out: Set<string>, reexports: string[]): void {
+function scanTableLiteral(
+  obj: ts.ObjectLiteralExpression,
+  sf: ts.SourceFile,
+  out: Set<string>,
+  reexports: string[],
+): void {
   const text = sf.text;
-  for (const prop of obj.properties) {
+  for (const prop of obj.properties.nodes) {
     if (ts.isGetAccessor(prop)) {
       // `get name() {...}` — merve's explicit early termination... unless
       // the accessor's NAME is not a plain identifier, where the lexer
@@ -243,7 +160,8 @@ function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, ou
         out.add("async");
         return;
       }
-      if (ts.isIdentifier(prop.name) && sourceSpellsIdentifier(prop.name, sf)) out.add(identPrefixOf(prop.name, sf));
+      if (ts.isIdentifier(prop.name) && sourceSpellsIdentifier(prop.name, sf))
+        out.add(identPrefixOf(prop.name, sf));
       return;
     }
     if (ts.isShorthandPropertyAssignment(prop)) {
@@ -259,13 +177,13 @@ function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, ou
       continue; // whitespace before `,` is skipped on the shorthand path
     }
     if (ts.isSpreadAssignment(prop)) {
-      const req = leadingRequireOf(prop.expression, sf);
+      const req = leadingRequireOf(prop.expression);
       let consumedEnd: number;
       if (req !== null) {
         reexports.push(req.spec);
         consumedEnd = req.end;
       } else if (sourceSpellsIdentifier(prop.expression, sf)) {
-        consumedEnd = identRunEnd(text, prop.expression.getStart(sf));
+        consumedEnd = identRunEnd(text, tokenStartOfNode(prop.expression));
       } else {
         return; // `...{}` and friends stop the scan
       }
@@ -274,7 +192,7 @@ function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, ou
       const ch = nextMeaningfulChar(text, consumedEnd);
       if (ch === ",") continue;
       return; // `...o.p`, `...f()` — the leftover token stops the scan
-              // (a `}` here means the spread was last; stopping is the same)
+      // (a `}` here means the spread was last; stopping is the same)
     }
     if (ts.isPropertyAssignment(prop)) {
       const name = prop.name;
@@ -293,7 +211,7 @@ function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, ou
       }
       if (key === null) return; // numeric / computed / template keys stop the scan
       const value = prop.initializer;
-      const req = leadingRequireOf(value, sf);
+      const req = leadingRequireOf(value);
       if (req !== null) {
         // A require VALUE adds the key, records the reexport, and stops
         // the scan UNCONDITIONALLY — probed: `{ a: require('x'), b: v }`
@@ -303,7 +221,7 @@ function scanTableLiteral(obj: ts.ObjectLiteralExpression, sf: ts.SourceFile, ou
         reexports.push(req.spec);
         return;
       }
-      const start = value.getStart(sf);
+      const start = tokenStartOfNode(value);
       const ch0 = text[start];
       if (ch0 === undefined || !isIdentStartChar(ch0)) return; // literal values stop WITHOUT adding the key
       const consumedEnd = identRunEnd(text, start);
@@ -333,13 +251,17 @@ function scanDefineProperty(call: ts.CallExpression, sf: ts.SourceFile, out: Set
   ) {
     return;
   }
-  if (call.arguments.length !== 3) return;
-  const [recv, nameArg, desc] = call.arguments as unknown as [ts.Expression, ts.Expression, ts.Expression];
+  if (call.arguments.nodes.length !== 3) return;
+  const [recv, nameArg, desc] = call.arguments.nodes as unknown as [
+    ts.Expression,
+    ts.Expression,
+    ts.Expression,
+  ];
   if (!isExportsIdent(recv) && !isModuleExports(recv)) return;
   if (!ts.isStringLiteral(nameArg)) return;
   if (!ts.isObjectLiteralExpression(desc)) return;
   let i = 0;
-  const props = desc.properties;
+  const props = desc.properties.nodes;
   const first = props[0];
   if (
     first !== undefined &&
@@ -363,14 +285,20 @@ function scanDefineProperty(call: ts.CallExpression, sf: ts.SourceFile, out: Set
   // and the getter must be the descriptor's LAST property.
   const body = getterBodyOf(p);
   if (body === undefined || i !== props.length - 1) return;
-  if (body.statements.length !== 1) return;
-  const ret = body.statements[0]!;
+  if (body.statements.nodes.length !== 1) return;
+  const ret = body.statements.nodes[0]!;
   if (!ts.isReturnStatement(ret) || ret.expression === undefined) return;
   const r = ret.expression;
   const returnsIdentish =
     isIdentTokenNode(r, sf) ||
-    (ts.isPropertyAccessExpression(r) && r.questionDotToken === undefined && isIdentTokenNode(r.expression, sf) && isIdentTokenNode(r.name, sf)) ||
-    (ts.isElementAccessExpression(r) && r.questionDotToken === undefined && isIdentTokenNode(r.expression, sf) && ts.isStringLiteral(r.argumentExpression));
+    (ts.isPropertyAccessExpression(r) &&
+      r.questionDotToken === undefined &&
+      isIdentTokenNode(r.expression, sf) &&
+      isIdentTokenNode(r.name, sf)) ||
+    (ts.isElementAccessExpression(r) &&
+      r.questionDotToken === undefined &&
+      isIdentTokenNode(r.expression, sf) &&
+      ts.isStringLiteral(r.argumentExpression));
   if (returnsIdentish) out.add(nameArg.text);
 }
 
@@ -383,7 +311,7 @@ function getterBodyOf(p: ts.ObjectLiteralElementLike): ts.Block | undefined {
     p.name.text === "get" &&
     p.asteriskToken === undefined &&
     (ts.getModifiers(p) ?? []).length === 0 &&
-    p.parameters.length === 0
+    p.parameters.nodes.length === 0
   ) {
     return p.body;
   }
@@ -392,7 +320,7 @@ function getterBodyOf(p: ts.ObjectLiteralElementLike): ts.Block | undefined {
     ts.isIdentifier(p.name) &&
     p.name.text === "get" &&
     ts.isFunctionExpression(p.initializer) &&
-    p.initializer.parameters.length === 0 &&
+    p.initializer.parameters.nodes.length === 0 &&
     p.initializer.asteriskToken === undefined &&
     (ts.getModifiers(p.initializer) ?? []).length === 0
   ) {
@@ -414,14 +342,15 @@ function starExportSpecOf(call: ts.CallExpression, sf: ts.SourceFile): string | 
   const callee = call.expression;
   let nameNode: ts.Identifier | undefined;
   if (ts.isIdentifier(callee)) nameNode = callee;
-  else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) nameNode = callee.name;
+  else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name))
+    nameNode = callee.name;
   if (nameNode === undefined) return null;
   if (nameNode.text !== "__export" && nameNode.text !== "__exportStar") return null;
   if (!sourceSpellsIdentifier(nameNode, sf)) return null;
-  const arg0 = call.arguments[0];
+  const arg0 = call.arguments.nodes[0];
   if (arg0 === undefined) return null;
-  if (!byteAdjacentParen(sf, nameNode.getEnd(), arg0.getStart(sf))) return null;
-  return leadingRequireOf(arg0, sf)?.spec ?? null;
+  if (!byteAdjacentParen(sf, nameNode.end, tokenStartOfNode(arg0))) return null;
+  return leadingRequireOf(arg0)?.spec ?? null;
 }
 
 /** True when the bytes between a callee name ending at `nameEnd` and its
@@ -438,8 +367,9 @@ function byteAdjacentParen(sf: ts.SourceFile, nameEnd: number, argStart: number)
  * probed: a member-qualified helper or one space after its paren misses).
  * Answers [ID, spec]. */
 function starAssignOf(stmt: ts.VariableStatement, sf: ts.SourceFile): [string, string] | null {
-  const decl = stmt.declarationList.declarations[0];
-  if (decl === undefined || !ts.isIdentifier(decl.name) || !sourceSpellsIdentifier(decl.name, sf)) return null;
+  const decl = stmt.declarationList.declarations.nodes[0];
+  if (decl === undefined || !ts.isIdentifier(decl.name) || !sourceSpellsIdentifier(decl.name, sf))
+    return null;
   const init = decl.initializer;
   if (init === undefined) return null;
   const direct = bareRequireSpecOf(init);
@@ -449,10 +379,10 @@ function starAssignOf(stmt: ts.VariableStatement, sf: ts.SourceFile): [string, s
     init.questionDotToken === undefined &&
     ts.isIdentifier(init.expression) &&
     init.expression.text === "_interopRequireWildcard" &&
-    init.arguments.length >= 1
+    init.arguments.nodes.length >= 1
   ) {
-    const arg0 = init.arguments[0]!;
-    if (!byteAdjacentParen(sf, init.expression.getEnd(), arg0.getStart(sf))) return null;
+    const arg0 = init.arguments.nodes[0]!;
+    if (!byteAdjacentParen(sf, init.expression.end, tokenStartOfNode(arg0))) return null;
     const spec = bareRequireSpecOf(arg0);
     if (spec !== null) return [decl.name.text, spec];
   }
@@ -481,14 +411,29 @@ function keyStringCompare(e: ts.Expression, key: string, op: ts.SyntaxKind, str:
 function isHasOwnCall(e: ts.Expression, key: string): boolean {
   if (!ts.isCallExpression(e) || e.questionDotToken !== undefined) return false;
   const callee = e.expression;
-  if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.name) || callee.name.text !== "call") return false;
+  if (
+    !ts.isPropertyAccessExpression(callee) ||
+    !ts.isIdentifier(callee.name) ||
+    callee.name.text !== "call"
+  )
+    return false;
   let cur = callee.expression;
-  if (!ts.isPropertyAccessExpression(cur) || !ts.isIdentifier(cur.name) || cur.name.text !== "hasOwnProperty") return false;
+  if (
+    !ts.isPropertyAccessExpression(cur) ||
+    !ts.isIdentifier(cur.name) ||
+    cur.name.text !== "hasOwnProperty"
+  )
+    return false;
   cur = cur.expression;
-  if (ts.isPropertyAccessExpression(cur) && ts.isIdentifier(cur.name) && cur.name.text === "prototype") cur = cur.expression;
+  if (
+    ts.isPropertyAccessExpression(cur) &&
+    ts.isIdentifier(cur.name) &&
+    cur.name.text === "prototype"
+  )
+    cur = cur.expression;
   if (!ts.isIdentifier(cur) || cur.text !== "Object") return false;
-  if (e.arguments.length !== 2) return false;
-  const [recv, k] = e.arguments as unknown as [ts.Expression, ts.Expression];
+  if (e.arguments.nodes.length !== 2) return false;
+  const [recv, k] = e.arguments.nodes as unknown as [ts.Expression, ts.Expression];
   return ts.isIdentifier(recv) && ts.isIdentifier(k) && k.text === key;
 }
 
@@ -501,9 +446,9 @@ function isDirectHasOwnCall(e: ts.Expression, key: string): boolean {
     ts.isIdentifier(e.expression.name) &&
     e.expression.name.text === "hasOwnProperty" &&
     ts.isIdentifier(e.expression.expression) &&
-    e.arguments.length === 1 &&
-    ts.isIdentifier(e.arguments[0]!) &&
-    (e.arguments[0] as ts.Identifier).text === key
+    e.arguments.nodes.length === 1 &&
+    ts.isIdentifier(e.arguments.nodes[0]!) &&
+    (e.arguments.nodes[0] as ts.Identifier).text === key
   );
 }
 
@@ -514,7 +459,10 @@ function isCopyStatement(stmt: ts.Statement, id1: string, key: string): boolean 
   if (!ts.isExpressionStatement(stmt)) return false;
   const e = stmt.expression;
   if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-    return isKeyedAccess(e.left, isExportsTarget, key) && isKeyedAccess(e.right, (x) => ts.isIdentifier(x) && x.text === id1, key);
+    return (
+      isKeyedAccess(e.left, isExportsTarget, key) &&
+      isKeyedAccess(e.right, (x) => ts.isIdentifier(x) && x.text === id1, key)
+    );
   }
   if (!ts.isCallExpression(e) || e.questionDotToken !== undefined) return false;
   const callee = e.expression;
@@ -527,23 +475,35 @@ function isCopyStatement(stmt: ts.Statement, id1: string, key: string): boolean 
   ) {
     return false;
   }
-  if (e.arguments.length !== 3) return false;
-  const [recv, nameArg, desc] = e.arguments as unknown as [ts.Expression, ts.Expression, ts.Expression];
+  if (e.arguments.nodes.length !== 3) return false;
+  const [recv, nameArg, desc] = e.arguments.nodes as unknown as [
+    ts.Expression,
+    ts.Expression,
+    ts.Expression,
+  ];
   if (!isExportsTarget(recv)) return false;
   if (!ts.isIdentifier(nameArg) || nameArg.text !== key) return false;
-  if (!ts.isObjectLiteralExpression(desc) || desc.properties.length !== 2) return false;
-  const [en, get] = desc.properties as unknown as [ts.ObjectLiteralElementLike, ts.ObjectLiteralElementLike];
-  if (!ts.isPropertyAssignment(en) || !ts.isIdentifier(en.name) || en.name.text !== "enumerable") return false;
+  if (!ts.isObjectLiteralExpression(desc) || desc.properties.nodes.length !== 2) return false;
+  const [en, get] = desc.properties.nodes as unknown as [
+    ts.ObjectLiteralElementLike,
+    ts.ObjectLiteralElementLike,
+  ];
+  if (!ts.isPropertyAssignment(en) || !ts.isIdentifier(en.name) || en.name.text !== "enumerable")
+    return false;
   if (en.initializer.kind !== ts.SyntaxKind.TrueKeyword) return false;
   const body = getterBodyOf(get);
-  if (body === undefined || body.statements.length !== 1) return false;
-  const ret = body.statements[0]!;
+  if (body === undefined || body.statements.nodes.length !== 1) return false;
+  const ret = body.statements.nodes[0]!;
   if (!ts.isReturnStatement(ret) || ret.expression === undefined) return false;
   return isKeyedAccess(ret.expression, (x) => ts.isIdentifier(x) && x.text === id1, key);
 }
 
 /** `RECV[KEY]` where `recvOk` approves the receiver. */
-function isKeyedAccess(e: ts.Expression, recvOk: (x: ts.Expression) => boolean, key: string): boolean {
+function isKeyedAccess(
+  e: ts.Expression,
+  recvOk: (x: ts.Expression) => boolean,
+  key: string,
+): boolean {
   return (
     ts.isElementAccessExpression(e) &&
     e.questionDotToken === undefined &&
@@ -579,25 +539,33 @@ function starLoopIdOf(call: ts.CallExpression, sf: ts.SourceFile): string | null
   ) {
     return null;
   }
-  if (keysCall.arguments.length !== 1) return null;
-  const id1Node = keysCall.arguments[0]!;
+  if (keysCall.arguments.nodes.length !== 1) return null;
+  const id1Node = keysCall.arguments.nodes[0]!;
   if (!ts.isIdentifier(id1Node) || !sourceSpellsIdentifier(id1Node, sf)) return null;
   const id1 = id1Node.text;
-  const fn = call.arguments[0];
+  const fn = call.arguments.nodes[0];
   if (fn === undefined || !ts.isFunctionExpression(fn)) return null; // arrows never match (probed)
   if (fn.name !== undefined) return null; // a NAMED callback misses (probed)
   if (fn.asteriskToken !== undefined || (ts.getModifiers(fn) ?? []).length > 0) return null;
-  if (fn.parameters.length !== 1) return null;
-  const keyParam = fn.parameters[0]!;
-  if (!ts.isIdentifier(keyParam.name) || keyParam.initializer !== undefined || keyParam.dotDotDotToken !== undefined) return null;
+  if (fn.parameters.nodes.length !== 1) return null;
+  const keyParam = fn.parameters.nodes[0]!;
+  if (
+    !ts.isIdentifier(keyParam.name) ||
+    keyParam.initializer !== undefined ||
+    keyParam.dotDotDotToken !== undefined
+  )
+    return null;
   const key = keyParam.name.text;
-  const stmts = fn.body.statements;
+  const stmts = fn.body.statements.nodes;
 
   // Form B: the single `if (KEY !== 'default' [&& !hasOwn]) COPY` statement.
   if (stmts.length === 1 && ts.isIfStatement(stmts[0]!) && stmts[0]!.elseStatement === undefined) {
     const ifStmt = stmts[0]!;
     let cond = ifStmt.expression;
-    if (ts.isBinaryExpression(cond) && cond.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    if (
+      ts.isBinaryExpression(cond) &&
+      cond.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+    ) {
       const right = cond.right;
       if (
         !ts.isPrefixUnaryExpression(right) ||
@@ -608,7 +576,8 @@ function starLoopIdOf(call: ts.CallExpression, sf: ts.SourceFile): string | null
       }
       cond = cond.left;
     }
-    if (!keyStringCompare(cond, key, ts.SyntaxKind.ExclamationEqualsEqualsToken, "default")) return null;
+    if (!keyStringCompare(cond, key, ts.SyntaxKind.ExclamationEqualsEqualsToken, "default"))
+      return null;
     return isCopyStatement(ifStmt.thenStatement, id1, key) ? id1 : null;
   }
 
@@ -616,7 +585,12 @@ function starLoopIdOf(call: ts.CallExpression, sf: ts.SourceFile): string | null
   // order), then optional hasOwn / in-exports guards, then the copy.
   if (stmts.length < 2 || stmts.length > 4) return null;
   const head = stmts[0]!;
-  if (!ts.isIfStatement(head) || head.elseStatement !== undefined || !isBareReturn(head.thenStatement)) return null;
+  if (
+    !ts.isIfStatement(head) ||
+    head.elseStatement !== undefined ||
+    !isBareReturn(head.thenStatement)
+  )
+    return null;
   const headCond = head.expression;
   if (
     !ts.isBinaryExpression(headCond) ||
@@ -629,7 +603,13 @@ function starLoopIdOf(call: ts.CallExpression, sf: ts.SourceFile): string | null
   let i = 1;
   if (i < stmts.length - 1) {
     const s = stmts[i]!;
-    if (ts.isIfStatement(s) && s.elseStatement === undefined && isBareReturn(s.thenStatement) && isHasOwnCall(s.expression, key)) i++;
+    if (
+      ts.isIfStatement(s) &&
+      s.elseStatement === undefined &&
+      isBareReturn(s.thenStatement) &&
+      isHasOwnCall(s.expression, key)
+    )
+      i++;
   }
   if (i < stmts.length - 1) {
     // `if (KEY in EXPORTS && EXPORTS[KEY] === ID1[KEY]) return;`
@@ -679,7 +659,10 @@ function opensBraces(n: ts.Node): boolean {
 
 /** Preorder walk with an EXPLICIT stack (minified npm bundles nest deeply
  * enough to overflow recursive visits) carrying each node's brace depth. */
-function walkWithBraceDepth(sf: ts.SourceFile, cb: (node: ts.Node, braceDepth: number) => void): void {
+function walkWithBraceDepth(
+  sf: ts.SourceFile,
+  cb: (node: ts.Node, braceDepth: number) => void,
+): void {
   const stack: [ts.Node, number][] = [[sf, 0]];
   const children: ts.Node[] = [];
   while (stack.length > 0) {
@@ -732,15 +715,16 @@ export function cjsLexedExportsOfFile(sf: ts.SourceFile): CjsLexedExports {
       ) {
         exports.add(lhs.argumentExpression.text);
       } else if (isModuleExports(lhs)) {
-        events.push({ pos: n.getStart(sf), kind: "assign", rhs: n.right });
+        events.push({ pos: tokenStartOfNode(n), kind: "assign", rhs: n.right });
       }
     } else if (ts.isCallExpression(n)) {
       scanDefineProperty(n, sf, exports);
       if (braceDepth === 0) {
         const starSpec = starExportSpecOf(n, sf);
-        if (starSpec !== null) events.push({ pos: n.getStart(sf), kind: "spec", spec: starSpec });
+        if (starSpec !== null)
+          events.push({ pos: tokenStartOfNode(n), kind: "spec", spec: starSpec });
         const loopId = starLoopIdOf(n, sf);
-        if (loopId !== null) events.push({ pos: n.getStart(sf), kind: "loop", id1: loopId });
+        if (loopId !== null) events.push({ pos: tokenStartOfNode(n), kind: "loop", id1: loopId });
       }
     } else if (ts.isVariableStatement(n) && braceDepth === 0) {
       const assign = starAssignOf(n, sf);
@@ -760,7 +744,7 @@ export function cjsLexedExportsOfFile(sf: ts.SourceFile): CjsLexedExports {
       for (const spec of starAssigns.get(ev.id1) ?? []) reexports.push(spec);
     } else {
       reexports = []; // every `module.exports =` clears — stars included (probed)
-      const req = leadingRequireOf(ev.rhs, sf);
+      const req = leadingRequireOf(ev.rhs);
       if (req !== null) {
         reexports.push(req.spec);
       } else if (ts.isObjectLiteralExpression(ev.rhs)) {

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4875-stream-consumers-array-buffer.ts"
+ ],
+ "diags": []
+}

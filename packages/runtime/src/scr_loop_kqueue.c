@@ -1,7 +1,7 @@
 /* The macOS/BSD backend of the platform readiness contract
  * (scr_platform.h): a thin spelling over the exact kqueue syscall
  * sequences scr_net.c and scr_dgram.c inlined historically — the corpus
- * pins those units' behavior byte-for-byte, so this backend adds NO state
+ * pins those units' behavior exactly, so this backend adds NO state
  * and NO extra syscalls beyond what the inline code issued:
  *
  * - watch read/write     EV_SET(fd, EVFILT_READ/WRITE, EV_ADD/EV_DELETE,

@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5069-global-update-modules/counter.ts",
+  "<repo>/tests/corpus/5069-global-update-modules/reexport.ts",
+  "<repo>/tests/corpus/5069-global-update-modules/main.ts"
+ ],
+ "diags": []
+}

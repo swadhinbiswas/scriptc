@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2856-dynamic-any-local-operators.ts"
+ ],
+ "diags": []
+}

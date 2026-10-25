@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4823-array-store-receivers.ts"
+ ],
+ "diags": []
+}

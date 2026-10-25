@@ -43,7 +43,12 @@ async function build(
   mkdirSync(outDir, { recursive: true });
   const file = join(outDir, `${name}.ts`);
   writeFileSync(file, source);
-  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize: san, backend: "llvm" });
+  const result = await compile(file, {
+    outPath: join(outDir, name),
+    outDir,
+    sanitize: san,
+    backend: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "regex program failed to compile:\n" +
@@ -77,54 +82,57 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     expect(err.stderr).toContain("SyntaxError: Invalid regular expression:");
   });
 
-  platformTest("regex-free programs never reference the regex runtime; regex use stays in its size class", async () => {
-    // Measured on plain (non-ASan) builds. A regex-free program's C names
-    // no ScrRegex symbol, so its link line is the historical one (the
-    // compact static size class is pinned by island.test.ts). A regex-USING
-    // binary links libregexp + libunicode, but must stay far below the
-    // embedded-engine size class.
-    const [plainBuild, regexBuild] = await Promise.all([
-      build("size-plain", `console.log("hello", "world");\n`, { sanitize: false }),
-      build(
-        "size-regex",
-        `console.log("a-b c".replace(/[-\\s]/g, "_"), /\\p{L}+/u.test("héllo"));\n`,
-        { sanitize: false },
-      ),
-    ]);
-    const plainC = readFileSync(plainBuild.llvmPath, "utf8");
-    expect(plainC).not.toContain("@scr_regex");
-    // The class bounds are page-granular (macOS rounds segments to 16KB,
-    // so a few hundred bytes of new runtime can tip a whole page): the net
-    // loop hooks, the console/process/child surface (the piped-stream
-    // slice included — scr_child.c is always linked), the
-    // fs-scandir/Math-static slice, the path.win32 port, and the Buffer
-    // numeric/encoding/search families (~11KB of always-linked bytes
-    // runtime) each cost pages — regex linkage would be a ~110KB jump
-    // above the static class, the engine a ~620KB one. The regex class
-    // carries scr_assert.c (the regex link switch has always pulled it),
-    // so the assert.throws shape machinery — the Comparison diff renderer
-    // and the throws/rejects helpers — re-based it by a page, and the
-    // dyn-assert machinery (the compact:false dyn renderer plus the real
-    // myers line-diff printer) re-based it by another; the primitive-
-    // prototype formatters (toExponential/toFixed0, Date.UTC, String.raw)
-    // re-based the static class by one more; the ambient-receiver stack,
-    // the %j dyn stringify walk, and the runtime-encoding readFileSync
-    // form (all in always-linked TUs) tipped the regex class one more
-    // page; positioned readSync's cross-platform pread seam tipped the
-    // Mach-O regex class by one further page. Native Response construction
-    // and mutable constructed Headers added another page to both Darwin
-    // classes; the Linux bounds were rebased by the same 16KB while
-    // preserving their existing cushion.
-    // The sparse UTF-16 string index adds its cache/allocator path to the
-    // always-linked string unit: the Ubuntu 24.04/clang Sandbox measures
-    // 423,488 bytes for the plain binary and 580,264 with regex linked.
-    // The bounds retain roughly one native page of growth; neither cushion
-    // can hide an engine-sized jump.
-    expect(statSync(plainBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 440_000 : 450_000,
-    );
-    expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 601_000 : 590_000,
-    );
-  });
+  platformTest(
+    "regex-free programs never reference the regex runtime; regex use stays in its size class",
+    async () => {
+      // Measured on plain (non-ASan) builds. A regex-free program's C names
+      // no ScrRegex symbol, so its link line is the historical one (the
+
+      // binary links libregexp + libunicode, but must stay far below the
+
+      const [plainBuild, regexBuild] = await Promise.all([
+        build("size-plain", `console.log("hello", "world");\n`, { sanitize: false }),
+        build(
+          "size-regex",
+          `console.log("a-b c".replace(/[-\\s]/g, "_"), /\\p{L}+/u.test("héllo"));\n`,
+          { sanitize: false },
+        ),
+      ]);
+      const plainC = readFileSync(plainBuild.llvmPath, "utf8");
+      expect(plainC).not.toContain("@scr_regex");
+      // The class bounds are page-granular (macOS rounds segments to 16KB,
+      // so a few hundred bytes of new runtime can tip a whole page): the net
+      // loop hooks, the console/process/child surface (the piped-stream
+      // slice included — scr_child.c is always linked), the
+      // fs-scandir/Math-static slice, the path.win32 port, and the Buffer
+      // numeric/encoding/search families (~11KB of always-linked bytes
+      // runtime) each cost pages — regex linkage would be a ~110KB jump
+      // above the static class, the engine a ~620KB one. The regex class
+      // carries scr_assert.c (the regex link switch has always pulled it),
+      // so the assert.throws shape machinery — the Comparison diff renderer
+      // and the throws/rejects helpers — re-based it by a page, and the
+      // dyn-assert machinery (the compact:false dyn renderer plus the real
+      // myers line-diff printer) re-based it by another; the primitive-
+      // prototype formatters (toExponential/toFixed0, Date.UTC, String.raw)
+      // re-based the static class by one more; the ambient-receiver stack,
+      // the %j dyn stringify walk, and the runtime-encoding readFileSync
+      // form (all in always-linked TUs) tipped the regex class one more
+      // page; positioned readSync's cross-platform pread seam tipped the
+      // Mach-O regex class by one further page. Native Response construction
+      // and mutable constructed Headers added another page to both Darwin
+      // classes; the Linux bounds were rebased by the same 16KB while
+      // preserving their existing cushion.
+      // The sparse UTF-16 string index adds its cache/allocator path to the
+      // always-linked string unit: the Ubuntu 24.04/clang Sandbox measures
+      // 423,488 bytes for the plain binary and 580,264 with regex linked.
+      // The bounds retain roughly one native page of growth; neither cushion
+      // can hide an engine-sized jump.
+      expect(statSync(plainBuild.binaryPath).size).toBeLessThan(
+        process.platform === "linux" ? 440_000 : 450_000,
+      );
+      expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
+        process.platform === "linux" ? 601_000 : 590_000,
+      );
+    },
+  );
 });

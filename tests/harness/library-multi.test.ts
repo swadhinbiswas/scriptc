@@ -90,8 +90,8 @@
  *                        iOS 15.0 LC_BUILD_VERSION floor; simulator probes
  *                        EXECUTE on a booted simulator (simctl spawn) —
  *                        the M2 two-instance acceptance run and the M6
- *                        four-thread instancing run, byte-for-byte against
- *                        the desktop expectations; device-arch archives
+ *                        four-thread instancing run, compared exactly
+ *                        against the desktop expectations; device-arch archives
  *                        are build+link verified (no device to execute)
  *   M14 Android          SCRIPTC_ANDROID=1 (an NDK plus adb/emulator):
  *                        localized a/b archives build per emission with
@@ -99,7 +99,7 @@
  *                        NDK's API-26 clang, and EXECUTE on an emulator
  *                        (a running device is reused; otherwise a headless
  *                        arm64 AVD is created and booted) — the M2 and M6
- *                        acceptance runs, byte-for-byte
+ *                        acceptance runs, compared exactly
  *
  * Windows hosts run M1/M2/M6/M7 natively through the same gates as darwin
  * and linux: probes compile with `zig cc` (the box's toolchain), archives
@@ -108,12 +108,27 @@
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { compile, compileLibrary, IPHONEOS_MIN_VERSION, ANDROID_MIN_API, loadLibraryProfile } from "@scriptc/compiler";
+import {
+  compile,
+  compileLibrary,
+  IPHONEOS_MIN_VERSION,
+  ANDROID_MIN_API,
+  loadLibraryProfile,
+} from "@scriptc/compiler";
 
+import { nmDefined } from "./nm-defined.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureDir = join(repoRoot, "tests/library-mode/multi");
 const localizationTest =
@@ -161,7 +176,9 @@ function buildInstance(instance: "a" | "b", emission: Emission): Promise<string>
     archive = (async () => {
       const outDir = join(cacheDir, key);
       mkdirSync(outDir, { recursive: true });
-      const profile = JSON.parse(readFileSync(join(fixtureDir, `profile_${instance}.json`), "utf8")) as {
+      const profile = JSON.parse(
+        readFileSync(join(fixtureDir, `profile_${instance}.json`), "utf8"),
+      ) as {
         entry: string;
         emission: string;
       };
@@ -193,12 +210,19 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
     }
     return set;
   };
-  const defined = parse(execFileSync(nmTool!, ["-gU", archive], { encoding: "utf8" }));
+  const defined = parse(nmDefined(archive, nmTool!));
   const undef = parse(execFileSync(nmTool!, ["-u", archive], { encoding: "utf8" }));
   return { defined, undef };
 }
 
-const A_SYMBOLS = ["ma_boom", "ma_bump", "ma_calls_seen", "ma_collect", "ma_init", "ma_set_panic_sink"];
+const A_SYMBOLS = [
+  "ma_boom",
+  "ma_bump",
+  "ma_calls_seen",
+  "ma_collect",
+  "ma_init",
+  "ma_set_panic_sink",
+];
 const B_SYMBOLS = ["mb_add", "mb_collect", "mb_init", "mb_set_panic_sink", "mb_sum_to"];
 
 const PROBE_EXPECTED = `multi-a ready
@@ -232,13 +256,21 @@ describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) =>
       // module constructors — Mach-O and ELF spell the same discipline
       // with one underscore of decoration between them.
       const toolchainDefinitions = sanitize
-        ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+        ? [
+            process.platform === "darwin"
+              ? "___asan_globals_registered"
+              : "__asan_globals_registered",
+          ]
         : [];
       expect([...defined].sort()).toEqual([...declared, ...toolchainDefinitions].sort());
       // Undefineds: no runtime-internal or prefix-carrying reference
       // escapes; target-runtime/system-API (and sanitizer ABI) references
       // keep their global binding.
-      expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+      expect(
+        [...undef].filter(
+          (s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"),
+        ),
+      ).toEqual([]);
       // The ambient audit holds through the combine step: no
       // process-disposition or threading surface, no atexit teardown.
       for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
@@ -263,7 +295,8 @@ function buildProbe(archiveA: string, archiveB: string, outDir: string, tag: str
     archiveB,
     "-lm",
     ...(process.platform === "win32" ? WIN32_EMBEDDER_LIBS : []),
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -275,14 +308,20 @@ const PAIRINGS: { tag: string; a: Emission; b: Emission }[] = [
 ];
 
 describe.each(PAIRINGS)("two instances, one process ($tag)", ({ tag, a, b }) => {
-  localizationTest("M2: independent state and collects; a trap reaches only its own sink, once", async () => {
-    const [archiveA, archiveB] = await Promise.all([buildInstance("a", a), buildInstance("b", b)]);
-    const probe = buildProbe(archiveA, archiveB, join(cacheDir, "probes"), tag);
-    const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
-    expect(run.signal).toBeNull();
-    expect(run.status).toBe(0);
-    expect(normalizeProbeOut(run.stdout)).toBe(PROBE_EXPECTED);
-  });
+  localizationTest(
+    "M2: independent state and collects; a trap reaches only its own sink, once",
+    async () => {
+      const [archiveA, archiveB] = await Promise.all([
+        buildInstance("a", a),
+        buildInstance("b", b),
+      ]);
+      const probe = buildProbe(archiveA, archiveB, join(cacheDir, "probes"), tag);
+      const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(0);
+      expect(normalizeProbeOut(run.stdout)).toBe(PROBE_EXPECTED);
+    },
+  );
 });
 
 /* ── M3: profile shape ───────────────────────────────────────────────────── */
@@ -307,10 +346,13 @@ test("M3: abi.localize_runtime is strictly boolean", () => {
     exports: [],
   };
   for (const invalid of ["yes", null] as const) {
-    writeFileSync(path, JSON.stringify({
-      ...base,
-      abi: { ...base.abi, localize_runtime: invalid },
-    }));
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...base,
+        abi: { ...base.abi, localize_runtime: invalid },
+      }),
+    );
     const refused = loadLibraryProfile(path);
     expect(refused.ok).toBe(false);
     if (!refused.ok) {
@@ -319,7 +361,11 @@ test("M3: abi.localize_runtime is strictly boolean", () => {
     }
   }
   // The boolean forms load, and absence means false.
-  for (const [value, expected] of [[true, true], [false, false], [undefined, false]] as const) {
+  for (const [value, expected] of [
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ] as const) {
     const abi: Record<string, unknown> = { ...base.abi };
     if (value === undefined) delete abi["localize_runtime"];
     else abi["localize_runtime"] = value;
@@ -485,7 +531,10 @@ exec "$SCRIPTC_TEST_REAL_AR" "$@"
     delete process.env["SCRIPTC_TARGET"];
     try {
       const result = await compileLibrary({ profilePath, outDir, outPath, sanitize });
-      expect(result.ok, result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+      expect(
+        result.ok,
+        result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+      ).toBe(true);
       expect(existsSync(outPath)).toBe(true);
     } finally {
       if (oldPath === undefined) delete process.env["PATH"];
@@ -496,7 +545,8 @@ exec "$SCRIPTC_TEST_REAL_AR" "$@"
       else process.env["SCRIPTC_TARGET"] = oldTarget;
       if (oldRealAr === undefined) delete process.env["SCRIPTC_TEST_REAL_AR"];
       else process.env["SCRIPTC_TEST_REAL_AR"] = oldRealAr;
-      if (oldForbiddenOutput === undefined) delete process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"];
+      if (oldForbiddenOutput === undefined)
+        delete process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"];
       else process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"] = oldForbiddenOutput;
     }
   },
@@ -521,7 +571,9 @@ function buildThreaded(
     archive = (async () => {
       const outDir = join(cacheDir, key);
       mkdirSync(outDir, { recursive: true });
-      const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+      const profile = JSON.parse(
+        readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8"),
+      ) as {
         entry: string;
         emission: string;
         abi: Record<string, unknown>;
@@ -561,7 +613,8 @@ function buildThreadProbe(
     ...archives,
     "-lm",
     ...(process.platform === "win32" ? WIN32_EMBEDDER_LIBS : []),
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -575,14 +628,17 @@ survivor sinks: 0 0 0
 `;
 
 describe.each(EMISSIONS)("thread-instanced archive, %s emission", (emission) => {
-  localizationTest("M6: four threads, one archive: independent instances; a trap reaches only its own thread's sink, once", async () => {
-    const archive = await buildThreaded(emission);
-    const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], `t-${emission}`);
-    const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
-    expect(run.signal).toBeNull();
-    expect(run.status).toBe(0);
-    expect(normalizeProbeOut(run.stdout)).toBe(THREADED_EXPECTED);
-  });
+  localizationTest(
+    "M6: four threads, one archive: independent instances; a trap reaches only its own thread's sink, once",
+    async () => {
+      const archive = await buildThreaded(emission);
+      const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], `t-${emission}`);
+      const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(0);
+      expect(normalizeProbeOut(run.stdout)).toBe(THREADED_EXPECTED);
+    },
+  );
 });
 
 /* The inspect-TLS probe's dead-strip technique (function/data sections +
@@ -604,11 +660,13 @@ inspectTlsTest("M6: util.inspect circular-reference state is thread-local", () =
     "-fdata-sections",
     "-Wno-comment",
     ...(sanitize ? ["-fsanitize=address"] : []),
-    "-I", join(repoRoot, "packages/runtime/src"),
+    "-I",
+    join(repoRoot, "packages/runtime/src"),
     join(threadFixtureDir, "probe_inspect.c"),
     join(repoRoot, "packages/runtime/src/scr_inspect.c"),
     process.platform === "darwin" ? "-Wl,-dead_strip" : "-Wl,--gc-sections",
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   const env =
     sanitize && process.platform === "linux"
@@ -620,47 +678,67 @@ inspectTlsTest("M6: util.inspect circular-reference state is thread-local", () =
   expect(run.stdout).toBe("1 1 1\n");
 });
 
-localizationTest("M7: thread-instanced and runtime-localized archives compose in one process", async (ctx) => {
-  if (nmTool === null) ctx.skip("no nm/llvm-nm on PATH for the symbol-exactness check");
-  const [archiveT, archiveB] = await Promise.all([
-    buildThreaded("llvm", { localize: true }),
-    buildInstance("b", "llvm"),
-  ]);
-  // The composed archive's link surface stays exactly the declared set:
-  // thread-local storage adds no external definitions (M1's one Darwin
-  // ASan image-registration common included in a sanitized build), and the
-  // TLS access machinery undefineds are the platform runtime's, never
-  // scriptc's.
-  const { defined, undef } = nmSymbols(archiveT);
-  const toolchainDefinitions = sanitize
-    ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
-    : [];
-  expect([...defined].sort()).toEqual(
-    [
-      "mt_boom", "mt_bump", "mt_calls_seen", "mt_collect", "mt_indexed_unicode", "mt_init", "mt_perf_now", "mt_set_panic_sink", "mt_sum_to", "mt_uptime",
-      ...toolchainDefinitions,
-    ].sort(),
-  );
-  expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("mt_") || s.startsWith("mb_"))).toEqual([]);
-  const probe = buildThreadProbe(join(threadFixtureDir, "probe_pair.c"), [archiveT, archiveB], "t-pair");
-  const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
-  expect(run.signal).toBeNull();
-  expect(run.status).toBe(0);
-  expect(normalizeProbeOut(run.stdout)).toBe(`multi-b ready
+localizationTest(
+  "M7: thread-instanced and runtime-localized archives compose in one process",
+  async (ctx) => {
+    if (nmTool === null) ctx.skip("no nm/llvm-nm on PATH for the symbol-exactness check");
+    const [archiveT, archiveB] = await Promise.all([
+      buildThreaded("llvm", { localize: true }),
+      buildInstance("b", "llvm"),
+    ]);
+    // The composed archive's link surface stays exactly the declared set:
+    // thread-local storage adds no external definitions (M1's one Darwin
+    // ASan image-registration common included in a sanitized build), and the
+    // TLS access machinery undefineds are the platform runtime's, never
+    // scriptc's.
+    const { defined, undef } = nmSymbols(archiveT);
+    const toolchainDefinitions = sanitize
+      ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+      : [];
+    expect([...defined].sort()).toEqual(
+      [
+        "mt_boom",
+        "mt_bump",
+        "mt_calls_seen",
+        "mt_collect",
+        "mt_indexed_unicode",
+        "mt_init",
+        "mt_perf_now",
+        "mt_set_panic_sink",
+        "mt_sum_to",
+        "mt_uptime",
+        ...toolchainDefinitions,
+      ].sort(),
+    );
+    expect(
+      [...undef].filter((s) => s.startsWith("scr_") || s.startsWith("mt_") || s.startsWith("mb_")),
+    ).toEqual([]);
+    const probe = buildThreadProbe(
+      join(threadFixtureDir, "probe_pair.c"),
+      [archiveT, archiveB],
+      "t-pair",
+    );
+    const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(normalizeProbeOut(run.stdout)).toBe(`multi-b ready
 t0: bump x100 -> 101, calls_seen 100, sums_ok=1, index_ok=1, trap fell through 0
 t0 sink: calls=1 ctx_ok=1 code=[SC4014] symbol=[mt_boom]
 t1: bump x200 -> 201, calls_seen 200, sums_ok=1, index_ok=1, post_ok=1
 b: sums_ok=1 adds_ok=1 post_ok=1
 other sinks: t1=0 b=0
 `);
-});
+  },
+);
 
 /* ASan has no x86_64-windows-gnu runtime; the sanitized pairing stays a
  * darwin/linux contract. */
 const asanTest = process.platform === "darwin" || process.platform === "linux" ? test : test.skip;
 asanTest("M8: M6 under ASan", async () => {
   const archive = await buildThreaded("llvm", { sanitize: true });
-  const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], "t-asan", { sanitize: true });
+  const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], "t-asan", {
+    sanitize: true,
+  });
   // An instance's lifetime is its thread's, with no teardown at thread
   // exit (the documented contract) — once the worker threads end, their
   // thread-local roots are gone and Linux LSan's unreachable-at-exit
@@ -695,10 +773,13 @@ test("M9: abi.instance_per_thread is strictly boolean", () => {
     exports: [],
   };
   for (const invalid of [1, "yes", null] as const) {
-    writeFileSync(path, JSON.stringify({
-      ...base,
-      abi: { ...base.abi, instance_per_thread: invalid },
-    }));
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...base,
+        abi: { ...base.abi, instance_per_thread: invalid },
+      }),
+    );
     const refused = loadLibraryProfile(path);
     expect(refused.ok).toBe(false);
     if (!refused.ok) {
@@ -707,7 +788,11 @@ test("M9: abi.instance_per_thread is strictly boolean", () => {
     }
   }
   // The boolean forms load, and absence means false.
-  for (const [value, expected] of [[true, true], [false, false], [undefined, false]] as const) {
+  for (const [value, expected] of [
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ] as const) {
     const abi: Record<string, unknown> = { ...base.abi };
     if (value !== undefined) abi["instance_per_thread"] = value;
     writeFileSync(path, JSON.stringify({ ...base, abi }));
@@ -753,7 +838,9 @@ function buildInstanceCross(
     archive = (async () => {
       const outDir = join(cacheDir, key);
       mkdirSync(outDir, { recursive: true });
-      const profile = JSON.parse(readFileSync(join(fixtureDir, `profile_${instance}.json`), "utf8")) as {
+      const profile = JSON.parse(
+        readFileSync(join(fixtureDir, `profile_${instance}.json`), "utf8"),
+      ) as {
         entry: string;
         emission: string;
       };
@@ -788,20 +875,27 @@ function buildInstanceCross(
  * plus the documented win32 embedder libs. Link success is itself an
  * assertion: every undefined in the localized member resolved against
  * exactly what an embedder links. */
-function buildCrossProbe(archives: string[], source: string, tag: string, target: CrossTarget): string {
+function buildCrossProbe(
+  archives: string[],
+  source: string,
+  tag: string,
+  target: CrossTarget,
+): string {
   const outDir = join(cacheDir, "probes");
   mkdirSync(outDir, { recursive: true });
   const bin = join(outDir, `probe-${tag}${target.includes("windows") ? ".exe" : ""}`);
   execFileSync("zig", [
     "cc",
     "-std=c11",
-    "-target", target,
+    "-target",
+    target,
     "-pthread",
     source,
     ...archives,
     "-lm",
     ...(target.includes("windows") ? WIN32_EMBEDDER_LIBS : []),
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -811,7 +905,9 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
     try {
       execFileSync("zig", ["version"], { encoding: "utf8" });
     } catch {
-      throw new Error("SCRIPTC_CROSS=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.");
+      throw new Error(
+        "SCRIPTC_CROSS=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.",
+      );
     }
   });
 
@@ -826,14 +922,23 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
         ] as const) {
           const { defined, undef } = nmSymbols(archive);
           expect([...defined].sort()).toEqual([...declared].sort());
-          expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+          expect(
+            [...undef].filter(
+              (s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"),
+            ),
+          ).toEqual([]);
           for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
             for (const spelling of [banned, `_imp_${banned}`]) {
               expect(undef.has(spelling), `undefined reference to ${spelling}`).toBe(false);
             }
           }
         }
-        buildCrossProbe([archiveA, archiveB], join(fixtureDir, "probe.c"), `x-${emission}-${target}`, target);
+        buildCrossProbe(
+          [archiveA, archiveB],
+          join(fixtureDir, "probe.c"),
+          `x-${emission}-${target}`,
+          target,
+        );
       });
     });
   });
@@ -864,9 +969,12 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
         const out = execFileSync(
           "docker",
           [
-            "run", "--rm",
-            "--platform", target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
-            "-v", `${repoRoot}:${repoRoot}`,
+            "run",
+            "--rm",
+            "--platform",
+            target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
+            "-v",
+            `${repoRoot}:${repoRoot}`,
             `node:${nodeVersion()}-${distro}`,
             probe,
           ],
@@ -891,12 +999,19 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
           "x86_64-windows-gnu",
         );
         const ssh = (cmd: string): string =>
-          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], { encoding: "utf8", timeout: 120_000 });
-        try {
-          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
-          execFileSync("scp", ["-q", probe, `${host}:C:/Users/rdp/work/scriptc-mloc-lane/probe-${emission}.exe`], {
+          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], {
+            encoding: "utf8",
             timeout: 120_000,
           });
+        try {
+          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
+          execFileSync(
+            "scp",
+            ["-q", probe, `${host}:C:/Users/rdp/work/scriptc-mloc-lane/probe-${emission}.exe`],
+            {
+              timeout: 120_000,
+            },
+          );
           const out = ssh(`cd /d ${dirWin} && probe-${emission}.exe`);
           // The PROBE's printf rides the mingw CRT's text-mode stdout
           // (CRLF) — the library-cross windows leg's one normalization.
@@ -923,7 +1038,9 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
           archive = (async () => {
             const outDir = join(cacheDir, key);
             mkdirSync(outDir, { recursive: true });
-            const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+            const profile = JSON.parse(
+              readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8"),
+            ) as {
               entry: string;
               emission: string;
               abi: Record<string, unknown>;
@@ -940,7 +1057,9 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
             try {
               const result = await compileLibrary({ profilePath, outDir });
               if (!result.ok) {
-                throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+                throw new Error(
+                  result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+                );
               }
               return result.archivePath;
             } finally {
@@ -959,12 +1078,19 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
           "x86_64-windows-gnu",
         );
         const ssh = (cmd: string): string =>
-          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], { encoding: "utf8", timeout: 120_000 });
-        try {
-          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
-          execFileSync("scp", ["-q", probe, `${host}:C:/Users/rdp/work/scriptc-mloc-lane-t/probe-t.exe`], {
+          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], {
+            encoding: "utf8",
             timeout: 120_000,
           });
+        try {
+          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
+          execFileSync(
+            "scp",
+            ["-q", probe, `${host}:C:/Users/rdp/work/scriptc-mloc-lane-t/probe-t.exe`],
+            {
+              timeout: 120_000,
+            },
+          );
           const out = ssh(`cd /d ${dirWin} && probe-t.exe`);
           expect(out.replaceAll("\r\n", "\n")).toBe(THREADED_EXPECTED);
         } finally {
@@ -1071,9 +1197,11 @@ test.each(["aarch64-ios", "x86_64-linux-android", "armv7-linux-androideabi"])(
   },
 );
 
-test.each(MOBILE_TARGETS.flatMap((target) =>
-  ["darwin", "linux", "win32"].map((host) => ({ target, host })),
-))(
+test.each(
+  MOBILE_TARGETS.flatMap((target) =>
+    ["darwin", "linux", "win32"].map((host) => ({ target, host })),
+  ),
+)(
   "M12: the executable lane refuses $target on $host with the pointer to --lib",
   async ({ target, host }) => {
     const outDir = join(cacheDir, `mobile-exe-refusal-${target}`);
@@ -1089,7 +1217,9 @@ test.each(MOBILE_TARGETS.flatMap((target) =>
         if (!result.ok) {
           expect(result.diagnostics[0]!.code).toBe("SC3002");
           expect(result.diagnostics[0]!.message).toContain(target);
-          expect(result.diagnostics[0]!.message).toContain("scriptc build --lib --profile <profile.json>");
+          expect(result.diagnostics[0]!.message).toContain(
+            "scriptc build --lib --profile <profile.json>",
+          );
         }
       });
     } finally {
@@ -1143,15 +1273,18 @@ function buildAppleProbe(archives: string[], source: string, tag: string, target
   const bin = join(outDir, `probe-${tag}`);
   const clangTarget = `arm64-apple-ios${IPHONEOS_MIN_VERSION}${target === "aarch64-apple-ios" ? "" : "-simulator"}`;
   execFileSync("xcrun", [
-    "--sdk", appleSdkName(target),
+    "--sdk",
+    appleSdkName(target),
     "clang",
     "-std=c11",
     "-pthread",
-    "-target", clangTarget,
+    "-target",
+    clangTarget,
     source,
     ...archives,
     "-lm",
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -1167,9 +1300,11 @@ function availableIphoneSimulators(listing: SimulatorListing): SimulatorDevice[]
   return Object.entries(listing.devices)
     .filter(([runtime]) => runtime.includes(".SimRuntime.iOS-"))
     .flatMap(([, devices]) => devices)
-    .filter((device) => device.deviceTypeIdentifier === undefined
-      ? device.name.startsWith("iPhone")
-      : device.deviceTypeIdentifier.startsWith("com.apple.CoreSimulator.SimDeviceType.iPhone-"));
+    .filter((device) =>
+      device.deviceTypeIdentifier === undefined
+        ? device.name.startsWith("iPhone")
+        : device.deviceTypeIdentifier.startsWith("com.apple.CoreSimulator.SimDeviceType.iPhone-"),
+    );
 }
 
 test("M12: simulator reuse ignores booted devices from non-iOS runtimes", () => {
@@ -1180,7 +1315,12 @@ test("M12: simulator reuse ignores booted devices from non-iOS runtimes", () => 
       ],
       "com.apple.CoreSimulator.SimRuntime.iOS-26-0": [
         { udid: "phone", state: "Shutdown", name: "iPhone 17" },
-        { udid: "renamed", state: "Shutdown", name: "Test Device", deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro" },
+        {
+          udid: "renamed",
+          state: "Shutdown",
+          name: "Test Device",
+          deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        },
         { udid: "tablet", state: "Booted", name: "iPad Pro" },
       ],
     },
@@ -1202,7 +1342,9 @@ function shutdownOwnedSimulator(): void {
 function ensureBootedSimulator(): string {
   if (bootedSimulator !== null) return bootedSimulator.udid;
   const listing = JSON.parse(
-    execFileSync("xcrun", ["simctl", "list", "devices", "available", "--json"], { encoding: "utf8" }),
+    execFileSync("xcrun", ["simctl", "list", "devices", "available", "--json"], {
+      encoding: "utf8",
+    }),
   ) as SimulatorListing;
   const devices = availableIphoneSimulators(listing);
   const booted = devices.find((device) => device.state === "Booted");
@@ -1212,7 +1354,9 @@ function ensureBootedSimulator(): string {
   }
   const candidate = devices[0];
   if (candidate === undefined) {
-    throw new Error("SCRIPTC_IOS=1 needs at least one available simulator (xcrun simctl list devices available).");
+    throw new Error(
+      "SCRIPTC_IOS=1 needs at least one available simulator (xcrun simctl list devices available).",
+    );
   }
   execFileSync("xcrun", ["simctl", "boot", candidate.udid]);
   bootedSimulator = { udid: candidate.udid, bootedByUs: true };
@@ -1233,7 +1377,9 @@ describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
   test("the iOS toolchain is present", () => {
     // Fail, never skip: SCRIPTC_IOS=1 promises an iOS verdict.
     for (const sdk of ["iphoneos", "iphonesimulator"] as const) {
-      const path = execFileSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], { encoding: "utf8" }).trim();
+      const path = execFileSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], {
+        encoding: "utf8",
+      }).trim();
       expect(path, `xcrun --sdk ${sdk} --show-sdk-path`).not.toBe("");
     }
     execFileSync("zig", ["version"], { encoding: "utf8" });
@@ -1251,7 +1397,11 @@ describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
         ] as const) {
           const { defined, undef } = nmSymbols(archive);
           expect([...defined].sort()).toEqual([...declared].sort());
-          expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+          expect(
+            [...undef].filter(
+              (s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"),
+            ),
+          ).toEqual([]);
           for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
             expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
           }
@@ -1263,7 +1413,12 @@ describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
           expect(loadCommands).toContain(`minos ${IPHONEOS_MIN_VERSION}`);
           expect(loadCommands).toContain(`platform ${target === "aarch64-apple-ios" ? "2" : "7"}`);
         }
-        buildAppleProbe([archiveA, archiveB], join(fixtureDir, "probe.c"), `ios-${emission}-${target}`, target);
+        buildAppleProbe(
+          [archiveA, archiveB],
+          join(fixtureDir, "probe.c"),
+          `ios-${emission}-${target}`,
+          target,
+        );
       }, 240_000);
     });
   });
@@ -1299,7 +1454,9 @@ describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
         archive = withMobileTarget(target, async () => {
           const outDir = join(cacheDir, key);
           mkdirSync(outDir, { recursive: true });
-          const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+          const profile = JSON.parse(
+            readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8"),
+          ) as {
             entry: string;
             emission: string;
             abi: Record<string, unknown>;
@@ -1317,7 +1474,12 @@ describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
         });
         built.set(key, archive);
       }
-      const probe = buildAppleProbe([await archive], join(threadFixtureDir, "probe.c"), "ios-run-t", target);
+      const probe = buildAppleProbe(
+        [await archive],
+        join(threadFixtureDir, "probe.c"),
+        "ios-run-t",
+        target,
+      );
       const udid = ensureBootedSimulator();
       const out = execFileSync("xcrun", ["simctl", "spawn", udid, probe], {
         encoding: "utf8",
@@ -1346,13 +1508,19 @@ function androidSdkRoots(): string[] {
  * build invokes), used here to link probes at the API 26 floor. */
 function androidNdkClang(): string | null {
   const ndkRoots: string[] = [];
-  const explicit = [process.env["ANDROID_NDK_ROOT"], process.env["ANDROID_NDK_HOME"]]
-    .find((root): root is string => root !== undefined && root !== "");
+  const explicit = [process.env["ANDROID_NDK_ROOT"], process.env["ANDROID_NDK_HOME"]].find(
+    (root): root is string => root !== undefined && root !== "",
+  );
   if (explicit !== undefined) ndkRoots.push(explicit);
   for (const sdk of androidSdkRoots()) {
     const ndkDir = join(sdk, "ndk");
     if (!existsSync(ndkDir)) continue;
-    ndkRoots.push(...readdirSync(ndkDir).sort().reverse().map((version) => join(ndkDir, version)));
+    ndkRoots.push(
+      ...readdirSync(ndkDir)
+        .sort()
+        .reverse()
+        .map((version) => join(ndkDir, version)),
+    );
   }
   for (const ndk of ndkRoots) {
     const prebuilt = join(ndk, "toolchains", "llvm", "prebuilt");
@@ -1378,14 +1546,16 @@ function buildAndroidProbe(archives: string[], source: string, tag: string): str
   mkdirSync(outDir, { recursive: true });
   const bin = join(outDir, `probe-${tag}`);
   const clang = androidNdkClang();
-  if (clang === null) throw new Error("SCRIPTC_ANDROID=1 needs an NDK (ANDROID_NDK_ROOT or <sdk>/ndk).");
+  if (clang === null)
+    throw new Error("SCRIPTC_ANDROID=1 needs an NDK (ANDROID_NDK_ROOT or <sdk>/ndk).");
   execFileSync(clang, [
     `--target=aarch64-linux-android${ANDROID_MIN_API}`,
     "-std=c11",
     source,
     ...archives,
     "-lm",
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -1456,17 +1626,18 @@ function claimAndroidLanePort(runningSerials: readonly string[]): AndroidPortCla
     if (runningSerials.includes(`emulator-${port}`)) continue;
     const lockPath = join(ANDROID_PORT_LOCK_ROOT, `${port}.lock`);
     try {
-      writeFileSync(
-        lockPath,
-        JSON.stringify({ owner: ANDROID_LANE_OWNER, pid: process.pid }),
-        { flag: "wx", mode: 0o600 },
-      );
+      writeFileSync(lockPath, JSON.stringify({ owner: ANDROID_LANE_OWNER, pid: process.pid }), {
+        flag: "wx",
+        mode: 0o600,
+      });
       return { port, lockPath };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
   }
-  throw new Error(`no unclaimed even Android emulator port is available in ${ANDROID_PORT_MIN}-${ANDROID_PORT_MAX}`);
+  throw new Error(
+    `no unclaimed even Android emulator port is available in ${ANDROID_PORT_MIN}-${ANDROID_PORT_MAX}`,
+  );
 }
 
 function releaseAndroidLanePort(claim: AndroidPortClaim): void {
@@ -1524,7 +1695,10 @@ function createAndroidLaneAvd(image: { sysdir: string; api: string }): void {
   mkdirSync(avdDir);
   let marked = false;
   try {
-    writeFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), ANDROID_LANE_OWNER, { flag: "wx", mode: 0o600 });
+    writeFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), ANDROID_LANE_OWNER, {
+      flag: "wx",
+      mode: 0o600,
+    });
     marked = true;
     writeFileSync(
       join(avdRoot, `${ANDROID_LANE_AVD}.ini`),
@@ -1569,10 +1743,12 @@ function androidEmulatorAvdName(adb: string, serial: string): string | null {
     timeout: 15_000,
   });
   if (result.status !== 0) return null;
-  return (result.stdout ?? "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line !== "" && line !== "OK") ?? null;
+  return (
+    (result.stdout ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line !== "" && line !== "OK") ?? null
+  );
 }
 
 async function ensureAndroidDevice(): Promise<string> {
@@ -1629,9 +1805,16 @@ async function ensureAndroidDevice(): Promise<string> {
     emulator = spawn(
       androidTool("emulator"),
       [
-        "-avd", ANDROID_LANE_AVD,
-        "-port", String(portClaim.port),
-        "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot", "-gpu", "off",
+        "-avd",
+        ANDROID_LANE_AVD,
+        "-port",
+        String(portClaim.port),
+        "-no-window",
+        "-no-audio",
+        "-no-boot-anim",
+        "-no-snapshot",
+        "-gpu",
+        "off",
       ],
       { detached: true, stdio: "ignore" },
     );
@@ -1661,7 +1844,9 @@ async function ensureAndroidDevice(): Promise<string> {
       if (emulator.exitCode !== null || emulator.signalCode !== null) {
         throw new Error(
           `the Android emulator exited before boot completed (` +
-            (emulator.exitCode !== null ? `exit ${emulator.exitCode}` : `signal ${emulator.signalCode}`) +
+            (emulator.exitCode !== null
+              ? `exit ${emulator.exitCode}`
+              : `signal ${emulator.signalCode}`) +
             `)`,
         );
       }
@@ -1679,7 +1864,8 @@ async function ensureAndroidDevice(): Promise<string> {
         ownedDevice.adbOwned = true;
         break;
       }
-      if (Date.now() > deadline) throw new Error("the Android emulator did not finish booting within 5 minutes");
+      if (Date.now() > deadline)
+        throw new Error("the Android emulator did not finish booting within 5 minutes");
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
   } catch (err) {
@@ -1730,7 +1916,11 @@ describe.skipIf(!androidOn)("mobile targets: Android (SCRIPTC_ANDROID=1)", () =>
       ] as const) {
         const { defined, undef } = nmSymbols(archive);
         expect([...defined].sort()).toEqual([...declared].sort());
-        expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+        expect(
+          [...undef].filter(
+            (s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"),
+          ),
+        ).toEqual([]);
         for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
           expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
         }
@@ -1763,7 +1953,9 @@ describe.skipIf(!androidOn)("mobile targets: Android (SCRIPTC_ANDROID=1)", () =>
         archive = withMobileTarget("aarch64-linux-android", async () => {
           const outDir = join(cacheDir, key);
           mkdirSync(outDir, { recursive: true });
-          const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+          const profile = JSON.parse(
+            readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8"),
+          ) as {
             entry: string;
             emission: string;
             abi: Record<string, unknown>;
@@ -1781,7 +1973,11 @@ describe.skipIf(!androidOn)("mobile targets: Android (SCRIPTC_ANDROID=1)", () =>
         });
         built.set(key, archive);
       }
-      const probe = buildAndroidProbe([await archive], join(threadFixtureDir, "probe.c"), "android-run-t");
+      const probe = buildAndroidProbe(
+        [await archive],
+        join(threadFixtureDir, "probe.c"),
+        "android-run-t",
+      );
       const serial = await ensureAndroidDevice();
       expect(adbRun(serial, probe, "m6")).toBe(THREADED_EXPECTED);
     }, 600_000);

@@ -1,4 +1,3 @@
-// @dynamic
 // Parameter defaults over DYNAMIC-TIER ('any'-typed) values: the island
 // slot holds the engine's undefined directly, so the ABI is the slot
 // itself and the prologue picks the default on the runtime undefined

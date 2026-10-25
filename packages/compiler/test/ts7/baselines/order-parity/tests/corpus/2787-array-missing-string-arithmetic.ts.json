@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2787-array-missing-string-arithmetic.ts"
+ ],
+ "diags": []
+}

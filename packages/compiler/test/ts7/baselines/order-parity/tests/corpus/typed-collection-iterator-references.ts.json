@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-collection-iterator-references.ts"
+ ],
+ "diags": []
+}

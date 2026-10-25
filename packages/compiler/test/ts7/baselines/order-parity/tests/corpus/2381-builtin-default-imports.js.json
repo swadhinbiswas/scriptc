@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2381-builtin-default-imports.js"
+ ],
+ "diags": []
+}

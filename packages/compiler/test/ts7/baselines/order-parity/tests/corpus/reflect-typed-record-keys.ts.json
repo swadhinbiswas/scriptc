@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/reflect-typed-record-keys.ts"
+ ],
+ "diags": []
+}

@@ -4,8 +4,13 @@ import { checkPreflight, loadProgram } from "./program-node.js";
 
 const fixtureRoot = join(import.meta.dirname, "../../../../tests/fixtures/npm-static");
 
-function moduleOrder(entry: string, packages: string | string[]): { files: string[]; diagnostics: string[] } {
-  const load = loadProgram(join(fixtureRoot, entry), { npmStatic: typeof packages === "string" ? [packages] : packages });
+function moduleOrder(
+  entry: string,
+  packages: string | string[],
+): { files: string[]; diagnostics: string[] } {
+  const load = loadProgram(join(fixtureRoot, entry), {
+    npmStatic: typeof packages === "string" ? [packages] : packages,
+  });
   try {
     const diagnostics = checkPreflight(load);
     return {
@@ -45,7 +50,11 @@ describe("npm static namespace re-export pruning", () => {
   });
 
   test("a dependency cycle inherits an impure sibling before pruning a namespace re-export", () => {
-    const { files, diagnostics } = moduleOrder("cycle-cli.ts", ["cycle-a", "cycle-b", "cycle-impure"]);
+    const { files, diagnostics } = moduleOrder("cycle-cli.ts", [
+      "cycle-a",
+      "cycle-b",
+      "cycle-impure",
+    ]);
     expect(diagnostics).toEqual([]);
     expect(files.some((file) => file.endsWith("/cycle-b/spare.js"))).toBe(true);
     expect(files.some((file) => file.endsWith("/cycle-impure/index.js"))).toBe(true);
@@ -54,9 +63,19 @@ describe("npm static namespace re-export pruning", () => {
     const { files, diagnostics } = moduleOrder("selectivebarrel-cli.ts", "selectivebarrel");
     expect(diagnostics).toEqual([]);
     expect(files.some((file) => file.endsWith("/selectivebarrel/spare.js"))).toBe(false);
-    for (const name of ["feature.js", "effects/start.js", "bridge.js", "loop-a.js", "loop-b.js", "nested/custom.init.js", "braced/a.js"]) {
-      expect(files.some((file) => file.endsWith(`/selectivebarrel/${name}`)), name).toBe(true);
+    for (const name of [
+      "feature.js",
+      "effects/start.js",
+      "bridge.js",
+      "loop-a.js",
+      "loop-b.js",
+      "nested/custom.init.js",
+      "braced/a.js",
+    ]) {
+      expect(
+        files.some((file) => file.endsWith(`/selectivebarrel/${name}`)),
+        name,
+      ).toBe(true);
     }
   });
-
 });

@@ -1,0 +1,11 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1711-cjs-export-single-values/double.js",
+  "<repo>/tests/corpus/1711-cjs-export-single-values/limit.js",
+  "<repo>/tests/corpus/1711-cjs-export-single-values/version.js",
+  "<repo>/tests/corpus/1711-cjs-export-single-values/offset.js",
+  "<repo>/tests/corpus/1711-cjs-export-single-values/enabled.js",
+  "<repo>/tests/corpus/1711-cjs-export-single-values/main.js"
+ ],
+ "diags": []
+}

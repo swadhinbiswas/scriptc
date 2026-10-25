@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/declared-index-spread.ts"
+ ],
+ "diags": []
+}

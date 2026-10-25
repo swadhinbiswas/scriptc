@@ -1,0 +1,71 @@
+contract-int32-array-aliases.ts:18:11 - error SC7002: the element stored into 'xs' is not provably an int32: 'snapshot[0]' (the array can reach 'ids', declared Int32[])
+
+  17 |   snapshot[0] = 0.5;
+  18 |   xs[0] = snapshot[0];
+     |           ^~~~~~~~~~~
+  19 | }
+
+  hint: make the int32 conversion explicit, for example 'snapshot[0] | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:23:12 - error SC7002: the element stored into 'ids' is not provably an int32: 'ids[0] + 0.5' (the array can reach 'ids', declared Int32[])
+
+  22 | const bump = (): void => {
+  23 |   ids[0] = ids[0] + 0.5;
+     |            ^~~~~~~~~~~~
+  24 | };
+
+  hint: make the int32 conversion explicit, for example '(ids[0] + 0.5) | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:27:20 - error SC7002: the element stored into 'holder.values' is not provably an int32: '1 / 3' (the array can reach 'held', declared Int32[])
+
+  26 | const held: Int32[] = holder.values;
+  27 | holder.values.push(1 / 3);
+     |                    ^~~~~
+  28 | same(ids).unshift(-0.25);
+
+  hint: make the int32 conversion explicit, for example '(1 / 3) | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:28:19 - error SC7002: the element stored into 'same(ids)' is not provably an int32: '-0.25' (the array can reach 'ids', declared Int32[])
+
+  27 | holder.values.push(1 / 3);
+  28 | same(ids).unshift(-0.25);
+     |                   ^~~~~
+  29 | const grid: number[][] = [ids];
+
+  hint: make the int32 conversion explicit, for example '(-0.25) | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:30:14 - error SC7002: the element stored into 'grid[0]' is not provably an int32: '1e10' (the array can reach 'ids', declared Int32[])
+
+  29 | const grid: number[][] = [ids];
+  30 | grid[0][1] = 1e10;
+     |              ^~~~
+  31 | const byName = new Map<string, number[]>([["ids", ids]]);
+
+  hint: make the int32 conversion explicit, for example '1e10 | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:32:25 - error SC7002: the element stored into 'byName.get("ids")!' is not provably an int32: 'NaN' (the array can reach 'ids', declared Int32[])
+
+  31 | const byName = new Map<string, number[]>([["ids", ids]]);
+  32 | byName.get("ids")!.fill(NaN);
+     |                         ^~~
+  33 | const extra = [7, 8.5];
+
+  hint: make the int32 conversion explicit, for example 'NaN | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:33:19 - error SC7002: the array literal element '8.5' is not provably an int32 (the array can reach 'ids', declared Int32[])
+
+  32 | byName.get("ids")!.fill(NaN);
+  33 | const extra = [7, 8.5];
+     |                   ^~~
+  34 | ids.push(...extra);
+
+  hint: make the int32 conversion explicit, for example '8.5 | 0', so Node stores the same value
+
+contract-int32-array-aliases.ts:36:15 - error SC7002: the array literal element '0.75' is not provably an int32 (the array can reach 'ids', declared Int32[])
+
+  35 | const view: number[] = ids;
+  36 | const more = [0.75];
+     |               ^~~~
+  37 | view.unshift(...more);
+
+  hint: make the int32 conversion explicit, for example '0.75 | 0', so Node stores the same value

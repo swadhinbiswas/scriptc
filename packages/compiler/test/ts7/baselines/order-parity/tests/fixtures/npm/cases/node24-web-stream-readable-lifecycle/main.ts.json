@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/node24-web-stream-readable-lifecycle/main.ts"
+ ],
+ "diags": []
+}

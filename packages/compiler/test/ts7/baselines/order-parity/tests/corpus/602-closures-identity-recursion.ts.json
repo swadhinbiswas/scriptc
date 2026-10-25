@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/602-closures-identity-recursion.ts"
+ ],
+ "diags": []
+}

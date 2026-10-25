@@ -1,4 +1,3 @@
-// @dynamic
 // Island-native literal forms: GET accessors define through the engine
 // (the self-referential root-indent shape), plain spreads copy with the
 // spec's CopyDataProperties (later keys win), `??` tests engine values,

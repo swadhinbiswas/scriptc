@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/utf8-span-decoding.ts"
+ ],
+ "diags": []
+}

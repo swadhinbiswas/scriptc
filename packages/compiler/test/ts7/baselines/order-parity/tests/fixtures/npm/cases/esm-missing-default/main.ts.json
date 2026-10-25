@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/esm-missing-default/main.ts"
+ ],
+ "diags": []
+}

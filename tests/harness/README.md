@@ -45,18 +45,14 @@ RequestInit and ResponseInit WebIDL dictionary reads (including runtime members
 that may be newer than the installed declarations). Every item is classified:
 
 - `static`: engine-free and tied one-to-one to a differential-evidence row;
-- `dynamic-only`: fenced from static builds with SC2020, accepted under
-  `--dynamic`;
-- `unsupported`: SC2020 in both tiers; this is implementation work rather than
-  an implicit omission;
+- `unsupported`: an explicit SC2020 refusal that remains implementation work;
 - `out-of-scope`: reflection metadata such as `Symbol.toStringTag`, retained so
   the scope boundary is machine-readable.
 
 The selected adjacent interface families excluded from the census carry
 reasons too. A Node upgrade that adds/removes a public member or dictionary key
-fails the focused suite until that member is classified. The static,
-dynamic-only, and unsupported rows project into the shipped surface manifest;
-filter `NODE24_FETCH_COMPAT_PROFILE.inventory.entries` by `status`/`owner` for
+fails the focused suite until that member is classified. The static and unsupported rows project into the shipped surface manifest;
+filter `node24FetchCompatProfile().inventory.entries` by `status`/`owner` for
 the next cohesive implementation queue.
 
 When Node changes, update `.node-version` and the profile's Node/Undici tuple
@@ -97,4 +93,4 @@ For the external development toolchain, environment variables that can resolve m
 
 ## Test262
 
-The default static compiler has a pinned Test262 regression profile and a separate full-snapshot survey runner. See [tests/test262/README.md](../test262/README.md) for commands, outcome reporting, and the current strict-script and scalar-assertion limits. Both plain and sanitized Sandbox lanes run the regression profile; dynamic islands are disabled.
+The default static compiler has a pinned Test262 regression profile and a separate full-snapshot survey runner. See [tests/test262/README.md](../test262/README.md) for commands, outcome reporting, and the current strict-script and scalar-assertion limits. Both plain and sanitized Sandbox lanes run the regression profile.

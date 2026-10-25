@@ -25,9 +25,7 @@ export interface SpecifierUse {
   requireViaHelper: boolean;
   /** import("x") — evaluation-time. */
   dynamicImport: boolean;
-  /** import.meta.resolve("x") — resolves synchronously without loading.
-   * It still needs an emitted edge for bare package names so the island can
-   * answer from its fixed graph; relative and URL-like names need no edge. */
+
   importMetaResolve: boolean;
 }
 
@@ -49,7 +47,7 @@ export interface ModuleSpecifiers {
 /** Every module specifier `source` can load at runtime, in encounter
  * order with its call-site kinds merged per specifier: import/export
  * declarations (INCLUDING `export * as ns from "x"`, which
- * ts.preProcessFile silently drops — zod v4 re-exports its util namespace
+ * ts.preProcessFile omits — zod v4 re-exports its util namespace
  * that way), dynamic import("literal"), and require("literal") /
  * module.require("literal") / __require("literal") (esbuild's external-require helper — collecting its
  * literal call sites gives bundled dists an honest build-time inventory).
@@ -62,7 +60,10 @@ export function moduleSpecifiersOfFile(sf: ts.SourceFile): ModuleSpecifiers {
   /** Uses with `__require(…)` sites — attributed local vs helper AFTER the
    * walk, once the (hoisted) import declarations have all been seen. */
   const viaHelperIdent = new Set<SpecifierUse>();
-  const push = (spec: string, kind: "static" | "requireLocal" | "dynamicImport" | null): SpecifierUse => {
+  const push = (
+    spec: string,
+    kind: "static" | "requireLocal" | "dynamicImport" | null,
+  ): SpecifierUse => {
     let use = bySpec.get(spec);
     if (!use) {
       use = {
@@ -93,7 +94,7 @@ export function moduleSpecifiersOfFile(sf: ts.SourceFile): ModuleSpecifiers {
         ts.isImportDeclaration(n) &&
         n.importClause?.namedBindings !== undefined &&
         ts.isNamedImports(n.importClause.namedBindings) &&
-        n.importClause.namedBindings.elements.some((el) => el.name.text === "__require")
+        n.importClause.namedBindings.elements.nodes.some((el) => el.name.text === "__require")
       ) {
         requireHelperImport = n.moduleSpecifier.text;
       }
@@ -101,12 +102,14 @@ export function moduleSpecifiersOfFile(sf: ts.SourceFile): ModuleSpecifiers {
         ts.isExportDeclaration(n) &&
         n.exportClause !== undefined &&
         ts.isNamedExports(n.exportClause) &&
-        n.exportClause.elements.some((el) => (el.propertyName ?? el.name).text === "__require")
+        n.exportClause.elements.nodes.some(
+          (el) => (el.propertyName ?? el.name).text === "__require",
+        )
       ) {
         requireHelperReexport = n.moduleSpecifier.text;
       }
     } else if (ts.isCallExpression(n)) {
-      const arg = n.arguments[0];
+      const arg = n.arguments.nodes[0];
       if (
         n.expression.kind === ts.SyntaxKind.ImportKeyword &&
         arg !== undefined &&
@@ -118,21 +121,28 @@ export function moduleSpecifiersOfFile(sf: ts.SourceFile): ModuleSpecifiers {
         n.expression.name.text === "resolve" &&
         ts.isMetaProperty(n.expression.expression) &&
         n.expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
-        n.arguments.length >= 1 && arg !== undefined && ts.isStringLiteralLike(arg)
+        n.arguments.nodes.length >= 1 &&
+        arg !== undefined &&
+        ts.isStringLiteralLike(arg)
       ) {
         push(arg.text, null).importMetaResolve = true;
       } else if (
         ((ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "require") ||
-          (ts.isElementAccessExpression(n.expression) && n.expression.argumentExpression !== undefined &&
-            ts.isStringLiteralLike(n.expression.argumentExpression) && n.expression.argumentExpression.text === "require")) &&
-        ts.isIdentifier(n.expression.expression) && n.expression.expression.text === "module" &&
-        n.arguments.length === 1 && arg !== undefined && ts.isStringLiteralLike(arg)
+          (ts.isElementAccessExpression(n.expression) &&
+            n.expression.argumentExpression !== undefined &&
+            ts.isStringLiteralLike(n.expression.argumentExpression) &&
+            n.expression.argumentExpression.text === "require")) &&
+        ts.isIdentifier(n.expression.expression) &&
+        n.expression.expression.text === "module" &&
+        n.arguments.nodes.length === 1 &&
+        arg !== undefined &&
+        ts.isStringLiteralLike(arg)
       ) {
         push(arg.text, "requireLocal");
       } else if (
         ts.isIdentifier(n.expression) &&
         (n.expression.text === "require" || n.expression.text === "__require") &&
-        n.arguments.length === 1 &&
+        n.arguments.nodes.length === 1 &&
         arg !== undefined &&
         ts.isStringLiteralLike(arg)
       ) {
@@ -145,7 +155,9 @@ export function moduleSpecifiersOfFile(sf: ts.SourceFile): ModuleSpecifiers {
       }
     }
   };
-  ts.walkPreorder(sf, (node) => { visit(node); });
+  ts.walkPreorder(sf, (node) => {
+    visit(node);
+  });
   for (const use of viaHelperIdent) {
     if (requireHelperImport !== null) use.requireViaHelper = true;
     else use.requireLocal = true;
@@ -167,17 +179,21 @@ export function sourceImportsOfFile(sf: ts.SourceFile): { spec: string; typeOnly
         : n.isTypeOnly;
       out.push({ spec: n.moduleSpecifier.text, typeOnly });
     } else if (ts.isCallExpression(n)) {
-      const arg = n.arguments[0];
+      const arg = n.arguments.nodes[0];
       if (
         arg !== undefined &&
         ts.isStringLiteralLike(arg) &&
         (n.expression.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(n.expression) && n.expression.text === "require" && n.arguments.length === 1))
+          (ts.isIdentifier(n.expression) &&
+            n.expression.text === "require" &&
+            n.arguments.nodes.length === 1))
       ) {
         out.push({ spec: arg.text, typeOnly: false });
       }
     }
   };
-  ts.walkPreorder(sf, (node) => { visit(node); });
+  ts.walkPreorder(sf, (node) => {
+    visit(node);
+  });
   return out;
 }

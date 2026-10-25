@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/union-nested-layout-discriminant.ts"
+ ],
+ "diags": []
+}

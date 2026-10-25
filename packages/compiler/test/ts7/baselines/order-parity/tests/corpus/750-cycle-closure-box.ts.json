@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/750-cycle-closure-box.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5271-url-parse-throw-deprecation.cjs"
+ ],
+ "diags": []
+}

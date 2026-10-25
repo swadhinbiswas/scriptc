@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1620-cjs-require-effects-order/greeter.js",
+  "<repo>/tests/corpus/1620-cjs-require-effects-order/status.js",
+  "<repo>/tests/corpus/1620-cjs-require-effects-order/main.js"
+ ],
+ "diags": []
+}

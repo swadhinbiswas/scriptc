@@ -4,8 +4,11 @@
 export function runCompilerTask<T>(work: () => T): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     queueMicrotask(() => {
-      try { resolve(work()); }
-      catch (error) { reject(error); }
+      try {
+        resolve(work());
+      } catch (error) {
+        reject(error);
+      }
     });
   });
 }

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4030-runtime-object-truthiness.ts"
+ ],
+ "diags": []
+}

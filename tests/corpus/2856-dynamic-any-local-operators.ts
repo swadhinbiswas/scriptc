@@ -1,4 +1,3 @@
-// @dynamic
 // Checked-dynamic producers stay in dyn storage under an `any` spelling to
 // preserve aliases. Static builds support coercive operators natively;
 // the dynamic tier retains its island conversions. Strict equality preserves identity.

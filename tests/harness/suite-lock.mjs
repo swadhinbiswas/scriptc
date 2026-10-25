@@ -27,10 +27,25 @@ const POLL_MS = 2000;
 // count as file filters. Misclassification only ever skips the lock (fails
 // open to today's behavior), never blocks a filtered run.
 const VALUE_FLAGS = new Set([
-  "-t", "--testNamePattern", "--reporter", "--outputFile", "--config",
-  "--root", "--dir", "--project", "--pool", "--maxWorkers", "--minWorkers",
-  "--exclude", "--shard", "--retry", "--bail", "--testTimeout", "--hookTimeout",
-  "--environment", "--outputFile.json",
+  "-t",
+  "--testNamePattern",
+  "--reporter",
+  "--outputFile",
+  "--config",
+  "--root",
+  "--dir",
+  "--project",
+  "--pool",
+  "--maxWorkers",
+  "--minWorkers",
+  "--exclude",
+  "--shard",
+  "--retry",
+  "--bail",
+  "--testTimeout",
+  "--hookTimeout",
+  "--environment",
+  "--outputFile.json",
 ]);
 
 function isFullSuiteRun() {
@@ -76,23 +91,38 @@ export default async function setup() {
   let acquired = false;
   while (Date.now() - started < MAX_WAIT_MS) {
     try {
-      writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), cwd: process.cwd() }), { flag: "wx" });
+      writeFileSync(
+        LOCK_PATH,
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+          cwd: process.cwd(),
+        }),
+        { flag: "wx" },
+      );
       acquired = true;
       break;
     } catch {
       const pid = holderPid();
       if (pid === null || !pidAlive(pid)) {
-        try { rmSync(LOCK_PATH, { force: true }); } catch { /* racing steal — retry */ }
+        try {
+          rmSync(LOCK_PATH, { force: true });
+        } catch {
+          /* racing steal — retry */
+        }
         continue;
       }
       if (Date.now() - waitingSince > 30_000) {
-        console.log(`[scriptc] full-suite lock held by pid ${pid} (${LOCK_PATH}) — waiting; SCRIPTC_NO_LOCK=1 skips`);
+        console.log(
+          `[scriptc] full-suite lock held by pid ${pid} (${LOCK_PATH}) — waiting; SCRIPTC_NO_LOCK=1 skips`,
+        );
         waitingSince = Date.now();
       }
       await sleep(POLL_MS);
     }
   }
-  if (!acquired) console.warn("[scriptc] full-suite lock wait exceeded 45 minutes — proceeding without it");
+  if (!acquired)
+    console.warn("[scriptc] full-suite lock wait exceeded 45 minutes — proceeding without it");
 
   return () => {
     if (!acquired) return;

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5928-groupby-iterables.ts"
+ ],
+ "diags": []
+}

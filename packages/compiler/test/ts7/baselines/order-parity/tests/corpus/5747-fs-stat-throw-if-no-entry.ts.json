@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5747-fs-stat-throw-if-no-entry.ts"
+ ],
+ "diags": []
+}

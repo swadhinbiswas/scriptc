@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1697-stream-tick-vs-timer.ts"
+ ],
+ "diags": []
+}

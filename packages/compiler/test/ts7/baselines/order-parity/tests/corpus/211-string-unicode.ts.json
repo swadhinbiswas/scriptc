@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/211-string-unicode.ts"
+ ],
+ "diags": []
+}

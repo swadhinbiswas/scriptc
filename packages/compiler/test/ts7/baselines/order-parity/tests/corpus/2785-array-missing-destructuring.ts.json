@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2785-array-missing-destructuring.ts"
+ ],
+ "diags": []
+}

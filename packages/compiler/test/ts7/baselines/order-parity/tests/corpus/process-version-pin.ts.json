@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/process-version-pin.ts"
+ ],
+ "diags": []
+}

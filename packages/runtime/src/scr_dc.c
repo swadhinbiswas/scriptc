@@ -14,8 +14,9 @@
  * - publish iterates a SNAPSHOT of the subscriber list: a subscriber
  *   unsubscribing itself mid-publish still lets its siblings fire (the
  *   test suite's sync-unsubscribe shape, Node's behavior). A subscriber's
- *   throw PROPAGATES out of publish — catchable there — where Node routes
- *   it to triggerUncaughtException (SEMANTICS.md divergence).
+ *   throw does not stop the dispatch: like Node's
+ *   process.nextTick(triggerUncaughtException), it surfaces as an uncaught
+ *   exception on the next tick.
  * - The atexit teardown releases names and subscribers before the RC
  *   audit runs (atexit is LIFO; scr_init registered the audit first), so
  *   registry-held values never count as leaks.
@@ -42,11 +43,44 @@ typedef struct {
   size_t nbinds, binds_cap;
 } ScrDcChannel;
 
-static ScrDcChannel *dc_channels = NULL;
-static size_t dc_nchannels = 0, dc_cap = 0;
-static bool dc_teardown_registered = false;
+static SCR_TL ScrDcChannel *dc_channels = NULL;
+static SCR_TL size_t dc_nchannels = 0, dc_cap = 0;
+static SCR_TL bool dc_teardown_registered = false;
+
+/* Subscriber and transform throws waiting for their next-tick report,
+ * oldest first. */
+static SCR_TL ScrCaught **dc_deferred = NULL;
+static SCR_TL size_t dc_ndeferred = 0, dc_deferred_cap = 0;
+
+static void dc_report_deferred(void) {
+  if (dc_ndeferred == 0) return;
+  ScrCaught *caught = dc_deferred[0];
+  memmove(dc_deferred, dc_deferred + 1, --dc_ndeferred * sizeof *dc_deferred);
+  scr_rethrow(caught);
+  scr_caught_release(caught);
+}
+
+/* Move the pending exception into the deferred queue and report it from a
+ * next tick of its own (Node: process.nextTick(() =>
+ * triggerUncaughtException(err, false))). */
+static void dc_defer_pending_throw(void) {
+  if (dc_ndeferred == dc_deferred_cap) {
+    dc_deferred_cap = dc_deferred_cap ? dc_deferred_cap * 2 : 4;
+    dc_deferred = realloc(dc_deferred, dc_deferred_cap * sizeof *dc_deferred);
+    if (!dc_deferred) {
+      fputs("scriptc: out of memory\n", stderr);
+      abort();
+    }
+  }
+  dc_deferred[dc_ndeferred++] = scr_exc_take();
+  scr_next_tick_raw(dc_report_deferred);
+}
 
 static void scr_dc_teardown(void) {
+  for (size_t i = 0; i < dc_ndeferred; i++) scr_caught_release(dc_deferred[i]);
+  free(dc_deferred);
+  dc_deferred = NULL;
+  dc_ndeferred = dc_deferred_cap = 0;
   for (size_t i = 0; i < dc_nchannels; i++) {
     ScrDcChannel *ch = &dc_channels[i];
     scr_str_release(ch->name);
@@ -75,7 +109,7 @@ static size_t dc_intern(ScrStr *name) {
   }
   if (!dc_teardown_registered) {
     dc_teardown_registered = true;
-    atexit(scr_dc_teardown);
+    scr_atexit(scr_dc_teardown);
   }
   ScrDcChannel *ch = &dc_channels[dc_nchannels];
   ch->name = scr_str_retain(name);
@@ -135,12 +169,7 @@ static void dc_throw_bad_fn_arg(const ScrDyn *cb, const char *arg_name) {
              (int)(cb->v.str->len < 28 ? cb->v.str->len : 28), cb->v.str->data);
     received = detail;
     break;
-  case SCR_DYN_JSVAL:
-    /* An engine callback may well BE a function — subscribing island
-     * values is unarmed (lane dyn-routing-ops); fence loudly rather
-     * than claim "Received an instance of Object". */
-    scr_dyn_isl_fence(cb, "subscribing");
-    return;
+
   default: break;
   }
   char buf[160];
@@ -158,7 +187,8 @@ static void dc_throw_bad_subscriber(const ScrDyn *cb) {
  * identity otherwise. */
 static bool dc_sub_matches(const ScrDyn *a, const ScrDyn *b) {
   if (a == b) return true;
-  return a->kind == SCR_DYN_FUNC && b->kind == SCR_DYN_FUNC && a->v.fn.clo == b->v.fn.clo;
+  return a->kind == SCR_DYN_FUNC && b->kind == SCR_DYN_FUNC &&
+         scr_closure_identity_equal(a->v.fn.clo, b->v.fn.clo);
 }
 
 static void dc_sub_add(ScrDcChannel *ch, ScrDyn *cb) {
@@ -244,8 +274,8 @@ bool scr_dc_has_subscribers(ScrStr *name) {
  * (identity without a transform), publishes INSIDE the entered contexts
  * (subscribers observe getStore(), Node's shape), runs fn with thisArg
  * bound and the arguments forwarded, and restores in reverse — the
- * finally, so a throw still restores. A transform throw propagates
- * (Node defers it to reportError and skips the store — SEMANTICS.md). */
+ * finally, so a throw still restores. A transform throw skips its store
+ * and surfaces as an uncaught exception on the next tick, as in Node. */
 
 void scr_dc_chan_bind_store(double handle, double als_id, ScrDyn *transform) {
   ScrDcChannel *ch = dc_of(handle);
@@ -286,9 +316,8 @@ bool scr_dc_chan_unbind_store(double handle, double als_id) {
 }
 
 /* Enter every bound store (transform(data) or data itself); the returned
- * malloc'd array of PREVIOUS snapshots restores in reverse. On a
- * transform throw the already-entered stores restore here and the
- * exception stays pending (*n_out counts the entered prefix). */
+ * malloc'd array of PREVIOUS snapshots (*n_out entries) restores in
+ * reverse. A store whose transform throws is not entered. */
 static ScrAlsCtx **dc_stores_enter(ScrDcChannel *ch, ScrDyn *data, size_t *n_out) {
   *n_out = 0;
   if (ch->nbinds == 0) return NULL;
@@ -302,11 +331,14 @@ static ScrAlsCtx **dc_stores_enter(ScrDcChannel *ch, ScrDyn *data, size_t *n_out
     if (ch->binds[i].transform != NULL) {
       ScrDyn *args[1] = {data};
       value = scr_dyn_call(ch->binds[i].transform, args, 1, "transform");
-      if (value == NULL) return prevs; /* pending; entered prefix restores */
+      if (value == NULL) {
+        dc_defer_pending_throw();
+        continue;
+      }
     } else {
       value = scr_dyn_retain(data);
     }
-    prevs[i] = scr_als_enter(ch->binds[i].als_id, value);
+    prevs[*n_out] = scr_als_enter(ch->binds[i].als_id, value);
     scr_dyn_release(value);
     (*n_out)++;
   }
@@ -324,10 +356,6 @@ ScrDyn *scr_dc_chan_run_stores(double handle, ScrDyn *data, ScrDyn *fn, ScrDyn *
   ScrDcChannel *ch = dc_of(handle);
   size_t entered = 0;
   ScrAlsCtx **prevs = dc_stores_enter(ch, data, &entered);
-  if (scr_exc_pending()) {
-    dc_stores_restore(prevs, entered);
-    return NULL;
-  }
   scr_dc_publish(handle, data);
   ScrDyn *r = NULL;
   if (!scr_exc_pending()) {
@@ -358,9 +386,9 @@ enum { DC_TC_START, DC_TC_END, DC_TC_ASYNC_START, DC_TC_ASYNC_END, DC_TC_ERROR }
 
 static const char *const dc_trace_events[5] = {"start", "end", "asyncStart", "asyncEnd", "error"};
 
-static ScrDcTracing *dc_tracings = NULL;
-static size_t dc_ntracings = 0, dc_tracings_cap = 0;
-static bool dc_tracings_teardown_registered = false;
+static SCR_TL ScrDcTracing *dc_tracings = NULL;
+static SCR_TL size_t dc_ntracings = 0, dc_tracings_cap = 0;
+static SCR_TL bool dc_tracings_teardown_registered = false;
 
 static void scr_dc_tracings_teardown(void) {
   free(dc_tracings);
@@ -379,7 +407,7 @@ static double dc_tracing_register(const size_t ch[5]) {
   }
   if (!dc_tracings_teardown_registered) {
     dc_tracings_teardown_registered = true;
-    atexit(scr_dc_tracings_teardown);
+    scr_atexit(scr_dc_tracings_teardown);
   }
   for (size_t i = 0; i < 5; i++) dc_tracings[dc_ntracings].ch[i] = ch[i];
   dc_ntracings++;
@@ -548,7 +576,7 @@ ScrDyn *scr_dc_tc_trace_sync(double h, ScrDyn *fn, ScrDyn *ctx, ScrDyn *this_arg
  * ctx.error, publishes error then asyncStart + asyncEnd, and passes the
  * rejection through. The returned promise is the REACTION's (a rejection
  * nobody observes is the unhandled one, exactly Node's then-chain). A
- * reaction fiber gives the microtask ordering for free. */
+ * reaction fiber provides the microtask ordering without extra code. */
 typedef struct {
   ScrPromise *src, *dst; /* owned */
   double h;
@@ -798,15 +826,11 @@ void scr_dc_publish(double handle, ScrDyn *message) {
   }
   for (size_t i = 0; i < n; i++) snap[i] = scr_dyn_retain(ch->subs[i]);
   ScrDyn *namev = scr_dyn_new_str(ch->name);
-  bool threw = false;
-  for (size_t i = 0; i < n && !threw; i++) {
+  for (size_t i = 0; i < n; i++) {
     ScrDyn *args[2] = {message, namev};
     ScrDyn *r = scr_dyn_call(snap[i], args, 2, "onMessage");
-    if (r == NULL) {
-      threw = true; /* pending exception propagates out of publish */
-    } else {
-      scr_dyn_release(r);
-    }
+    if (r == NULL) dc_defer_pending_throw();
+    else scr_dyn_release(r);
   }
   scr_dyn_release(namev);
   for (size_t i = 0; i < n; i++) scr_dyn_release(snap[i]);

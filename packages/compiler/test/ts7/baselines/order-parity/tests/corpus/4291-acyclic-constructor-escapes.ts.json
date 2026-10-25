@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4291-acyclic-constructor-escapes.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/756-cycle-inheritance.ts"
+ ],
+ "diags": []
+}

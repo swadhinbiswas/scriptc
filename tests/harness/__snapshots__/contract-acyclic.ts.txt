@@ -1,0 +1,44 @@
+contract-acyclic.ts:5:27 - error SC7007: 'ListNode' is declared Acyclic but can lie on a reference cycle: ListNode.next → ListNode (ListNode.next can be assigned after construction, as at contract-acyclic.ts:50:1)
+
+  4 | 
+  5 | class ListNode implements Acyclic {
+    |                           ^~~~~~~
+  6 |   value: number;
+
+  hint: assign the reference only in the constructor (before `this` escapes), so a new object can only point to older ones, or remove Acyclic
+
+contract-acyclic.ts:13:23 - error SC7007: 'Task' is declared Acyclic but can lie on a reference cycle: Task.done can hold a function, which can reference any object, including a Task
+
+  12 | 
+  13 | class Task implements Acyclic {
+     |                       ^~~~~~~
+  14 |   readonly name: string;
+
+  hint: a function, dynamic or promise field can capture the object itself; store plain data instead, or remove Acyclic
+
+contract-acyclic.ts:22:24 - error SC7007: 'Graph' is declared Acyclic but can lie on a reference cycle: Graph.nodes → GraphNode.graph → Graph (Graph.nodes is an array, whose contents can change)
+
+  21 | 
+  22 | class Graph implements Acyclic {
+     |                        ^~~~~~~
+  23 |   readonly nodes: GraphNode[] = [];
+
+  hint: an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic
+
+contract-acyclic.ts:33:24 - error SC7007: 'Shape' is declared Acyclic but can lie on a reference cycle: its subclass 'Group' shares its object layout, and Group.members → Group (as a Shape) (Group.members is an array, whose contents can change)
+
+  32 | 
+  33 | class Shape implements Acyclic {
+     |                        ^~~~~~~
+  34 |   readonly id: number;
+
+  hint: an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic
+
+contract-acyclic.ts:44:24 - error SC7007: 'Cell' is declared Acyclic but can lie on a reference cycle: Cell.link → Cell (Cell.link can be assigned after construction, as at contract-acyclic.ts:58:1)
+
+  43 | 
+  44 | interface Cell extends Acyclic {
+     |                        ^~~~~~~
+  45 |   value: number;
+
+  hint: assign the reference only in the constructor (before `this` escapes), so a new object can only point to older ones, or remove Acyclic

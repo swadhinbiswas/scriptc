@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5517-assert-partial-deep-equal.js"
+ ],
+ "diags": []
+}

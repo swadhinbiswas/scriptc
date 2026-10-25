@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5430-dyn-number-string-boxes.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2390-dot-requires/shared.cjs",
+  "<repo>/tests/corpus/2390-dot-requires/sub/index.cjs",
+  "<repo>/tests/corpus/2390-dot-requires/sub/child.cjs",
+  "<repo>/tests/corpus/2390-dot-requires/main.cjs"
+ ],
+ "diags": []
+}

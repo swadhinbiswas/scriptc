@@ -1,4 +1,3 @@
-// @dynamic
 // for-of and destructuring over island values held in 'unknown'. Checked
 // for-of retains the engine IteratorRecord and steps it live; destructuring
 // uses the existing drain. Iterator method calls preserve the engine receiver.

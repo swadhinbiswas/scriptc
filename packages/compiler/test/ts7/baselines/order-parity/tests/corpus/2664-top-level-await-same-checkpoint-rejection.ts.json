@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2664-top-level-await-same-checkpoint-rejection.ts"
+ ],
+ "diags": []
+}

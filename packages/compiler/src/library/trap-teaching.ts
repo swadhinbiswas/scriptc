@@ -42,7 +42,11 @@ export function assembleTrapTeaching(
   symbol: string,
   remediation?: string,
 ): string {
-  const fields: [string, string][] = [["text", text], ["code", code], ["symbol", symbol]];
+  const fields: [string, string][] = [
+    ["text", text],
+    ["code", code],
+    ["symbol", symbol],
+  ];
   if (remediation !== undefined) fields.push(["remediation", remediation]);
   for (const [name, value] of fields) {
     if (value.includes(TRAP_TEACHING_MARKER) || value.includes(TRAP_TEACHING_SEP)) {
@@ -50,7 +54,12 @@ export function assembleTrapTeaching(
     }
   }
   return (
-    TRAP_TEACHING_MARKER + text + TRAP_TEACHING_SEP + code + TRAP_TEACHING_SEP + symbol +
+    TRAP_TEACHING_MARKER +
+    text +
+    TRAP_TEACHING_SEP +
+    code +
+    TRAP_TEACHING_SEP +
+    symbol +
     (remediation !== undefined ? TRAP_TEACHING_SEP + remediation : "")
   );
 }

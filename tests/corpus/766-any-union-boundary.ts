@@ -1,4 +1,3 @@
-// @dynamic
 // Crossings INTO the island beyond the JSON set: undefined/null-armed
 // unions (a runtime tag switch — unit arms become the engine's OWN
 // undefined/null, so a property spelled `tag: maybeUndefined` exists with

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/web-streams/main.ts"
+ ],
+ "diags": []
+}

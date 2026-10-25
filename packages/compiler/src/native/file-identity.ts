@@ -8,6 +8,13 @@ export function nativeFileIdentity(path: string): string {
   path = resolve(path);
   const info = statSync(path);
   if (!info.isFile()) throw new Error(`native compiler input is not a file: ${path}`);
-  return JSON.stringify({ path, canonical: realpathSync(path), dev: info.dev, ino: info.ino,
-    size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs });
+  return JSON.stringify({
+    path,
+    canonical: realpathSync(path),
+    dev: info.dev,
+    ino: info.ino,
+    size: info.size,
+    mtime: info.mtimeMs,
+    ctime: info.ctimeMs,
+  });
 }

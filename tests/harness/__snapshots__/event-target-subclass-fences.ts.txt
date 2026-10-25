@@ -1,0 +1,27 @@
+event-target-subclass-fences.ts:5:3 - error SC1090: overriding the EventTarget member 'dispatchEvent' (the runtime owns the inherited surface) is not supported yet
+
+  4 | class Bus extends EventTarget {
+  5 |   dispatchEvent(event: Event): boolean {
+    |   ^~~~~~~~~~~~~
+  6 |     console.log("dispatching", event.type);
+
+event-target-subclass-fences.ts:12:12 - error SC1090: overriding the Event member 'type' (the runtime owns the inherited surface) is not supported yet
+
+  11 | class Ping extends Event {
+  12 |   readonly type = "ping";
+     |            ^~~~
+  13 |   constructor() {
+
+event-target-subclass-fences.ts:18:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  17 | 
+  18 | console.log(new Ping().type);
+     |             ^~~~~~~~~~
+  19 | console.log(new Bus().dispatchEvent(new Event("x")));
+
+event-target-subclass-fences.ts:19:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  18 | console.log(new Ping().type);
+  19 | console.log(new Bus().dispatchEvent(new Event("x")));
+     |             ^~~~~~~~~
+  20 | 

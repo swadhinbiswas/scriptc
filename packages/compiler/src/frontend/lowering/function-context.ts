@@ -46,8 +46,21 @@ export interface FnCtx {
    * rest param): the synthetic trailing dyn-array param `arguments`
    * reads resolve to. */
   argumentsLocal?: IrLocal | null;
+  /** The count `arguments.length` reads in a top-level function declaration
+   * that is also used as a value (argument-counts.ts). */
+  argumentCount?: IrLocal;
   /** Arrows inherit the nearest ordinary function's arguments binding. */
   inheritsArguments?: boolean;
+  /** A function lowered on demand on top of an unrelated caller's frames
+   * (a generic instance): lexical `this` resolution stops here, so the
+   * body sees what it sees when lowered alone. */
+  thisBoundary?: true;
+  /** Tuple bindings of this function that are only forwarded
+   * (typed-arguments.ts onlyForwarded): binding local id → the native
+   * slots forwarding reads. Such a binding is never materialized. Local ids
+   * are unique within one function only, and nested functions never read
+   * these bindings (a read there needs the tuple). */
+  pureTuples: Map<string, IrLocal[]>;
   /** Declared return type — lets `return` detect record-shape mismatches
    * (SC2002) before the validator would ICE on them. */
   returnType: IrType;
@@ -81,6 +94,7 @@ export function newFnCtx(
     captures: lifted ? [] : null,
     captureSources: [],
     captureBySymbol: new Map(),
+    pureTuples: new Map(),
     selfSymbol,
     selfType,
     returnType,
@@ -117,7 +131,10 @@ export function declareContextThis(ctx: FnCtx, type: IrType): IrLocal {
 }
 
 /** Look up a binding without allocating captures or boxing its source. */
-export function bindingInContext(ctx: FnCtx, symbol: ts.Symbol | "arguments" | undefined): IrLocal | null {
+export function bindingInContext(
+  ctx: FnCtx,
+  symbol: ts.Symbol | "arguments" | undefined,
+): IrLocal | null {
   if (symbol === undefined) return ctx.thisLocal;
   if (symbol === "arguments") return ctx.argumentsLocal ?? null;
   for (let i = ctx.scopes.length - 1; i >= 0; i--) {
@@ -147,22 +164,44 @@ export function captureContextBinding(
   onCapture: (parent: IrLocal, child: IrLocal) => void,
 ): ContextBindingResult {
   const current = stack[stack.length - 1];
-  if (current === undefined) throw new InternalCompilerError("lowerer bug: no active function context");
+  if (current === undefined)
+    throw new InternalCompilerError("lowerer bug: no active function context");
   const direct = bindingInContext(current, symbol);
   if (direct !== null) return { local: direct, origin: direct, error: null };
-  for (let depth = stack.length - 2; depth >= 0; depth--) {
+  let floor = 0;
+  if (symbol === undefined) {
+    for (let depth = stack.length - 1; depth >= 0; depth--) {
+      if (stack[depth]!.thisBoundary) {
+        floor = depth;
+        break;
+      }
+    }
+  }
+  for (let depth = stack.length - 2; depth >= floor; depth--) {
     const origin = bindingInContext(stack[depth]!, symbol);
     if (origin === null) continue;
-    // dyn/jsval retain their existing untraced box contract. Typed
+
     // references use the backends' box tracing for capture cycles.
     origin.boxed = true;
     let parentEntry = origin;
     for (let j = depth + 1; j < stack.length; j++) {
       const ctx = stack[j]!;
-      let entry = symbol === undefined ? ctx.thisLocal : symbol === "arguments" ? ctx.argumentsLocal : ctx.captureBySymbol.get(symbol);
+      let entry =
+        symbol === undefined
+          ? ctx.thisLocal
+          : symbol === "arguments"
+            ? ctx.argumentsLocal
+            : ctx.captureBySymbol.get(symbol);
       if (!entry) {
         if (ctx.captures === null) return { local: null, origin, error: "plain" };
-        entry = declareContextLocal(ctx, origin.name, origin.type, origin.mutable, undefined, origin.source);
+        entry = declareContextLocal(
+          ctx,
+          origin.name,
+          origin.type,
+          origin.mutable,
+          undefined,
+          origin.source,
+        );
         entry.boxed = true;
         if (origin.tdz) entry.tdz = true;
         if (symbol === undefined) ctx.thisLocal = entry;

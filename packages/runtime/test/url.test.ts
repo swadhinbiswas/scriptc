@@ -13,10 +13,15 @@ const bin = join(testDir, "build", "test_url");
 beforeAll(async () => {
   await mkdir(join(testDir, "build"), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-O1", "-Wall", "-Wextra",
-    "-fsanitize=address", "-DSCR_RC_AUDIT",
+    "-std=c11",
+    "-O1",
+    "-Wall",
+    "-Wextra",
+    "-fsanitize=address",
+    "-DSCR_RC_AUDIT",
     ...(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []),
-    "-o", bin,
+    "-o",
+    bin,
     join(testDir, "test_url.c"),
     join(testDir, "../src/scr_url.c"),
     join(testDir, "../src/scr_url_params.c"),
@@ -27,13 +32,19 @@ beforeAll(async () => {
     // Checked-value collection equality shares the native JSON value runtime.
     join(testDir, "../src/scr_json.c"),
     join(testDir, "../src/scr_map.c"),
+    join(testDir, "../src/scr_union.c"),
     join(testDir, "../src/scr_bigint.c"),
     join(testDir, "../src/scr_closure.c"),
     join(testDir, "../src/scr_bytes.c"),
+    join(testDir, "../src/scr_shared.c"),
+    join(testDir, "../src/scr_lib.c"),
+    join(testDir, "../src/scr_hash.c"),
+    join(testDir, "../src/scr_console.c"),
     join(testDir, "../src/scr_error.c"),
     join(testDir, "../src/scr_exception.c"),
     join(testDir, "../src/scr_object.c"),
     join(testDir, "../src/scr_cycle.c"),
+    join(testDir, "../src/scr_alloc.c"),
     ...(process.platform === "linux" ? ["-lm"] : []),
   ]);
 });
@@ -55,7 +66,9 @@ const LINUX_PLATFORM_MESSAGE_CASES: ReadonlyMap<string, string> = new Map([
   [
     // u2p-posix("file://host/a")
     "u2p-posix(66696c653a2f2f686f73742f61)",
-    Buffer.from('ERR:TypeError: File URL host must be "localhost" or empty on linux').toString("hex"),
+    Buffer.from('ERR:TypeError: File URL host must be "localhost" or empty on linux').toString(
+      "hex",
+    ),
   ],
 ]);
 

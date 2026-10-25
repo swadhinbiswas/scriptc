@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/next-tick-commonjs-entry.cjs"
+ ],
+ "diags": []
+}

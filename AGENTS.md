@@ -4,9 +4,11 @@ This is the only agent guide for the repository. Its rules apply everywhere, inc
 
 ## Markdown style
 
-Write prose paragraphs and list items as single source lines and let editors and renderers wrap them naturally. Do not hard-wrap Markdown at a fixed column; preserve separate lines only where Markdown syntax or intentional formatting requires them, such as headings, lists, tables, blockquotes, and code blocks.
+Write prose paragraphs and list items as single source lines and let editors and renderers wrap them naturally. Do not hard-wrap Markdown at a fixed column; preserve separate lines only where Markdown syntax or intentional formatting requires them, such as headings, lists, tables, blockquotes, and code blocks. The Limitations page partials under `docs/content/limitations/` are the exception: they keep one sentence per line (see Limitations page partials).
 
 ## Build and test
+
+Use `pnpm lint` and `pnpm format:check` for owned JS/TS; apply formatting with `pnpm format` and review any `pnpm lint:fix` changes. Preserve the exclusions in `.oxlintrc.jsonc` and `.oxfmtrc.jsonc`: program fixtures and deliberately invalid or formatting-sensitive inputs, generated outputs, vendor sources, and the standalone docs workspace are not part of the root tooling scope. Do not reformat embedded source strings or sort imports. Keep lint exceptions narrowly scoped and explain their semantic purpose. Compiler frontend/backend imports and the explicit TypeScript parser islands are enforced by oxlint.
 
 ```bash
 pnpm install && pnpm -r build   # build the workspace
@@ -44,6 +46,16 @@ SCRIPTC_TEST_WORKERS=4 SCRIPTC_SAN=1 pnpm test  # sanitized lane
 
 Corpus programs are differential tests against Node: every program runs under Node and as a compiled native binary, and stdout, stderr, and exit codes must match byte-for-byte. A new feature lands with corpus programs that pin its behavior both ways.
 
+Record a new or remeasured program's CI cost (used to balance the test shards) in `tests/harness/corpus-costs/<program>.json`, not in `tests/harness/corpus-costs.json`; see the README there.
+
+Before opening a PR that adds or changes corpus, diagnostic, or frontend fixtures, run `pnpm test:ts7 --baselines-only`. This fast completeness check uses the same fixture discovery as the parity suite; it does not type-check or replace behavioral parity. Generate missing preflight/order baselines, review their diagnostics and module order, and run the affected `order-parity.test.ts` batches before pushing. Keep existing baseline entries unchanged unless the corresponding behavior intentionally changes. The full `pnpm test:ts7` command also checks completeness before starting its sweep.
+
+A change that must not cost good code anything, such as a compatibility fix that replaces a refusal, proves it with the zero-cost gate. The gate compiles the benchmark workloads, the self-hosted compiler, and the TypeScript corpus with two built checkouts. It requires byte-identical IR, LLVM, and release executables, and compile time within tolerance. `--allow=<regex>` names the change's pattern signature: programs whose sources match may differ, and the PR lists them. Any other difference fails the gate, which names the first differing function. The gate also enforces the two-tier runtime separation: no executable may gain symbols from `DYNAMIC_TIER_PREFIXES` in `scripts/zero-cost-compare.mjs`, and fully typed benchmarks may link none; extend that list as dynamic-tier units land. `--quick` checks only the benchmarks; `--cachegrind` adds per-function instruction counts for executables that differ. Run it in a Sandbox with both checkouts prepared:
+
+```bash
+node scripts/zero-cost-gate.mjs --baseline=/vercel/sandbox/prev --candidate=. --allow='\barguments\b'
+```
+
 Test location follows scope:
 
 - Co-locate white-box unit tests with implementation files under
@@ -74,16 +86,15 @@ The Node.js compatibility system is an implementation inventory and planning too
 - Node's official documentation defines the public API hierarchy and stability metadata. Consult Node source when the docs do not fully specify behavior.
 - Running the pinned Node release is the behavior oracle for differential tests.
 - Compiler source and `packages/compiler/surface-manifest.json`, augmented by `internal/compatibility/static-support.json`, define static-native support.
-- `internal/compatibility/dynamic-support.json` defines dynamic-island modules, exports, members, explicit stubs, globals, and policies. It also generates the runtime builtin registry.
 - Test evidence determines positive behavioral claims. Source manifests alone do not prove Node-compatible behavior.
 
-Treat static-native and dynamic-island compatibility independently. Support in one tier says nothing about the other, and `--dynamic` does not turn an unsupported typed call into a supported static call.
+Compatibility describes native compilation. There is no runtime JavaScript engine tier.
 
 ### Status contract
 
 - `supported` — broadly implemented. This requires test evidence.
 - `partial` — a useful implemented subset. This requires test evidence, but evidence may cover an API family rather than every documented overload.
-- `refused` — a named compiler diagnostic or explicit dynamic throwing or rejecting stub exists. Never infer this status from absence.
+- `refused` — a named compiler diagnostic exists. Never infer this status from absence.
 - `not-implemented` — no implementation claim. Its verification basis decides whether it is ready to implement or must first be investigated.
 - `by-design` — intentionally outside a scriptc execution model. This requires an explicit implementation-owned architectural policy.
 - `unreviewed` — no compatibility subsystem owns a reliable classification. Do not treat this as unsupported or as an implementation ticket.
@@ -103,7 +114,7 @@ Read a row's verification basis before acting:
 - `architectural-policy` — explicit intentional exclusion.
 - `unreviewed`, `not-applicable`, and `derived` retain the meanings above.
 
-`pnpm node-compat:backlog` emits tier-specific work. Its actions are:
+`pnpm node-compat:backlog` emits native compilation work. Its actions are:
 
 - `verify-gap` — investigate a registry gap first; this is not yet an implementation ticket.
 - `implement` — implement a declared or verified gap.
@@ -120,7 +131,7 @@ Useful queue filters compose:
 ```bash
 pnpm node-compat:backlog --action=implement --priority=high
 pnpm node-compat:backlog --action=verify-gap --chapter=assert
-pnpm node-compat:backlog --tier=dynamic --format=tsv
+pnpm node-compat:backlog --tier=static --format=tsv
 ```
 
 ### Generated files
@@ -129,14 +140,13 @@ Never hand-edit these files:
 
 - `packages/compiler/surface-manifest.json`
 - `internal/compatibility/generated/node-v24-internal.json`
-- `internal/compatibility/generated/node-v24-backlog.json`
 - `docs/src/generated/node-v24-compatibility.json`
-- `docs/src/generated/node-v24-compatibility-meta.json`
-- `packages/runtime/src/scr_island_manifest.h`
 
-Change compiler decision sources or the implementation-owned compatibility manifests, then regenerate. Use `pnpm manifest` when compiler decision tables change and `pnpm node-compat` whenever the Node pin, compatibility manifests, compiler surface manifest, or dynamic registry changes.
+Change compiler decision sources or the implementation-owned compatibility manifests, then regenerate. Use `pnpm manifest` when compiler decision tables change and `pnpm node-compat` whenever the Node pin, compatibility manifests, compiler surface manifest, changes. `pnpm node-compat --local` reclassifies the committed ledger without fetching Node's docs; it writes the same files as `pnpm node-compat` while the Node pin is unchanged.
 
-The public docs artifact must not expose repository test paths, internal source identifiers, engineering evidence bookkeeping, documentation/metadata headings, command-line or configuration-only entries, or rows that are N/A in both tiers. Those remain in the complete internal census under `internal/compatibility/generated/`.
+Never resolve a merge conflict in these files by hand. Resolve the source conflicts, then run `node scripts/regen-generated.mjs`: it takes the merged-in branch's version of each conflicted generated file, regenerates all of them from the merged sources, and stages the ones that conflicted.
+
+The public docs artifact must not expose repository test paths, internal source identifiers, engineering evidence bookkeeping, documentation/metadata headings, command-line or configuration-only entries, or rows that are N/A in the native tier. Those remain in the complete internal census under `internal/compatibility/generated/`.
 
 ### Landing compatibility work
 
@@ -144,12 +154,12 @@ For each API family:
 
 1. Start from the backlog action and verification basis. Verify every `registry-gap` before assuming code is missing.
 2. Read the pinned Node documentation, stability metadata, relevant Node source when needed, and existing scriptc implementation paths.
-3. Decide static-native and dynamic-island scope separately.
+3. Define the native compilation scope.
 4. Implement the smallest coherent behavior family. Preserve explicit refusals for unimplemented forms rather than silently diverging.
-5. Add differential evidence that executes under Node and as a compiled binary. Cover stdout, stderr, exit status, success behavior, and important error shapes. Dynamic-island work needs island-executed differential fixtures; a load-only export check does not prove behavior.
+5. Add differential evidence that executes under Node and as a compiled binary. Cover stdout, stderr, exit status, success behavior, and important error shapes. A load-only export check does not prove behavior.
 6. Update the implementation-owned source or manifest. Positive `supported` and `partial` mappings must name existing test evidence.
 7. Run `pnpm manifest` if compiler surface tables changed, then run `pnpm node-compat`. Never patch generated JSON or headers.
-8. Inspect the internal ledger, public artifact, and backlog diff. Confirm the intended API family changed and unrelated rows did not.
+8. Inspect the internal ledger and public artifact diff, and compare `pnpm node-compat:backlog` output before and after. Confirm the intended API family changed and unrelated rows did not.
 9. Run focused tests, `pnpm node-compat:check`, and the full validation gate required for the change. If docs output changed, also run the docs gate.
 
 Compatibility commands:
@@ -180,12 +190,26 @@ The docs site is a standalone pnpm workspace under `docs/`. It uses Next.js App 
 - Use `diff` fences for additions and removals.
 - Use HTML `<dl>/<dt>/<dd>` for flag and subcommand references.
 
+### Limitations page partials
+
+`docs/content/docs/limitations.mdx` holds only the frontmatter, the headings, the anchor spans, and one `<include>` line per partial. The text lives in `docs/content/limitations/`:
+
+- A labeled bullet (`- **Crypto:** ...`) is `docs/content/limitations/<section>/<label>.mdx`, for example `builtin-apis/crypto.mdx`. Edit that file to change the bullet.
+- The other text of a section (paragraphs, code blocks, unlabeled lists) is `docs/content/limitations/<section>.mdx`; text before the first heading is `introduction.mdx`.
+- `<section>` and `<label>` are the heading and label text in lowercase with each run of other characters replaced by `-`.
+- Write one sentence per line; a bullet's continuation lines are indented two spaces. Markdown joins the lines, and edits to different sentences don't conflict. `pnpm lint` fails on a line that holds two sentences, and `node docs/scripts/limitations-partials.mjs fix` splits such lines.
+- To add a bullet, add its file and an include line at its position in `limitations.mdx`, with a blank line on each side. Consecutive bullet includes render as one list.
+- To add a section, add the heading to `limitations.mdx` and include the section's partial below it.
+
+`node scripts/limitations-partials.mjs join` (from `docs/`) prints the page with its partials inlined. For a branch that still edits the single-file page, run `node scripts/limitations-partials.mjs merge <base> <theirs>`, where `<theirs>` is the branch's `limitations.mdx` and `<base>` is that file at the branch's merge base. It merges the branch's changes into the partials, or writes `docs/limitations.merged.mdx` with conflict markers to resolve and pass to `split`.
+
 ### Adding a docs page
 
 1. Add `docs/content/docs/<topic>.mdx` with a `title` in YAML frontmatter. Geistdocs renders the page title, so do not duplicate it as a Markdown H1. `index.mdx` is served at `/docs`; other pages are served at `/docs/<topic>`.
 2. Add the topic to `docs/content/docs/meta.json` to set sidebar order and groups.
 3. Add the slug to `PAGE_TITLES` in `docs/src/lib/page-titles.ts` for the existing social image routes.
-4. Keep internal links on the canonical `/docs` paths. Redirect retired public URLs in `docs/next.config.mjs`.
+4. Add the page's href, title, and heading anchors to `docs/test/fixtures/migration-baseline.json` so the route tests cover it; pages added after the migration have no `legacy` URL.
+5. Keep internal links on the canonical `/docs` paths. Redirect retired public URLs in `docs/next.config.mjs`.
 
 ### Docs development and verification
 

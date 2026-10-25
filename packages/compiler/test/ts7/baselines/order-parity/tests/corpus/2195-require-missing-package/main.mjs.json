@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2195-require-missing-package/lib.cjs",
+  "<repo>/tests/corpus/2195-require-missing-package/main.mjs"
+ ],
+ "diags": []
+}

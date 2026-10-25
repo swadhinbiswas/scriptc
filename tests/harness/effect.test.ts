@@ -8,9 +8,21 @@ import fixtureCosts from "./effect-costs.json";
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 const fixtures = globSync(join(import.meta.dirname, "../fixtures/effect/*.ts")).sort();
 const costs: Record<string, number> = fixtureCosts;
-const cases = balancedShardSelect(fixtures, (file) => basename(file), (file) => costs[basename(file)] ?? 120);
+const cases = balancedShardSelect(
+  fixtures,
+  (file) => basename(file),
+  (file) => costs[basename(file)] ?? 120,
+);
 const concurrent = process.env["SCRIPTC_EFFECT_TEST_CONCURRENCY"] === "2";
 
-test.for(cases)("published Effect %s matches Node statically", { concurrent, timeout: 600_000 }, async (entry) => {
-  await checkEffectFixture(entry, ["effect", "fast-check", "pure-rand"], sanitize ? "dev" : "release");
-});
+test.for(cases)(
+  "published Effect %s matches Node statically",
+  { concurrent, timeout: 600_000 },
+  async (entry) => {
+    await checkEffectFixture(
+      entry,
+      ["effect", "fast-check", "pure-rand"],
+      sanitize ? "dev" : "release",
+    );
+  },
+);

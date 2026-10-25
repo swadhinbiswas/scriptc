@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5921-promise-try-args-js.js"
+ ],
+ "diags": []
+}

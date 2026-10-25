@@ -1,5 +1,5 @@
 /* Format-aware symbol localization for multi-instance library mode
- * (abi.localize_runtime) — the in-process half of native-toolchain.ts's
+ * (abi.localize_runtime) — the in-process half of native/object-merge.ts's
  * localizeLibraryObjects. Host toolchains cover the classic pairings
  * (darwin's ld64 does combine+demote in one step; host-linux binutils runs
  * `ld -r` + objcopy), but no portable toolchain performs the COFF
@@ -196,7 +196,8 @@ export function localizeElfObject(object: Uint8Array, keep: ReadonlySet<string>)
   const sectionMap: number[] = [];
   {
     let next = 0;
-    for (let i = 0; i < sections.length; i++) sectionMap.push(sectionKept[i] === true ? next++ : -1);
+    for (let i = 0; i < sections.length; i++)
+      sectionMap.push(sectionKept[i] === true ? next++ : -1);
   }
   for (let i = 0; i < sections.length; i++) {
     if (sectionKept[i] === true) {
@@ -227,7 +228,7 @@ export function localizeElfObject(object: Uint8Array, keep: ReadonlySet<string>)
   const globalOrder: number[] = [];
   for (let i = 0; i < symCount; i++) {
     if (symbolKept[i] !== true) continue;
-    ((symbols[i]!.info >> 4) === STB_LOCAL ? localOrder : globalOrder).push(i);
+    (symbols[i]!.info >> 4 === STB_LOCAL ? localOrder : globalOrder).push(i);
   }
   const symbolOrder = [...localOrder, ...globalOrder];
   const symbolMap: number[] = new Array<number>(symCount).fill(-1);
@@ -317,11 +318,11 @@ export function localizeElfObject(object: Uint8Array, keep: ReadonlySet<string>)
       section.type === SHT_NOBITS ? section.size : BigInt(section.data.length),
       true,
     );
-    outView.setUint32(at + 40, section.link === 0 ? 0 : sectionMap[section.link] ?? 0, true);
+    outView.setUint32(at + 40, section.link === 0 ? 0 : (sectionMap[section.link] ?? 0), true);
     outView.setUint32(
       at + 44,
       section.type === SHT_RELA || section.type === SHT_REL
-        ? sectionMap[section.info] ?? 0
+        ? (sectionMap[section.info] ?? 0)
         : section === symtab
           ? symtab.info
           : section.info,
@@ -466,7 +467,7 @@ function parseCoff(object: Uint8Array, label: string): CoffObject {
   const symbols: CoffSymbol[] = [];
   const primaryByRaw = new Map<number, number>();
   const rawByPrimary: number[] = [];
-  for (let i = 0; i < symbolCount; ) {
+  for (let i = 0; i < symbolCount;) {
     const at = symtabOffset + i * 18;
     const nameIsLong = view.getUint32(at, true) === 0;
     const name = nameIsLong
@@ -500,7 +501,12 @@ function parseCoff(object: Uint8Array, label: string): CoffObject {
     for (let primary = 0; primary < symbols.length; primary++) {
       const sym = symbols[primary]!;
       if (sym.sectionNumber !== sectionIndex) continue;
-      if (!sawSectionSymbol && sym.value === 0 && sym.name === section.name && sym.aux.length >= 18) {
+      if (
+        !sawSectionSymbol &&
+        sym.value === 0 &&
+        sym.name === section.name &&
+        sym.aux.length >= 18
+      ) {
         sawSectionSymbol = true;
         const auxView = new DataView(sym.aux.buffer, sym.aux.byteOffset, sym.aux.byteLength);
         section.comdatSelection = auxView.getUint8(14);
@@ -655,7 +661,9 @@ export function mergeAndLocalizeCoffObjects(
         section.comdatSelection !== IMAGE_COMDAT_SELECT_EXACT_MATCH &&
         section.comdatSelection !== IMAGE_COMDAT_SELECT_LARGEST
       ) {
-        fail(`${object.label}: COMDAT section ${section.name} has unsupported selection ${section.comdatSelection}`);
+        fail(
+          `${object.label}: COMDAT section ${section.name} has unsupported selection ${section.comdatSelection}`,
+        );
       }
       const leader = section.comdatLeader >= 0 ? object.symbols[section.comdatLeader] : undefined;
       // Function-section builds also mark private code and unwind tables
@@ -679,7 +687,9 @@ export function mergeAndLocalizeCoffObjects(
         );
       }
       if (section.comdatSelection === IMAGE_COMDAT_SELECT_NODUPLICATES) {
-        fail(`duplicate IMAGE_COMDAT_SELECT_NODUPLICATES section ${section.name} (${existing.object.label} and ${object.label})`);
+        fail(
+          `duplicate IMAGE_COMDAT_SELECT_NODUPLICATES section ${section.name} (${existing.object.label} and ${object.label})`,
+        );
       }
       if (
         section.comdatSelection === IMAGE_COMDAT_SELECT_SAME_SIZE &&
@@ -716,7 +726,8 @@ export function mergeAndLocalizeCoffObjects(
   for (const object of selected) {
     const dropped = sectionDropped.get(object)!;
     object.sections.forEach((section, i) => {
-      if (dropped[i] === true || section.comdatSelection !== IMAGE_COMDAT_SELECT_ASSOCIATIVE) return;
+      if (dropped[i] === true || section.comdatSelection !== IMAGE_COMDAT_SELECT_ASSOCIATIVE)
+        return;
       const seen = new Set<number>([i]);
       let target = section.comdatAssoc - 1;
       while (true) {
@@ -839,11 +850,10 @@ export function mergeAndLocalizeCoffObjects(
     object.symbols.forEach((sym, primaryIndex) => {
       const rawOld = object.rawByPrimary[primaryIndex]!;
       const mapSection = (): number =>
-        sym.sectionNumber > 0 ? sectionMap[sym.sectionNumber] ?? 0 : sym.sectionNumber;
+        sym.sectionNumber > 0 ? (sectionMap[sym.sectionNumber] ?? 0) : sym.sectionNumber;
       if (sym.storageClass === IMAGE_SYM_CLASS_EXTERNAL) {
         const inDroppedSection =
-          sym.sectionNumber > 0 &&
-          sectionDropped.get(object)![sym.sectionNumber - 1] === true;
+          sym.sectionNumber > 0 && sectionDropped.get(object)![sym.sectionNumber - 1] === true;
         const entry = canonical.get(sym.name)!;
         if (entry.outIndex >= 0) {
           // Later appearance of a known external: reference the canonical
@@ -873,12 +883,14 @@ export function mergeAndLocalizeCoffObjects(
           entry.kind === "defined" && coffDefines(sym) && !coffIsCommon(sym)
             ? mapSection()
             : IMAGE_SYM_UNDEFINED;
-        const value = entry.kind === "common" ? entry.commonSize : entry.kind === "defined" && !coffIsCommon(sym) ? sym.value : 0;
+        const value =
+          entry.kind === "common"
+            ? entry.commonSize
+            : entry.kind === "defined" && !coffIsCommon(sym)
+              ? sym.value
+              : 0;
         const demote =
-          entry.kind === "defined" &&
-          coffDefines(sym) &&
-          !coffIsCommon(sym) &&
-          !keep.has(sym.name);
+          entry.kind === "defined" && coffDefines(sym) && !coffIsCommon(sym) && !keep.has(sym.name);
         entry.outIndex = rawOut;
         entry.outSlot = outSymbols.length;
         outSymbols.push({
@@ -1055,13 +1067,14 @@ export function mergeAndLocalizeCoffObjects(
         const auxView = new DataView(aux.buffer);
         const assoc = auxView.getUint16(12, true);
         const sectionMap = sectionMaps.get(out.object)!;
-        auxView.setUint16(12, assoc > 0 ? sectionMap[assoc] ?? 0 : 0, true);
+        auxView.setUint16(12, assoc > 0 ? (sectionMap[assoc] ?? 0) : 0, true);
         auxView.setUint8(14, 0); // COMDAT selection cleared with the flag
       } else if (out.storageClass === IMAGE_SYM_CLASS_WEAK_EXTERNAL && aux.length >= 18) {
         const auxView = new DataView(aux.buffer);
         const tag = auxView.getUint32(0, true);
         const mapped = symbolMaps.get(out.object)!.get(tag);
-        if (mapped === undefined) fail(`${out.object.label}: weak external tag is not a primary symbol`);
+        if (mapped === undefined)
+          fail(`${out.object.label}: weak external tag is not a primary symbol`);
         auxView.setUint32(0, mapped, true);
       }
       symtabBytes.set(aux, at + 18);

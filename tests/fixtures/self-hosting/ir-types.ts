@@ -32,7 +32,7 @@ const types: IrType[] = [
   { kind: "func", params: [F64, STRING], ret: F64 },
   { kind: "func", params: [F64], ret: BOOL },
   { kind: "func", params: [F64], ret: BOOL, rest: true, restAbi: "typed" },
-  { kind: "func", params: [F64], ret: BOOL, rest: true, restAbi: "jsval" },
+  { kind: "func", params: [STRING], ret: BOOL, rest: true, restAbi: "typed" },
   { kind: "func", params: [F64], ret: BOOL, rest: true, argumentsAll: true },
   { kind: "generator", yieldT: STRING, retT: VOID, nextT: F64 },
   { kind: "generator", yieldT: STRING, retT: VOID, nextT: F64, async: true },
@@ -109,7 +109,7 @@ console.log("check graph", canDynCheckTo(shared, getShape, getUnion), lookups < 
 
 shapes.set("parent", { id: "parent", fields: [
   { name: "child", type: { kind: "record", shapeId: "child" } },
-  { name: "unsupported", type: { kind: "jsval" } },
+  { name: "unsupported", type: { kind: "caught" } },
 ] });
 shapes.set("child", { id: "child", fields: [
   { name: "parent", type: { kind: "record", shapeId: "parent" } },

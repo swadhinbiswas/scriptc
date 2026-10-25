@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-numeric-own-keys.ts"
+ ],
+ "diags": []
+}

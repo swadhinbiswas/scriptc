@@ -1,0 +1,26 @@
+contract-int32-escapes.ts:6:20 - error SC7003: the Int32 contract on 'x' cannot be checked: 'double' is used as a value (callback, class value or export), so its callers are not all visible
+
+  5 | 
+  6 | function double(x: Int32): Int32 {
+    |                    ^~~~~
+  7 |   return (x * 2) | 0;
+
+  hint: wrap it in a function that takes a number and passes `x | 0`
+
+contract-int32-escapes.ts:11:9 - error SC7003: the Int32 contract on 'Box.size' cannot be checked: instances of the class reach dynamic code (any or unknown casts) where a store to the field is not checked
+
+  10 | class Box {
+  11 |   size: Int32 = 0;
+     |         ^~~~~
+  12 | }
+
+  hint: keep instances of this class out of any-typed values, or remove Int32
+
+contract-int32-escapes.ts:16:1 - error SC7002: the value stored into 'Box.size' (Int32) is not provably an int32: 'loose.size = 0.5'
+
+  15 | const loose: any = box;
+  16 | loose.size = 0.5;
+     | ^~~~~~~~~~~~~~~~
+  17 | const pick: (x: number) => number = double;
+
+  hint: make the int32 conversion explicit, for example 'loose.size = 0.5 | 0', so Node computes the same value

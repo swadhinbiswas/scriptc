@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4061-cycle-evaluation-order/south.ts",
+  "<repo>/tests/corpus/4061-cycle-evaluation-order/east.ts",
+  "<repo>/tests/corpus/4061-cycle-evaluation-order/north.ts",
+  "<repo>/tests/corpus/4061-cycle-evaluation-order/main.ts"
+ ],
+ "diags": []
+}

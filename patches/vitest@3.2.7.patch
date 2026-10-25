@@ -1,0 +1,15 @@
+diff --git a/dist/chunks/rpc.-pEldfrD.js b/dist/chunks/rpc.-pEldfrD.js
+index a48eb0174a4fbc508a36c46ff78b0f9bf7ba6295..73d5b3c7083503397398dd7e11d85567b9ed7d1b 100644
+--- a/dist/chunks/rpc.-pEldfrD.js
++++ b/dist/chunks/rpc.-pEldfrD.js
+@@ -45,6 +45,10 @@ function createRuntimeRpc(options) {
+ 			"onCollected",
+ 			"onCancel"
+ 		],
++		// scriptc: a test that blocks the worker synchronously (spawnSync of a compiler or binary) for more than the
++		// birpc default of 60 s made the pending onTaskUpdate time out on resume, because timers run before the
++		// queued reply is read. 10 minutes is twice the suite's test and hook timeouts.
++		timeout: 600_000,
+ 		onTimeoutError(functionName, args) {
+ 			let message = `[vitest-worker]: Timeout calling "${functionName}"`;
+ 			if (functionName === "fetch" || functionName === "transform" || functionName === "resolveId") message += ` with "${JSON.stringify(args)}"`;

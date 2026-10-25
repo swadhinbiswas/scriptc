@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5334-fetch-mentions-without-calls.ts"
+ ],
+ "diags": []
+}

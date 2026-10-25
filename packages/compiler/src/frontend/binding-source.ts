@@ -9,9 +9,17 @@ export function bindingSource(name: ts.Node): IrBindingSource {
     if (ts.isVariableDeclarationList(node)) {
       functionScoped = (node.flags & ts.NodeFlags.BlockScoped) === 0;
     }
-    if (ts.isFunctionLike(node) || ts.isSourceFile(node) ||
-      (!functionScoped && (ts.isBlock(node) || ts.isCaseBlock(node) ||
-        ts.isForStatement(node) || ts.isForOfStatement(node) || ts.isForInStatement(node) || ts.isCatchClause(node)))) {
+    if (
+      ts.isFunctionLike(node) ||
+      ts.isSourceFile(node) ||
+      (!functionScoped &&
+        (ts.isBlock(node) ||
+          ts.isCaseBlock(node) ||
+          ts.isForStatement(node) ||
+          ts.isForOfStatement(node) ||
+          ts.isForInStatement(node) ||
+          ts.isCatchClause(node)))
+    ) {
       return { loc: locOf(name), scope: locOf(node) };
     }
   }

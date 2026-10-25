@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/node24-esm-metadata/child with ü.mjs",
+  "<repo>/tests/corpus/node24-esm-metadata/main.mjs"
+ ],
+ "diags": []
+}

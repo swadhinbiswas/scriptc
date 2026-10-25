@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/500-array-basics.ts"
+ ],
+ "diags": []
+}

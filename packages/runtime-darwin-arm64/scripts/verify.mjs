@@ -8,12 +8,20 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const manifest = JSON.parse(await readFile(join(root, "runtime-pack.json"), "utf8"));
 const packageManifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 if (
-  manifest.schema !== "scriptc.runtime-pack.v1" || manifest.format !== 1 ||
-  manifest.package !== packageManifest.name || manifest.version !== packageManifest.version
-) throw new Error("runtime pack identity does not match package.json");
+  manifest.schema !== "scriptc.runtime-pack.v1" ||
+  manifest.format !== 1 ||
+  manifest.package !== packageManifest.name ||
+  manifest.version !== packageManifest.version
+)
+  throw new Error("runtime pack identity does not match package.json");
 const artifacts = [
   ...Object.values(manifest.flavors).flatMap((flavor) =>
-    flavor.runtime_units.flatMap((unit) => unit.variants)),
+    flavor.runtime_units.flatMap((unit) =>
+      unit.variants.flatMap((variant) =>
+        variant.bitcode ? [variant, variant.bitcode] : [variant],
+      ),
+    ),
+  ),
   ...manifest.archives,
 ];
 
@@ -39,12 +47,16 @@ for (const artifact of artifacts) {
   if (bytes.length !== artifact.size || digest !== artifact.sha256) {
     throw new Error(`runtime pack hash mismatch: ${artifact.path}`);
   }
-  const checkoutPath = printableStrings(bytes).find((value) =>
-    value.startsWith("/") && value.includes("/packages/runtime/")
+  const checkoutPath = printableStrings(bytes).find(
+    (value) => value.startsWith("/") && value.includes("/packages/runtime/"),
   );
   if (checkoutPath !== undefined) {
-    throw new Error(`runtime pack contains an absolute source path in ${artifact.path}: ${checkoutPath}`);
+    throw new Error(
+      `runtime pack contains an absolute source path in ${artifact.path}: ${checkoutPath}`,
+    );
   }
 }
 for (const license of manifest.licenses) await access(join(root, license.path));
-process.stdout.write(`verified ${manifest.package}@${manifest.version}: ${artifacts.length} artifacts\n`);
+process.stdout.write(
+  `verified ${manifest.package}@${manifest.version}: ${artifacts.length} artifacts\n`,
+);

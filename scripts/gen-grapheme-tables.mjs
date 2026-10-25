@@ -8,28 +8,56 @@ import { join } from "node:path";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const inputs = [
-  ["auxiliary/GraphemeBreakProperty.txt", "d6b51d1d2ae5c33b451b7ed994b48f1f4dc62b2272a5831e7fd418514a6bae89"],
+  [
+    "auxiliary/GraphemeBreakProperty.txt",
+    "d6b51d1d2ae5c33b451b7ed994b48f1f4dc62b2272a5831e7fd418514a6bae89",
+  ],
   ["DerivedCoreProperties.txt", "24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08"],
   ["emoji/emoji-data.txt", "2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b"],
-  ["auxiliary/GraphemeBreakTest.txt", "e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec"],
+  [
+    "auxiliary/GraphemeBreakTest.txt",
+    "e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec",
+  ],
 ];
-const files = await Promise.all(inputs.map(async ([path, hash]) => {
-  const bytes = process.argv[2]
-    ? await readFile(join(process.argv[2], path.split("/").at(-1)))
-    : await (async () => {
-        const response = await fetch(`https://www.unicode.org/Public/17.0.0/ucd/${path}`);
-        if (!response.ok) throw new Error(`${path}: ${response.status}`);
-        return Buffer.from(await response.arrayBuffer());
-      })();
-  if (createHash("sha256").update(bytes).digest("hex") !== hash) throw new Error(`${path}: checksum mismatch`);
-  return bytes.toString("utf8");
-}));
+const files = await Promise.all(
+  inputs.map(async ([path, hash]) => {
+    const bytes = process.argv[2]
+      ? await readFile(join(process.argv[2], path.split("/").at(-1)))
+      : await (async () => {
+          const response = await fetch(`https://www.unicode.org/Public/17.0.0/ucd/${path}`);
+          if (!response.ok) throw new Error(`${path}: ${response.status}`);
+          return Buffer.from(await response.arrayBuffer());
+        })();
+    if (createHash("sha256").update(bytes).digest("hex") !== hash)
+      throw new Error(`${path}: checksum mismatch`);
+    return bytes.toString("utf8");
+  }),
+);
 
-const names = ["Other", "CR", "LF", "Control", "Extend", "ZWJ", "Regional_Indicator", "Prepend", "SpacingMark", "L", "V", "T", "LV", "LVT"];
+const names = [
+  "Other",
+  "CR",
+  "LF",
+  "Control",
+  "Extend",
+  "ZWJ",
+  "Regional_Indicator",
+  "Prepend",
+  "SpacingMark",
+  "L",
+  "V",
+  "T",
+  "LV",
+  "LVT",
+];
 const data = new Uint8Array(0x110000);
 function properties(text, select) {
   for (const line of text.split("\n")) {
-    const fields = line.split("#")[0].trim().split(";").map((x) => x.trim());
+    const fields = line
+      .split("#")[0]
+      .trim()
+      .split(";")
+      .map((x) => x.trim());
     if (fields.length < 2) continue;
     const value = select(fields);
     if (!value) continue;
@@ -38,15 +66,18 @@ function properties(text, select) {
   }
 }
 properties(files[0], ([, value]) => names.indexOf(value));
-properties(files[1], ([, property, value]) => property === "InCB" ? ["None", "Consonant", "Extend", "Linker"].indexOf(value) << 4 : 0);
-properties(files[2], ([, property]) => property === "Extended_Pictographic" ? 64 : 0);
+properties(files[1], ([, property, value]) =>
+  property === "InCB" ? ["None", "Consonant", "Extend", "Linker"].indexOf(value) << 4 : 0,
+);
+properties(files[2], ([, property]) => (property === "Extended_Pictographic" ? 64 : 0));
 // Hangul syllables have an algorithmic LV/LVT classification.
 data.fill(0, 0xac00, 0xd7a4);
 const rows = [];
 for (let start = 0; start < data.length;) {
   let end = start + 1;
   while (end < data.length && data[end] === data[start]) end++;
-  if (data[start]) rows.push(`  { 0x${start.toString(16)}, 0x${(end - 1).toString(16)}, ${data[start]} },`);
+  if (data[start])
+    rows.push(`  { 0x${start.toString(16)}, 0x${(end - 1).toString(16)}, ${data[start]} },`);
   start = end;
 }
 const header = [
@@ -54,7 +85,9 @@ const header = [
   " * Unicode data is licensed under vendor/unicode/LICENSE. Do not edit. */",
   "#ifndef SCR_GRAPHEME_DATA_H",
   "#define SCR_GRAPHEME_DATA_H",
-  "enum { " + names.map((name, index) => `SCR_GCB_${name.toUpperCase()} = ${index}`).join(", ") + " };",
+  "enum { " +
+    names.map((name, index) => `SCR_GCB_${name.toUpperCase()} = ${index}`).join(", ") +
+    " };",
   "typedef struct { uint32_t start, end; uint8_t properties; } ScrGraphemeRange;",
   "static const ScrGraphemeRange scr_grapheme_ranges[] = {",
   ...rows,
@@ -79,13 +112,20 @@ for (const line of files[3].split("\n")) {
 const corpusDir = join(root, "tests/corpus/intl-grapheme-conformance");
 await mkdir(corpusDir, { recursive: true });
 // Escape non-ASCII source so control characters never corrupt the fixture.
-const quote = (text) => JSON.stringify(text).replace(/[\u007f-\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
-await writeFile(join(corpusDir, "cases.ts"), [
-  "// Generated from Unicode 17.0.0 GraphemeBreakTest.txt by scripts/gen-grapheme-tables.mjs.",
-  "// Unicode data license: packages/runtime/vendor/unicode/LICENSE.",
-  "export const cases: string[][] = [",
-  ...cases.map(([input, breaks]) => `  [${quote(input)}, ${quote(breaks)}],`),
-  "];",
-  "",
-].join("\n"));
+const quote = (text) =>
+  JSON.stringify(text).replace(
+    /[\u007f-\uffff]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+await writeFile(
+  join(corpusDir, "cases.ts"),
+  [
+    "// Generated from Unicode 17.0.0 GraphemeBreakTest.txt by scripts/gen-grapheme-tables.mjs.",
+    "// Unicode data license: packages/runtime/vendor/unicode/LICENSE.",
+    "export const cases: string[][] = [",
+    ...cases.map(([input, breaks]) => `  [${quote(input)}, ${quote(breaks)}],`),
+    "];",
+    "",
+  ].join("\n"),
+);
 console.log(`wrote ${rows.length} property ranges and ${cases.length} grapheme conformance cases`);

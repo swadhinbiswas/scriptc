@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2670-uint8array-copy-iterate.ts"
+ ],
+ "diags": []
+}

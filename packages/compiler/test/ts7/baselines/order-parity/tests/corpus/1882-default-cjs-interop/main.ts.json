@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1882-default-cjs-interop/table.cjs",
+  "<repo>/tests/corpus/1882-default-cjs-interop/scalar.cjs",
+  "<repo>/tests/corpus/1882-default-cjs-interop/main.ts"
+ ],
+ "diags": []
+}

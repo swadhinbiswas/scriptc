@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-sort-dense-effects.ts"
+ ],
+ "diags": []
+}

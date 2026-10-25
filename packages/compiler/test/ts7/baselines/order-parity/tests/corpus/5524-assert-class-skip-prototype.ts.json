@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5524-assert-class-skip-prototype.ts"
+ ],
+ "diags": []
+}

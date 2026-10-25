@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2993-fiber-stack-lifetimes.ts"
+ ],
+ "diags": []
+}

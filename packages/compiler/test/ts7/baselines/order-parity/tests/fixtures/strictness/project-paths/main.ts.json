@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/strictness/project-paths/src/exact.ts",
+  "<repo>/tests/fixtures/strictness/project-paths/src/message.ts",
+  "<repo>/tests/fixtures/strictness/project-paths/main.ts"
+ ],
+ "diags": []
+}

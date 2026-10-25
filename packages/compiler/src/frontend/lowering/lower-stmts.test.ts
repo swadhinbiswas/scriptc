@@ -18,13 +18,21 @@ function context(source: string, filename = "writes.js") {
   const assignments: ts.BinaryExpression[] = [];
   ts.walkPreorder(file, (node) => {
     if (ts.isVariableDeclaration(node)) declarations.push(node);
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) assignments.push(node);
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    )
+      assignments.push(node);
   });
-  const lowerer = new Lowerer({ getTypeChecker: () => ({}) } as ts.Program, file, [], false);
+  const lowerer = new Lowerer({ getTypeChecker: () => ({}) } as ts.Program, file, []);
   const symbols = new Map<ts.Node, ts.Symbol>();
-  const resolve = vi.spyOn(lowerer, "resolveValueSymbol").mockImplementation((node) => symbols.get(node) ?? null);
-  const typeOf = vi.spyOn(lowerer, "typeOf").mockReturnValue({ flags: ts.TypeFlags.Any } as ts.Type);
+  const resolve = vi
+    .spyOn(lowerer, "resolveValueSymbol")
+    .mockImplementation((node) => symbols.get(node) ?? null);
+  const typeOf = vi
+    .spyOn(lowerer, "typeOf")
+    .mockReturnValue({ flags: ts.TypeFlags.Any } as ts.Type);
   const bind = (decl: ts.VariableDeclaration, writes: ts.BinaryExpression[]) => {
     const symbol = {} as ts.Symbol;
     symbols.set(decl.name, symbol);
@@ -36,14 +44,17 @@ function context(source: string, filename = "writes.js") {
 test("indexes a JS file once while preserving captured writes, compound assignments and shadowing", () => {
   const ctx = context(`let captured = 0; let compound = 0; let shadow = 0; let untouched = 0;
 function mutate(value) { captured = value; compound += value; let shadow = 0; shadow = value; }`);
-  const captured = at(ctx.declarations, 0), compound = at(ctx.declarations, 1), shadow = at(ctx.declarations, 2);
-  const untouched = at(ctx.declarations, 3), innerShadow = at(ctx.declarations, 4);
+  const captured = at(ctx.declarations, 0),
+    compound = at(ctx.declarations, 1),
+    shadow = at(ctx.declarations, 2);
+  const untouched = at(ctx.declarations, 3),
+    innerShadow = at(ctx.declarations, 4);
   ctx.bind(captured, [at(ctx.assignments, 0)]);
   ctx.bind(compound, [at(ctx.assignments, 1)]);
   ctx.bind(shadow, []);
   ctx.bind(untouched, []);
   ctx.bind(innerShadow, [at(ctx.assignments, 2)]);
-  const walk = vi.spyOn(ctx.file, "forEachChild");
+  const walk = vi.spyOn(ctx.file.file.wire, "preorder");
   for (let i = 0; i < 20; i++) {
     expect(jsBindingHasOpenWrites(ctx.lowerer, captured)).toBe(true);
     expect(jsBindingHasOpenWrites(ctx.lowerer, compound)).toBe(true);
@@ -56,7 +67,8 @@ function mutate(value) { captured = value; compound += value; let shadow = 0; sh
 test("keeps scope indexes separate and rechecks contextual RHS types", () => {
   const ctx = context(`function first(value) { let item = 0; return () => { item = value; }; }
 function second(value) { let item = 0; item = value; }`);
-  const first = at(ctx.declarations, 0), second = at(ctx.declarations, 1);
+  const first = at(ctx.declarations, 0),
+    second = at(ctx.declarations, 1);
   ctx.bind(first, [at(ctx.assignments, 0)]);
   ctx.bind(second, [at(ctx.assignments, 1)]);
   ctx.typeOf.mockReturnValue({ flags: ts.TypeFlags.Number } as ts.Type);
@@ -68,7 +80,10 @@ function second(value) { let item = 0; item = value; }`);
 });
 
 test("typed declarations retain their annotation without scanning or checker queries", () => {
-  for (const [source, filename] of [["let item: number = 0;", "writes.ts"], ["/** @type {number} */ let item = 0;", "writes.js"]] as const) {
+  for (const [source, filename] of [
+    ["let item: number = 0;", "writes.ts"],
+    ["/** @type {number} */ let item = 0;", "writes.js"],
+  ] as const) {
     const ctx = context(source, filename);
     expect(jsBindingHasOpenWrites(ctx.lowerer, at(ctx.declarations, 0))).toBe(false);
     expect(ctx.resolve).not.toHaveBeenCalled();

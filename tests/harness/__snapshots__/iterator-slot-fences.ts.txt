@@ -1,0 +1,6 @@
+iterator-slot-fences.ts:14:9 - error SC1090: 'Countdown' values in an iterator-typed slot (Iterator and IterableIterator slots hold generators and built-in collection iterators) is not supported yet
+
+  13 | }
+  14 | firstOf(new Countdown());
+     |         ^~~~~~~~~~~~~~~
+  15 | 

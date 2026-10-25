@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { deserializeModule } from "../../../packages/compiler/src/ir/serialize.js";
 import { analyzeIntegerRanges } from "../../../packages/compiler/src/ir/integer-ranges.js";
+import { findInitializerBindings, withInitializerBindings } from "../../../packages/compiler/src/ir/initializer-bindings.js";
 import { everyStmtList } from "../../../packages/compiler/src/ir/traverse.js";
 import { F64, type IrExpr, type IrFunction, type IrStmt } from "../../../packages/compiler/src/ir/ir.js";
 
@@ -39,5 +40,6 @@ if (process.argv[2] === "shared") {
   console.log(JSON.stringify(inspect(fn)));
 } else {
   const mod = deserializeModule(readFileSync(process.argv[2]!, "utf8"));
-  console.log(JSON.stringify(mod.functions.map((fn) => ({ name: fn.name, ranges: inspect(fn) }))));
+  const bindings = findInitializerBindings(mod);
+  console.log(JSON.stringify(mod.functions.map((fn) => ({ name: fn.name, ranges: inspect(withInitializerBindings(fn, bindings.get(fn.name) ?? [])) }))));
 }

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/963-generics-modules/util.ts",
+  "<repo>/tests/corpus/963-generics-modules/main.ts"
+ ],
+ "diags": []
+}

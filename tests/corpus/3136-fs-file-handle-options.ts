@@ -32,8 +32,13 @@ async function main(): Promise<void> {
     order = "";
     const accessorOptions = { buffer, get position() { return number("p", 0); }, get offset() { return number("o", 1); }, get length() { return number("l", 2); } };
     console.log("getter options:", (await handle.read(accessorOptions)).bytesRead, order);
-    const nothing = await handle.read({ buffer, offset: 99, length: 0, position: -2 });
+    const nothing = await handle.read({ buffer, offset: 99, length: 0, position: -1 });
     console.log("zero length:", nothing.bytesRead, nothing.buffer === buffer);
+    try {
+      await handle.read({ buffer, offset: 99, length: 0, position: -2 });
+    } catch (e) {
+      console.log("zero length position:", (e as Error).name, (e as Error).message);
+    }
   } finally { await handle.close(); fs.unlinkSync(scratch); }
 }
 main();

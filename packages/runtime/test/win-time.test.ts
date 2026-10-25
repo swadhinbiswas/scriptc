@@ -13,14 +13,19 @@ platformTest("win32 timing shims link and preserve clock contracts", async () =>
   const buildDir = join(testDir, "build");
   const bin = join(buildDir, "test_win_time.exe");
   const configuredCompiler = process.env["SCRIPTC_CC"];
-  const compiler = configuredCompiler === "zigcc" ? "zig" : configuredCompiler ?? "clang";
+  const compiler = configuredCompiler === "zigcc" ? "zig" : (configuredCompiler ?? "clang");
   const compilerArgs = configuredCompiler === "zigcc" ? ["cc"] : [];
   await mkdir(buildDir, { recursive: true });
   await execFileAsync(compiler, [
     ...compilerArgs,
-    "-std=c11", "-O2", "-Wall", "-Wextra",
-    "-I", srcDir,
-    "-o", bin,
+    "-std=c11",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-I",
+    srcDir,
+    "-o",
+    bin,
     join(testDir, "test_win_time.c"),
     join(srcDir, "scr_win.c"),
     "-ladvapi32",

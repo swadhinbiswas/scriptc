@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2407-infinite-loop-seal.ts"
+ ],
+ "diags": []
+}

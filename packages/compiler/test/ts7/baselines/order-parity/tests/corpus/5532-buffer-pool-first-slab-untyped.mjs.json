@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5532-buffer-pool-first-slab-untyped.mjs"
+ ],
+ "diags": []
+}

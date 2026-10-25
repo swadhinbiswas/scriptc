@@ -5,7 +5,11 @@ import type { Lowerer } from "./lowerer.js";
  * boxes. The arguments must be plain reads/literals: evaluating the right
  * receiver/index earlier must never mutate or invalidate the left value. */
 export function tryLowerIndexedComparison(
-  lowerer: Lowerer, left: IrExpr, right: IrExpr, negated: boolean, loc: SrcLoc,
+  lowerer: Lowerer,
+  left: IrExpr,
+  right: IrExpr,
+  negated: boolean,
+  loc: SrcLoc,
 ): IrExpr | null {
   function indexed(expr: IrExpr) {
     if (expr.kind !== "call" || expr.args.length !== 2) return null;
@@ -17,11 +21,16 @@ export function tryLowerIndexedComparison(
     if (arr.kind !== "varRef" || (index.kind !== "varRef" && index.kind !== "numLit")) return null;
     return { arr, index, elem };
   }
-  const l = indexed(left), r = indexed(right);
+  const l = indexed(left),
+    r = indexed(right);
   if (!l || !r || !typeEquals(l.elem, r.elem)) return null;
   const equal: IrExpr = {
-    kind: "arrIntrinsic", method: "indexEq", receiver: l.arr,
-    args: [l.index, r.arr, r.index], type: BOOL, loc,
+    kind: "arrIntrinsic",
+    method: "indexEq",
+    receiver: l.arr,
+    args: [l.index, r.arr, r.index],
+    type: BOOL,
+    loc,
   };
   return negated ? { kind: "unary", op: "!", operand: equal, type: BOOL, loc } : equal;
 }

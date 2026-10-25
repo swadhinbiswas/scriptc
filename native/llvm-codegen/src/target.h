@@ -1,13 +1,16 @@
 #pragma once
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/CodeGen.h"
+#include "llvm/Target/TargetOptions.h"
 
 #include <memory>
 #include <string>
 
 namespace llvm {
 class TargetMachine;
-}
+class Triple;
+} // namespace llvm
 
 namespace scriptc {
 
@@ -34,8 +37,12 @@ inline constexpr llvm::StringLiteral AllowedTargets = SCRIPTC_ALLOWED_TARGETS;
 
 void initializeTargets();
 bool supportsTarget(llvm::StringRef Triple);
+// The target options and code generation level every helper target machine
+// uses, shared with the partitioned optimizer's configuration.
+llvm::TargetOptions targetOptions(const llvm::Triple &TargetTriple);
+llvm::CodeGenOptLevel codeGenLevel(llvm::StringRef OptLevel);
 std::unique_ptr<llvm::TargetMachine>
 createTargetMachine(llvm::StringRef Triple, llvm::StringRef OptLevel,
-                    std::string &Error);
+                    std::string &Error, bool RequireAllowed = true);
 
 } // namespace scriptc

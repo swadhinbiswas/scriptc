@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2873-optional-receiver-loop-lifetime.js"
+ ],
+ "diags": []
+}

@@ -24,7 +24,7 @@ try {
   console.log(JSON.stringify({ preflight: frontend.preflight, npmStatic: frontend.npmStatic }));
   if (frontend.preflight.length === 0) {
     if (request.contract) console.log(JSON.stringify(frontend.entryContract()));
-    const result = frontend.lower({ dynamic: false, ffiImports });
+    const result = frontend.lower({ ffiImports });
     console.log(JSON.stringify({ stats: result.stats, diagnostics: result.diagnostics,
       validation: result.module === null ? null : validateModule(result.module) }));
     if (result.module && process.argv[4]) writeFileSync(process.argv[4], serializeModule(result.module));

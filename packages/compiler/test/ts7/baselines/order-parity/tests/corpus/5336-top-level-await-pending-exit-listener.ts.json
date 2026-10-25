@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5336-top-level-await-pending-exit-listener.ts"
+ ],
+ "diags": []
+}

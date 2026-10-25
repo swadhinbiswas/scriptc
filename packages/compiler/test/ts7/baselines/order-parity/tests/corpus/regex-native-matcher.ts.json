@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/regex-native-matcher.ts"
+ ],
+ "diags": []
+}

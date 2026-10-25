@@ -11,21 +11,50 @@ function context() {
   const lowerer = {
     jsonSafe: (type: IrType) => type.kind === "string" || type.kind === "f64",
     fmt: (type: IrType) => type.kind,
-    pushDiag: (diagnostic: ScrDiagnostic) => { diagnostics.push(diagnostic); },
+    pushDiag: (diagnostic: ScrDiagnostic) => {
+      diagnostics.push(diagnostic);
+    },
   } as unknown as Lowerer;
   return { lowerer, diagnostics };
 }
 
 test("coerces nested expressions in place and keeps repeat visits idempotent", () => {
   const { lowerer, diagnostics } = context();
-  const conversion: IrExpr = { kind: "strIntrinsic", method: "toUpperCase", receiver: variable(DYN), args: [], type: STRING, loc };
-  const call: IrExpr = { kind: "callValue", callee: variable({ kind: "func", params: [STRING], ret: VOID }), args: [variable(DYN)], type: VOID, loc };
-  const statements: IrStmt[] = [{ kind: "block", loc, body: [
-    { kind: "exprStmt", expr: conversion, loc },
-    { kind: "exprStmt", loc, expr: { kind: "seqExpr", type: F64, loc,
-      stmts: [{ kind: "exprStmt", expr: call, loc }], result: { kind: "numLit", value: 1, type: F64, loc },
-    } },
-  ] }];
+  const conversion: IrExpr = {
+    kind: "strIntrinsic",
+    method: "toUpperCase",
+    receiver: variable(DYN),
+    args: [],
+    type: STRING,
+    loc,
+  };
+  const call: IrExpr = {
+    kind: "callValue",
+    callee: variable({ kind: "func", params: [STRING], ret: VOID }),
+    args: [variable(DYN)],
+    type: VOID,
+    loc,
+  };
+  const statements: IrStmt[] = [
+    {
+      kind: "block",
+      loc,
+      body: [
+        { kind: "exprStmt", expr: conversion, loc },
+        {
+          kind: "exprStmt",
+          loc,
+          expr: {
+            kind: "seqExpr",
+            type: F64,
+            loc,
+            stmts: [{ kind: "exprStmt", expr: call, loc }],
+            result: { kind: "numLit", value: 1, type: F64, loc },
+          },
+        },
+      ],
+    },
+  ];
   enforceLibBoundary(lowerer, statements);
   expect(conversion.receiver).toMatchObject({ kind: "dynCheck", type: STRING });
   expect(call.args[0]).toMatchObject({ kind: "dynCheck", type: STRING });
@@ -38,9 +67,18 @@ test("coerces nested expressions in place and keeps repeat visits idempotent", (
 test("keeps child-first diagnostics inside nested statements", () => {
   const { lowerer, diagnostics } = context();
   const badCall: IrExpr = { kind: "callValue", callee: variable(DYN), args: [], type: VOID, loc };
-  const statement: IrStmt = { kind: "exprStmt", loc, expr: {
-    kind: "strIntrinsic", method: "toUpperCase", receiver: badCall, args: [], type: STRING, loc,
-  } };
+  const statement: IrStmt = {
+    kind: "exprStmt",
+    loc,
+    expr: {
+      kind: "strIntrinsic",
+      method: "toUpperCase",
+      receiver: badCall,
+      args: [],
+      type: STRING,
+      loc,
+    },
+  };
   expect(() => enforceLibBoundary(lowerer, statement)).toThrow(PoisonError);
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ code: "SC1100", loc });

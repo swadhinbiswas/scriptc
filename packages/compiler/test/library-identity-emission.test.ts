@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
-import { replaceLibraryIdentity, stripLibraryIdentity } from "../src/backend/library-identity-markers.js";
+import {
+  replaceLibraryIdentity,
+  stripLibraryIdentity,
+} from "../src/backend/library-identity-markers.js";
 import type { IrModule } from "../src/ir/ir.js";
 import { fibModule } from "./fixtures/fib-ir.js";
 
@@ -62,5 +65,4 @@ describe("library identity emission", () => {
 
     expect(replaceLibraryIdentity(emitLlvmModule(mod), identity)).toBe(emitLlvmModule(expected));
   });
-
 });

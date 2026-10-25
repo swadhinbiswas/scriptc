@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4047-captured-parameter-rebinding.ts"
+ ],
+ "diags": []
+}

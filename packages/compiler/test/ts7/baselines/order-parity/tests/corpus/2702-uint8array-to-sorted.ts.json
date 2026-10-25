@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2702-uint8array-to-sorted.ts"
+ ],
+ "diags": []
+}

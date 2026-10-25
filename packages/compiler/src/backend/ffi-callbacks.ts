@@ -34,15 +34,12 @@ export function allocateFfiCallbackAdapters(
       do {
         const index = suffix++;
         symbol = `sc_ffi_cb_${index}`;
-        tls = !hasContext && param.callback.lifetime === "call"
-          ? `sc_ffi_cb_ctx_${index}`
-          : null;
-        global = !hasContext && param.callback.lifetime === "retained"
-          ? `sc_ffi_cb_retained_${index}`
-          : null;
-        table = param.callback.lifetime === "retained"
-          ? `sc_ffi_cb_table_${index}`
-          : null;
+        tls = !hasContext && param.callback.lifetime === "call" ? `sc_ffi_cb_ctx_${index}` : null;
+        global =
+          !hasContext && param.callback.lifetime === "retained"
+            ? `sc_ffi_cb_retained_${index}`
+            : null;
+        table = param.callback.lifetime === "retained" ? `sc_ffi_cb_table_${index}` : null;
       } while (
         reserved.has(symbol) ||
         (tls !== null && reserved.has(tls)) ||
@@ -92,9 +89,7 @@ export function hasRetainedFfiCallback(imports: readonly IrFfiImport[]): boolean
  * source itself has no timer, async function, or other loop-backed surface. */
 export function hasForeignFfiCallback(imports: readonly IrFfiImport[]): boolean {
   return imports.some((entry) =>
-    entry.params.some(
-      (param) => isFfiCallbackParam(param) && param.callback.invoke === "foreign",
-    ),
+    entry.params.some((param) => isFfiCallbackParam(param) && param.callback.invoke === "foreign"),
   );
 }
 
@@ -120,7 +115,8 @@ export function collectFfiRetainedOps<V>(
   for (const param of entry.params) {
     if (isFfiCallbackParam(param) && param.callback.lifetime === "retained") {
       const adapter = adapterFor(entry.name, param.callback.id);
-      if (adapter.table === null) throw new InternalCompilerError("emitter bug: retained callback has no table");
+      if (adapter.table === null)
+        throw new InternalCompilerError("emitter bug: retained callback has no table");
       registrations.push({
         table: adapter.table,
         global: adapter.global,
@@ -130,7 +126,8 @@ export function collectFfiRetainedOps<V>(
     } else if (isFfiReleaseParam(param)) {
       const { binding, id } = parseFfiCallbackKey(param.callback.release);
       const adapter = adapterFor(binding, id);
-      if (adapter.table === null) throw new InternalCompilerError("emitter bug: retained release has no table");
+      if (adapter.table === null)
+        throw new InternalCompilerError("emitter bug: retained release has no table");
       releases.push({
         table: adapter.table,
         global: adapter.global,

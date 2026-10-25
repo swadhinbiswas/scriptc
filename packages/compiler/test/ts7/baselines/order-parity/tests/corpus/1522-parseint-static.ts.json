@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1522-parseint-static.ts"
+ ],
+ "diags": []
+}

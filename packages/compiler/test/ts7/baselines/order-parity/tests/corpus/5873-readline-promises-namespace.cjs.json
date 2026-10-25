@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5873-readline-promises-namespace.cjs"
+ ],
+ "diags": []
+}

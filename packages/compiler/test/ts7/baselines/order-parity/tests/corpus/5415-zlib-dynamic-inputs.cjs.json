@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5415-zlib-dynamic-inputs.cjs"
+ ],
+ "diags": []
+}

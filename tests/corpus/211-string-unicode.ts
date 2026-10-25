@@ -1,8 +1,8 @@
 // Non-ASCII receivers: all indices are UTF-16 code units (JS-exact) over the
 // runtime's UTF-8 storage. CJK is 1 code unit per char, astral (emoji) is 2,
 // combining marks are their own units. charAt/slice boundaries here never
-// split a surrogate pair — splitting is a documented divergence (U+FFFD vs
-// Node's lone surrogate) covered by the runtime's C tests instead.
+// split a surrogate pair; 4991-lone-surrogate-halves covers the halves a
+// split produces.
 
 // CJK: one code unit per character
 const cjk: string = "你好，世界";

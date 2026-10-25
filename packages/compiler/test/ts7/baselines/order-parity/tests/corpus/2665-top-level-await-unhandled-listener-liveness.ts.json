@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2665-top-level-await-unhandled-listener-liveness.ts"
+ ],
+ "diags": []
+}

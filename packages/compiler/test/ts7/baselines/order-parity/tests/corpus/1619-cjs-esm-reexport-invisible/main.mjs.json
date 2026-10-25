@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1619-cjs-esm-reexport-invisible/cjs.cjs",
+  "<repo>/tests/corpus/1619-cjs-esm-reexport-invisible/mid.mjs",
+  "<repo>/tests/corpus/1619-cjs-esm-reexport-invisible/main.mjs"
+ ],
+ "diags": []
+}

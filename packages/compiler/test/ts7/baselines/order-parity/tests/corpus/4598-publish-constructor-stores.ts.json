@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4598-publish-constructor-stores.ts"
+ ],
+ "diags": []
+}

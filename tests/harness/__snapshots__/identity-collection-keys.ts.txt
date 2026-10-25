@@ -70,47 +70,6 @@ identity-collection-keys.ts:15:37 - error SC2020: 'collection key conversion fro
 
   hint: use the same reference type for the key and collection; copying a key would change its identity
 
-identity-collection-keys.ts:19:7 - error SC2009: values of type 'Map<string | Key, number>' cannot be compiled: the Map shape is supported, but 'string | Key' is outside its supported key domain (numbers, strings, identity references, or unions of identity references)
-
-  18 | // An identity-key union must consist entirely of identity-bearing arms.
-  19 | const mixed = new Map<Key | string, number>();
-     |       ^~~~~
-  20 | const nullable = new Set<Key | undefined>();
-
-  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-identity-collection-keys.ts:19:15 - error SC1090: Map keys of type 'string | Key' (Map keys must be numbers, strings, identity references, or unions of identity references) is not supported yet
-
-  18 | // An identity-key union must consist entirely of identity-bearing arms.
-  19 | const mixed = new Map<Key | string, number>();
-     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  20 | const nullable = new Set<Key | undefined>();
-
-identity-collection-keys.ts:20:7 - error SC2009: values of type 'Set<Key | undefined>' cannot be compiled: the Set shape is supported, but 'Key | undefined' is outside its supported element domain (numbers, strings, identity references, or unions of identity references)
-
-  19 | const mixed = new Map<Key | string, number>();
-  20 | const nullable = new Set<Key | undefined>();
-     |       ^~~~~~~~
-  21 | console.log(mixed, nullable);
-
-  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-identity-collection-keys.ts:20:18 - error SC1090: Set elements of type 'Key | undefined' (Set elements must be numbers, strings, identity references, or unions of identity references) is not supported yet
-
-  19 | const mixed = new Map<Key | string, number>();
-  20 | const nullable = new Set<Key | undefined>();
-     |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~
-  21 | console.log(mixed, nullable);
-
-identity-collection-keys.ts:21:13 - error SC2004: uses of 'mixed' inherit the blocker on its declaration
-
-  20 | const nullable = new Set<Key | undefined>();
-  21 | console.log(mixed, nullable);
-     |             ^~~~~
-  22 | 
-
-  hint: the declaration of 'mixed' did not compile — fix the diagnostic reported there and these sites clear with it
-
 identity-collection-keys.ts:25:12 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
 
   24 | const unknownKey: unknown = wide;

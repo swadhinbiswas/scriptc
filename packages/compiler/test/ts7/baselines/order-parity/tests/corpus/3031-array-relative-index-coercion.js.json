@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3031-array-relative-index-coercion.js"
+ ],
+ "diags": []
+}

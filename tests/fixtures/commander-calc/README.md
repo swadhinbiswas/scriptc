@@ -1,6 +1,6 @@
 # commander-calc fixture
 
-The npm-dependency acceptance test: `calc.ts` is a calculator CLI built on the real `commander` package, compiled with `--dynamic` and byte-compared against Node across argv fixtures (tests/harness/npm.test.ts). `calc-npm-static.ts` is the focused static-package acceptance path.
+`calc.ts` is a calculator CLI built on the real `commander` package, retained for frontend and resolution benchmarks. `calc-npm-static.ts` exercises native package compilation.
 
 The vendored `node_modules` is committed test data on purpose — the test must exercise a real published package, pinned:
 

@@ -21,7 +21,9 @@ try {
   }
   const mode = statSync(join(root, "bin", "scriptc-llvm-codegen")).mode & 0o777;
   if (mode !== 0o755) {
-    throw new Error(`${expectedName} LLVM helper has mode ${mode.toString(8)} in ${tarball}, expected 755`);
+    throw new Error(
+      `${expectedName} LLVM helper has mode ${mode.toString(8)} in ${tarball}, expected 755`,
+    );
   }
   process.stdout.write(`verified ${expectedName} LLVM helper tarball mode 755\n`);
 } finally {

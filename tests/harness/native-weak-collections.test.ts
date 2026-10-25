@@ -13,7 +13,9 @@ for (const backend of ["llvm"] as const) {
     const outDir = await mkdtemp(join(tmpdir(), "scriptc-weak-island-"));
     try {
       const entry = join(outDir, "main.ts");
-      await writeFile(entry, `
+      await writeFile(
+        entry,
+        `
 const key: any = { value: 1 };
 const other: any = { value: 1 };
 const map = new WeakMap<object, number>();
@@ -22,14 +24,20 @@ console.log(map.set(key, 3) === map, set.add(other) === set);
 console.log(String(map.get(key)), String(map.get(other)), String(set.has(key)));
 console.log(map instanceof WeakMap, set instanceof WeakSet, map instanceof WeakSet);
 console.log(String(map.delete(key)), String(map.has(key)), String(set.delete(other)));
-`);
+`,
+      );
       const result = await compile(entry, {
-        backend, dynamic: true, sanitize: process.env["SCRIPTC_SAN"] === "1",
-        outDir, outPath: join(outDir, "program"),
+        backend,
+        sanitize: process.env["SCRIPTC_SAN"] === "1",
+        outDir,
+        outPath: join(outDir, "program"),
       });
       expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
       if (!result.ok) return;
-      const [node, native] = await Promise.all([exec(process.execPath, [entry]), exec(result.binaryPath)]);
+      const [node, native] = await Promise.all([
+        exec(process.execPath, [entry]),
+        exec(result.binaryPath),
+      ]);
       expect(native.stdout).toBe(node.stdout);
       expect(native.stderr).toBe(node.stderr);
     } finally {
@@ -41,7 +49,9 @@ console.log(String(map.delete(key)), String(map.has(key)), String(set.delete(oth
     const outDir = await mkdtemp(join(tmpdir(), "scriptc-weak-boundaries-"));
     try {
       const entry = join(outDir, "main.ts");
-      await writeFile(entry, `
+      await writeFile(
+        entry,
+        `
 const map = new WeakMap<object, number>();
 const set = new WeakSet<object>();
 const record = { value: 1 };
@@ -70,14 +80,20 @@ for (let i = 0; i < 4096; i++) {
 for (const key of keys) total += map.get(key)!;
 console.log(total, keys.length);
 console.log("after");
-`);
+`,
+      );
       const result = await compile(entry, {
-        backend, dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1",
-        outDir, outPath: join(outDir, "program"),
+        backend,
+        sanitize: process.env["SCRIPTC_SAN"] === "1",
+        outDir,
+        outPath: join(outDir, "program"),
       });
       expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
       if (!result.ok) return;
-      const [reference, child] = await Promise.all([exec(process.execPath, [entry]), exec(result.binaryPath)]);
+      const [reference, child] = await Promise.all([
+        exec(process.execPath, [entry]),
+        exec(result.binaryPath),
+      ]);
       expect(child.stdout).toBe(reference.stdout);
       expect(child.stderr).toBe(reference.stderr);
     } finally {

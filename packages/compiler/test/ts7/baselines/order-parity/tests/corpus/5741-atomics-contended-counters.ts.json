@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5741-atomics-contended-counters.ts"
+ ],
+ "diags": []
+}

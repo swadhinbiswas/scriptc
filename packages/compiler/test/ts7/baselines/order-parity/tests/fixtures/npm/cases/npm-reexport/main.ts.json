@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/npm-reexport/facade.ts",
+  "<repo>/tests/fixtures/npm/cases/npm-reexport/default-facade.ts",
+  "<repo>/tests/fixtures/npm/cases/npm-reexport/main.ts"
+ ],
+ "diags": []
+}

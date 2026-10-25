@@ -9,8 +9,16 @@ function scan(source: string) {
 }
 
 function edge(specifier: string, flags: Partial<SpecifierUse> = {}): SpecifierUse {
-  return { specifier, static: false, require: false, requireLocal: false,
-    requireViaHelper: false, dynamicImport: false, importMetaResolve: false, ...flags };
+  return {
+    specifier,
+    static: false,
+    require: false,
+    requireLocal: false,
+    requireViaHelper: false,
+    dynamicImport: false,
+    importMetaResolve: false,
+    ...flags,
+  };
 }
 
 test("module edges preserve encounter order and merge all literal call forms", () => {
@@ -24,11 +32,22 @@ test("module edges preserve encounter order and merge all literal call forms", (
     require("ignored", extra); require(variable); import(variable);
     import.meta.other("ignored"); object.require("ignored");`);
   expect(result).toEqual({
-    uses: [edge("first", { static: true }), edge("namespace", { static: true }),
-      edge("mixed", { static: true, require: true, requireLocal: true, dynamicImport: true, importMetaResolve: true }),
-      edge("template", { dynamicImport: true }), edge("resolve-only", { importMetaResolve: true }),
-      edge("nested", { require: true, requireLocal: true })],
-    requireHelperImport: null, requireHelperReexport: null,
+    uses: [
+      edge("first", { static: true }),
+      edge("namespace", { static: true }),
+      edge("mixed", {
+        static: true,
+        require: true,
+        requireLocal: true,
+        dynamicImport: true,
+        importMetaResolve: true,
+      }),
+      edge("template", { dynamicImport: true }),
+      edge("resolve-only", { importMetaResolve: true }),
+      edge("nested", { require: true, requireLocal: true }),
+    ],
+    requireHelperImport: null,
+    requireHelperReexport: null,
   });
 });
 
@@ -38,18 +57,26 @@ test("helper calls attribute to imported bindings even when the import follows t
     export { __require as routed } from "./hop.js";`);
   expect(result.requireHelperImport).toBe("./helper.js");
   expect(result.requireHelperReexport).toBe("./hop.js");
-  expect(result.uses[0]).toEqual(edge("shared", { require: true, requireLocal: true, requireViaHelper: true }));
-  expect(scan('const __require = require; __require("local");').uses)
-    .toEqual([edge("local", { require: true, requireLocal: true })]);
-  expect(scan('import { __require as renamed } from "./helper.js"; __require("local");').requireHelperImport).toBeNull();
+  expect(result.uses[0]).toEqual(
+    edge("shared", { require: true, requireLocal: true, requireViaHelper: true }),
+  );
+  expect(scan('const __require = require; __require("local");').uses).toEqual([
+    edge("local", { require: true, requireLocal: true }),
+  ]);
+  expect(
+    scan('import { __require as renamed } from "./helper.js"; __require("local");')
+      .requireHelperImport,
+  ).toBeNull();
 });
 
 test("CommonJS module.require literals are local lazy edges", () => {
-  expect(scan(`module.require("./method-only.cjs");
+  expect(
+    scan(`module.require("./method-only.cjs");
     module["require"](\`./computed.cjs\`);
     module.require(variable); module.require("ignored", extra);
     object.require("ignored"); module[variable]("ignored");
-    require("./method-only.cjs");`).uses).toEqual([
+    require("./method-only.cjs");`).uses,
+  ).toEqual([
     edge("./method-only.cjs", { require: true, requireLocal: true }),
     edge("./computed.cjs", { require: true, requireLocal: true }),
   ]);
@@ -70,17 +97,24 @@ test("comments, strings, regexes and substituted template literals cannot invent
 });
 
 test("source prescan preserves declaration type-only flags and repeated edges", () => {
-  const file = parseSourceFile("types.ts", `import type { Shape } from "types";
+  const file = parseSourceFile(
+    "types.ts",
+    `import type { Shape } from "types";
     export type { Other } from "other-types";
     import { type Inline, value } from "mixed";
     import "side-effect";
     export * from "runtime";
     require("runtime"); import("runtime", { with: { type: "json" } });
-    __require("helper-only"); import.meta.resolve("resolve-only");`, "ts");
+    __require("helper-only"); import.meta.resolve("resolve-only");`,
+    "ts",
+  );
   expect(sourceImportsOfFile(file)).toEqual([
-    { spec: "types", typeOnly: true }, { spec: "other-types", typeOnly: true },
-    { spec: "mixed", typeOnly: false }, { spec: "side-effect", typeOnly: false },
-    { spec: "runtime", typeOnly: false }, { spec: "runtime", typeOnly: false },
+    { spec: "types", typeOnly: true },
+    { spec: "other-types", typeOnly: true },
+    { spec: "mixed", typeOnly: false },
+    { spec: "side-effect", typeOnly: false },
+    { spec: "runtime", typeOnly: false },
+    { spec: "runtime", typeOnly: false },
     { spec: "runtime", typeOnly: false },
   ]);
 });

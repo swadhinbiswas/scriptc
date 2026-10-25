@@ -1,0 +1,10 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1891-ns-reexport/shared.ts",
+  "<repo>/tests/corpus/1891-ns-reexport/agg.ts",
+  "<repo>/tests/corpus/1891-ns-reexport/constants.ts",
+  "<repo>/tests/corpus/1891-ns-reexport/drink.ts",
+  "<repo>/tests/corpus/1891-ns-reexport/main.ts"
+ ],
+ "diags": []
+}

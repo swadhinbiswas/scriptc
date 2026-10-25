@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5520-dyn-property-read-receivers.ts"
+ ],
+ "diags": []
+}

@@ -1,8 +1,5 @@
-// @dynamic
-// Explicit toFixed is static; toPrecision/toString(radix) execute in the
-// island. The receiver marshals by value there and the engine auto-boxes
-// it, so `this` binds the number exactly as in JS. All stay byte-exact
-// differential.
+// Number.prototype.toFixed, toPrecision and toString(radix) on typed
+// numbers all compile statically and stay byte-exact differential.
 const n = 1234.5678;
 console.log(n.toFixed(0), n.toFixed(2), n.toFixed(6));
 console.log((0.1 + 0.2).toFixed(17), (-3.7).toFixed(1), (0).toFixed(2));

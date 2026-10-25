@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/984-exceptions-finally.ts"
+ ],
+ "diags": []
+}

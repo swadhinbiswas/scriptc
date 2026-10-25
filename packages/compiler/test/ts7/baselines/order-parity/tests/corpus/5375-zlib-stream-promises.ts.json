@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5375-zlib-stream-promises.ts"
+ ],
+ "diags": []
+}

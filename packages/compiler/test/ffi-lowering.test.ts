@@ -61,9 +61,18 @@ test("manifest-bound call initializers retain ffiCall IR and declaration storage
     }),
   );
 
-  const result = await compile(entry, { outDir, outPath, outputKind: "ir", ffiProfilePath: profilePath });
+  const result = await compile(entry, {
+    outDir,
+    outPath,
+    outputKind: "ir",
+    ffiProfilePath: profilePath,
+  });
   if (!result.ok) {
-    throw new Error(result.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("\n"));
+    throw new Error(
+      result.diagnostics
+        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+        .join("\n"),
+    );
   }
 
   const module = deserializeModule(await readFile(outPath, "utf8"));
@@ -85,16 +94,24 @@ test("manifest-bound call initializers retain ffiCall IR and declaration storage
   expect(localIds.size).toBe(expectedLocals.length);
 
   const records = recordsOf(module);
-  const ffiInitializers = (ids: ReadonlySet<string>) => records.filter((record) =>
-    ((record.kind === "assign" && typeof record.localId === "string" && ids.has(record.localId) &&
-      (record.value as IrRecord | undefined)?.kind === "ffiCall") ||
-      (record.kind === "varDecl" && typeof record.localId === "string" && ids.has(record.localId) &&
-      (record.init as IrRecord | undefined)?.kind === "ffiCall")),
-  );
+  const ffiInitializers = (ids: ReadonlySet<string>) =>
+    records.filter(
+      (record) =>
+        (record.kind === "assign" &&
+          typeof record.localId === "string" &&
+          ids.has(record.localId) &&
+          (record.value as IrRecord | undefined)?.kind === "ffiCall") ||
+        (record.kind === "varDecl" &&
+          typeof record.localId === "string" &&
+          ids.has(record.localId) &&
+          (record.init as IrRecord | undefined)?.kind === "ffiCall"),
+    );
   expect(ffiInitializers(globalIds)).toHaveLength(expectedGlobals.length);
   expect(ffiInitializers(localIds)).toHaveLength(expectedLocals.length);
 
   const ffiCalls = records.filter((record) => record.kind === "ffiCall");
   expect(ffiCalls).toHaveLength(6);
-  expect(records.some((record) => record.kind === "libCall" && record.fn === "global.undefRead")).toBe(false);
+  expect(
+    records.some((record) => record.kind === "libCall" && record.fn === "global.undefRead"),
+  ).toBe(false);
 });

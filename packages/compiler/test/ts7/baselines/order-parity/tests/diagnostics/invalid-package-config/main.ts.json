@@ -1,0 +1,18 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/invalid-package-config/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "Node cannot load this module because '<repo>/tests/diagnostics/invalid-package-config/package.json' is an invalid package configuration (ERR_INVALID_PACKAGE_CONFIG)",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/invalid-package-config/main.ts",
+    "start": 0,
+    "end": 0
+   },
+   "milestone": "later",
+   "hint": "fix the nearest package.json so it contains valid JSON"
+  }
+ ]
+}

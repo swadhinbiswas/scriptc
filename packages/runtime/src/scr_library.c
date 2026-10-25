@@ -98,7 +98,7 @@ void scr_library_callback_begin(void) { scr_library_callback_depth++; }
 void scr_library_callback_end(void) {
   /* Generated calls pair this only with a normally returned host callback.
    * A callback that illegally unwinds leaves the depth set, so a later ABI
-   * entry fails deterministically instead of silently reusing the instance. */
+   * entry fails deterministically instead of reusing the instance. */
   if (scr_library_callback_depth != 0) scr_library_callback_depth--;
 }
 
@@ -112,7 +112,7 @@ void scr_library_callback_end(void) {
  * Delivery shape (the ratified structured trap-teaching encoding): a
  * message that already begins with the 0x01 marker — a facade-authored
  * structured throw riding the verbatim rule, or the wrapper's compile-
- * time-assembled SC4012 contract trap — is delivered byte-for-byte. Every
+ * time-assembled SC4012 contract trap — is delivered unchanged. Every
  * OTHER message is a trap the runtime DETECTED, and the funnel assembles
  * it here into 0x01 text 0x1F code 0x1F symbol [0x1F remediation]: the
  * baseline human line becomes field 0 unchanged (so plain-text hosts read
@@ -346,7 +346,7 @@ ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len, const char *trap_ms
 
 double scr_library_i64_in(int64_t v, const char *trap_msg) {
   /* The inbound declared-integer edge (ask 4): only |v| <= 2^53-1 rides
-   * f64 exactly; past it, (double)v silently rounds — a coercion the
+   * f64 exactly; past it, (double)v rounds without an error — a coercion the
    * author never wrote, so the wrapper funnels the host-contract
    * violation instead (same story as an impossible bytes length; the
    * message is the compiler-assembled structured trap-teaching form). */
@@ -369,6 +369,30 @@ void scr_library_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len) {
   scr_library_arena_keep(b, false);
   *out = b->data; /* elem is always u8 at the boundary (v1 bytes class) */
   *out_len = b->len;
+}
+
+ScrStr *scr_library_cstr_in(const char *p, const char *trap_msg) {
+  if (p == NULL) scr_trap(trap_msg);
+  return scr_str_from_utf8_lossy((const uint8_t *)p, strlen(p));
+}
+
+/* A C string ends at its first NUL: text holding U+0000 cannot cross. */
+static void scr_library_cstr_check(const ScrStr *s) {
+  if (memchr(s->data, 0, s->len) != NULL) {
+    scr_trap("scriptc: TypeError: a cstring value contains U+0000, which a C string cannot "
+             "hold\n");
+  }
+}
+
+const char *scr_library_cstr_out(ScrStr *s) {
+  scr_library_arena_keep(s, true);
+  scr_library_cstr_check(s);
+  return s->data; /* NUL-terminated after len (ScrStr layout) */
+}
+
+const char *scr_library_cstr_arg(const ScrStr *s) {
+  scr_library_cstr_check(s);
+  return s->data;
 }
 
 /* ── the reset registry + session reset ─────────────────────────────────

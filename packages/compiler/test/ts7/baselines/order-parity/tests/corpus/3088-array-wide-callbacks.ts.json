@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3088-array-wide-callbacks.ts"
+ ],
+ "diags": []
+}

@@ -3,7 +3,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test, vi } from "vitest";
-import { REMOTE_COMMAND_PENDING, sandboxCommand, sandboxStatusCommand, waitForSandboxCommand } from "../../scripts/sandbox-command.mjs";
+import {
+  REMOTE_COMMAND_PENDING,
+  sandboxCommand,
+  sandboxStatusCommand,
+  waitForSandboxCommand,
+} from "../../scripts/sandbox-command.mjs";
 
 const roots: string[] = [];
 const statuses: string[] = [];
@@ -16,12 +21,19 @@ afterEach(async () => {
 
 test("status recovery retries lost probes and pending commands until a confirmed success", async () => {
   vi.useFakeTimers();
-  const probe = vi.fn()
+  const probe = vi
+    .fn()
     .mockRejectedValueOnce(new Error("transport disconnected"))
-    .mockRejectedValueOnce(Object.assign(new Error("pending"), { remoteExitCode: REMOTE_COMMAND_PENDING }))
+    .mockRejectedValueOnce(
+      Object.assign(new Error("pending"), { remoteExitCode: REMOTE_COMMAND_PENDING }),
+    )
     .mockResolvedValueOnce(undefined);
   const onPending = vi.fn();
-  const recovery = waitForSandboxCommand(probe, { deadline: Date.now() + 5000, label: "tests", onPending });
+  const recovery = waitForSandboxCommand(probe, {
+    deadline: Date.now() + 5000,
+    label: "tests",
+    onPending,
+  });
   await vi.runAllTimersAsync();
   await expect(recovery).resolves.toBeUndefined();
   expect(probe.mock.calls).toEqual([[5000], [4000], [3000]]);
@@ -32,9 +44,13 @@ test("status recovery preserves a confirmed remote failure after a transport fai
   vi.useFakeTimers();
   const failure = Object.assign(new Error("tests failed"), { remoteExitCode: 7 });
   const probe = vi.fn().mockRejectedValueOnce(new Error("disconnected")).mockRejectedValue(failure);
-  const recovery = expect(waitForSandboxCommand(probe, {
-    deadline: Date.now() + 5000, label: "tests", onPending: vi.fn(),
-  })).rejects.toBe(failure);
+  const recovery = expect(
+    waitForSandboxCommand(probe, {
+      deadline: Date.now() + 5000,
+      label: "tests",
+      onPending: vi.fn(),
+    }),
+  ).rejects.toBe(failure);
   await vi.runAllTimersAsync();
   await recovery;
   expect(probe).toHaveBeenCalledTimes(2);
@@ -44,9 +60,16 @@ test("unconfirmed status probes cannot extend the original command deadline", as
   vi.useFakeTimers();
   const disconnected = new Error("status timeout");
   const probe = vi.fn().mockRejectedValue(disconnected);
-  const recovery = expect(waitForSandboxCommand(probe, {
-    deadline: Date.now() + 1500, label: "tests", onPending: vi.fn(),
-  })).rejects.toMatchObject({ message: "tests did not confirm completion before its timeout", cause: disconnected });
+  const recovery = expect(
+    waitForSandboxCommand(probe, {
+      deadline: Date.now() + 1500,
+      label: "tests",
+      onPending: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    message: "tests did not confirm completion before its timeout",
+    cause: disconnected,
+  });
   await vi.runAllTimersAsync();
   await recovery;
   expect(probe.mock.calls).toEqual([[1500], [500]]);
@@ -102,9 +125,13 @@ test("status recovery waits for a disconnected command's actual exit", async () 
   expect((await pending).stdout).toBe(`\n${marker}7\n`);
 
   await writeFile(path, "0\n");
-  expect(execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" })).toBe(`\n${marker}0\n`);
+  expect(
+    execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" }),
+  ).toBe(`\n${marker}0\n`);
   await writeFile(path, "125\n");
-  expect(execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" })).toBe(`\n${marker}125\n`);
+  expect(
+    execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" }),
+  ).toBe(`\n${marker}125\n`);
 });
 
 test("an absent or incomplete status remains pending rather than passing", async () => {
@@ -112,7 +139,8 @@ test("an absent or incomplete status remains pending rather than passing", async
   roots.push(root);
   const path = join(root, "command.status");
   const marker = "__STATUS_TEST__";
-  const probe = () => execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" });
+  const probe = () =>
+    execFileSync("sh", ["-c", sandboxStatusCommand(path, marker, 0)], { encoding: "utf8" });
   expect(probe()).toBe(`\n${marker}${REMOTE_COMMAND_PENDING}\n`);
   await writeFile(path, "");
   expect(probe()).toBe(`\n${marker}${REMOTE_COMMAND_PENDING}\n`);

@@ -19,15 +19,25 @@ let scratch: string;
 beforeAll(async () => {
   await mkdir(join(testDir, "build"), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-O1", "-Wall", "-Wextra",
-    "-fsanitize=address", "-DSCR_RC_AUDIT",
-    "-I", join(testDir, "../src"),
-    "-o", bin,
+    "-std=c11",
+    "-O1",
+    "-Wall",
+    "-Wextra",
+    "-fsanitize=address,undefined",
+    "-DSCR_RC_AUDIT",
+    "-I",
+    join(testDir, "../src"),
+    "-o",
+    bin,
     join(testDir, "test_bytes.c"),
+    join(testDir, "../src/scr_bytes.test.c"),
     join(testDir, "../src/scr_bytes.c"),
+    join(testDir, "../src/scr_shared.c"),
     join(testDir, "../src/scr_bytes_io.c"),
+    join(testDir, "../src/scr_fs_cp.c"),
     join(testDir, "../src/scr_zlib.c"),
     join(testDir, "../src/scr_lib.c"),
+    join(testDir, "../src/scr_hash.c"),
     join(testDir, "../src/scr_string.c"),
     join(testDir, "../src/scr_array.c"),
     join(testDir, "../src/scr_map.c"),
@@ -40,6 +50,7 @@ beforeAll(async () => {
     join(testDir, "../src/scr_object.c"),
     join(testDir, "../src/scr_union.c"),
     join(testDir, "../src/scr_cycle.c"),
+    join(testDir, "../src/scr_alloc.c"),
     join(testDir, "../src/scr_json.c"),
     join(testDir, "../src/scr_bigint.c"),
     join(testDir, "../src/scr_async.c"),
@@ -59,7 +70,9 @@ afterAll(async () => {
 });
 
 test("bytes runtime: coercions, encodings, zlib, fs, RC", async () => {
-  const { stderr } = await execFileAsync(bin, [scratch]);
+  const { stderr } = await execFileAsync(bin, [scratch], {
+    env: { ...process.env, UBSAN_OPTIONS: "halt_on_error=1" },
+  });
   expect(stderr.trim().split("\n").pop()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 

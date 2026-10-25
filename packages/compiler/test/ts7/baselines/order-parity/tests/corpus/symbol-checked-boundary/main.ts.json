@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/symbol-checked-boundary/consumer.js",
+  "<repo>/tests/corpus/symbol-checked-boundary/main.ts"
+ ],
+ "diags": []
+}

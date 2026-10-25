@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2419-selector-ternary-union.ts"
+ ],
+ "diags": []
+}

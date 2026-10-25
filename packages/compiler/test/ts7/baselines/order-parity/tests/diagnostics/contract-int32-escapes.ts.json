@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/contract-int32-escapes.ts"
+ ],
+ "diags": []
+}

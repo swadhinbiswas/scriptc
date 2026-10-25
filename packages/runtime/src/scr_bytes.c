@@ -5,8 +5,9 @@
  * slice() copies. Coercions are JS-exact
  * (ToUint8/ToUint32 modular truncation, double→float rounding); the
  * encoding conversions (utf8 with WHATWG replacement, hex, base64) match
- * Node byte-for-byte — the differential corpus holds them to it. */
+ * Node's output exactly — the differential corpus holds them to it. */
 #include "scr_runtime.h"
+#include "scr_numeric.h"
 #include "scr_text_decoder_labels.h"
 #ifdef SCR_TEXT_DECODER_LEGACY
 #include "scr_text_decoder_data.h"
@@ -16,6 +17,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 static bool scr_td_label_space(unsigned char c) {
   return c == 9 || c == 10 || c == 12 || c == 13 || c == 32;
@@ -81,10 +87,60 @@ static void scr_bytes_oom(void) {
   scr_trap("scriptc: out of memory\n");
 }
 
+uint16_t scr_f16_from_f64(double value) {
+  uint64_t bits;
+  memcpy(&bits, &value, sizeof bits);
+  uint16_t sign = (uint16_t)((bits >> 48) & 0x8000);
+  uint64_t magnitude = bits & UINT64_C(0x7fffffffffffffff);
+  if (magnitude >= UINT64_C(0x7ff0000000000000)) {
+    if (magnitude == UINT64_C(0x7ff0000000000000)) return sign | 0x7c00;
+    return sign | 0x7e00 | (uint16_t)((magnitude >> 42) & 0x3ff);
+  }
+  int exponent = (int)(magnitude >> 52) - 1023;
+  if (exponent > 15) return sign | 0x7c00;
+  uint64_t fraction = magnitude & ((UINT64_C(1) << 52) - 1);
+  uint64_t significand = exponent == -1023 ? fraction : fraction | (UINT64_C(1) << 52);
+  if (exponent == -1023) exponent = -1022;
+  int biased = exponent + 15;
+  /* Normal results keep 10 of the 52 fraction bits; subnormal results
+   * shift further, by how far the exponent is below the normal range. */
+  int shift = biased >= 1 ? 42 : 42 + (1 - biased);
+  if (shift >= 54) return sign;
+  uint64_t q = significand >> shift;
+  uint64_t rest = significand & ((UINT64_C(1) << shift) - 1);
+  uint64_t half = UINT64_C(1) << (shift - 1);
+  if (rest > half || (rest == half && (q & 1))) q++;
+  if (biased < 1) return sign | (uint16_t)q; /* a carry into 0x400 is the smallest normal */
+  if (q == 2048) {
+    q = 1024;
+    biased++;
+  }
+  if (biased >= 31) return sign | 0x7c00;
+  return sign | (uint16_t)(biased << 10) | (uint16_t)(q & 0x3ff);
+}
+
+double scr_f16_to_f64(uint16_t h) {
+  uint64_t sign = (uint64_t)(h >> 15) << 63;
+  unsigned exponent = (h >> 10) & 0x1f, fraction = h & 0x3ff;
+  uint64_t bits;
+  if (exponent == 0) {
+    double v = (double)fraction * 5.9604644775390625e-8; /* fraction * 2^-24, exact */
+    memcpy(&bits, &v, sizeof bits);
+    bits |= sign;
+  } else if (exponent == 31) {
+    bits = sign | UINT64_C(0x7ff0000000000000) | ((uint64_t)fraction << 42);
+  } else {
+    bits = sign | ((uint64_t)(exponent - 15 + 1023) << 52) | ((uint64_t)fraction << 42);
+  }
+  double out;
+  memcpy(&out, &bits, sizeof out);
+  return out;
+}
+
 size_t scr_bytes_elem_size(ScrBytesElem elem) {
   switch (elem) {
     case SCR_BYTES_U8: case SCR_BYTES_U8C: case SCR_BYTES_I8: return 1;
-    case SCR_BYTES_U16: case SCR_BYTES_I16: return 2;
+    case SCR_BYTES_U16: case SCR_BYTES_I16: case SCR_BYTES_F16: return 2;
     case SCR_BYTES_U32: case SCR_BYTES_I32: case SCR_BYTES_F32: return 4;
     case SCR_BYTES_F64: return 8;
   }
@@ -100,6 +156,7 @@ const char *scr_bytes_elem_name(ScrBytesElem elem) {
     case SCR_BYTES_I16: return "Int16Array";
     case SCR_BYTES_U32: return "Uint32Array";
     case SCR_BYTES_I32: return "Int32Array";
+    case SCR_BYTES_F16: return "Float16Array";
     case SCR_BYTES_F32: return "Float32Array";
     case SCR_BYTES_F64: return "Float64Array";
   }
@@ -116,21 +173,49 @@ double scr_bytes_to_u8_clamp(double value) {
 
 /* ── lifecycle ─────────────────────────────────────────────────────────── */
 
-static ScrBytes *scr_bytes_alloc(ScrBytesElem elem, size_t len) {
+/* Adopt private malloc storage without clearing or copying its contents. The
+ * caller transfers ownership; views keep it alive through the usual owner. */
+ScrBytes *scr_bytes_take_data(uint8_t *data, size_t len) {
+  if (!data && len) scr_trap("scriptc: NULL owned byte storage\n");
   ScrBytes *b = malloc(sizeof(ScrBytes));
   if (!b) scr_bytes_oom();
   b->rc = 1;
   b->len = len;
-  b->elem = elem;
-  b->data = calloc(len ? len : 1, scr_bytes_elem_size(elem));
+  b->elem = SCR_BYTES_U8;
+  b->data = data ? data : malloc(1);
   if (!b->data) scr_bytes_oom();
   b->backing = NULL;
   b->is_buffer = false;
   b->is_data_view = false;
   b->external = false;
+  b->untransferable = false;
+  b->shared = NULL;
+  b->properties = NULL;
+  b->properties_traced = false;
 #ifdef SCR_RC_AUDIT
   scr_live_bytes++;
 #endif
+  return b;
+}
+
+/* Only complete, non-observable initialization may use private storage. */
+static ScrBytes *scr_bytes_alloc_private(ScrBytesElem elem, size_t len) {
+  size_t width = scr_bytes_elem_size(elem);
+  if (len > SIZE_MAX / width) scr_bytes_oom();
+  uint8_t *data = malloc(len ? len * width : 1);
+  if (!data) scr_bytes_oom();
+  ScrBytes *b = scr_bytes_take_data(data, len);
+  b->elem = elem;
+  return b;
+}
+
+static ScrBytes *scr_bytes_alloc(ScrBytesElem elem, size_t len) {
+  size_t width = scr_bytes_elem_size(elem);
+  if (len > SIZE_MAX / width) scr_bytes_oom();
+  uint8_t *data = calloc(len ? len : 1, width);
+  if (!data) scr_bytes_oom();
+  ScrBytes *b = scr_bytes_take_data(data, len);
+  b->elem = elem;
   return b;
 }
 
@@ -168,14 +253,34 @@ ScrBytes *scr_bytes_from_data(const uint8_t *data, size_t len) {
   if (data == NULL && len != 0) {
     scr_trap("scriptc: native callback passed a NULL span with nonzero length\n");
   }
-  ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, len);
+  ScrBytes *b = scr_bytes_alloc_private(SCR_BYTES_U8, len);
   if (len != 0) memcpy(b->data, data, len);
   return b;
 }
 
+/* Raw bytes of a view: shared storage through relaxed atomic copies
+ * (scr_shared_load / scr_shared_store), other storage directly. */
+static void scr_bytes_raw_in(const ScrBytes *b, void *dst, const uint8_t *src, size_t n) {
+  if (b->shared) scr_shared_load(dst, src, n);
+  else if (n) memcpy(dst, src, n);
+}
+
+static void scr_bytes_raw_out(ScrBytes *b, uint8_t *dst, const void *src, size_t n) {
+  if (b->shared) scr_shared_store(dst, src, n);
+  else if (n) memmove(dst, src, n);
+}
+
+/* A private buffer for n bytes that a shared writer fills before
+ * publishing them with scr_bytes_raw_out. */
+static uint8_t *scr_bytes_scratch(size_t n) {
+  uint8_t *scratch = malloc(n ? n : 1);
+  if (!scratch) scr_bytes_oom();
+  return scratch;
+}
+
 ScrBytes *scr_bytes_copy(const ScrBytes *src) {
-  ScrBytes *b = scr_bytes_alloc(src->elem, src->len);
-  memcpy(b->data, src->data, src->len * scr_bytes_elem_size(src->elem));
+  ScrBytes *b = scr_bytes_alloc_private(src->elem, src->len);
+  scr_bytes_raw_in(src, b->data, src->data, src->len * scr_bytes_elem_size(src->elem));
   return b;
 }
 
@@ -190,19 +295,22 @@ ScrBytes *scr_bytes_as_buffer(ScrBytes *bytes) {
   return scr_bytes_retain(bytes);
 }
 
-ScrBytes *scr_bytes_convert(ScrBytesElem elem, const ScrBytes *src) {
-  if (elem == src->elem) return scr_bytes_copy(src);
-  ScrBytes *out = scr_bytes_alloc(elem, src->len);
-  for (size_t i = 0; i < src->len; i++) scr_bytes_set(out, (double)i, scr_bytes_get(src, (double)i));
-  return out;
+/* Nothing on an existing path calls this. */
+bool scr_bytes_is_buffer(const ScrBytes *bytes) { return bytes->is_buffer; }
+
+void scr_bytes_copy_brand(ScrBytes *dst, const ScrBytes *src) {
+  if (dst->elem == SCR_BYTES_U8 && src->elem == SCR_BYTES_U8) dst->is_buffer = src->is_buffer;
 }
 
 void scr_bytes_release(ScrBytes *b) {
   if (!b || b->rc == SIZE_MAX) return; /* NULL: an uninitialized `let` local */
   if (--b->rc == 0) {
-    scr_weak_dispose(b);
+    scr_weak_dispose_inline(b);
+    if (b->properties) scr_dyn_release(b->properties);
     if (b->backing) {
       scr_bytes_release(b->backing); /* a view: data points into the owner */
+    } else if (b->shared) {
+      scr_shared_release(b->shared);
     } else if (!b->external) {
       free(b->data);
     }
@@ -222,7 +330,15 @@ void scr_bytes_copy_contents(ScrBytes *dst, const ScrBytes *src) {
   if (dst->elem != src->elem || dst->len != src->len) {
     scr_trap("scriptc: typed array snapshot shape changed\n");
   }
-  memcpy(dst->data, src->data, dst->len * scr_bytes_elem_size(dst->elem));
+  size_t n = dst->len * scr_bytes_elem_size(dst->elem);
+  if (!dst->shared && !src->shared) {
+    memcpy(dst->data, src->data, n);
+    return;
+  }
+  uint8_t *scratch = scr_bytes_scratch(n);
+  scr_bytes_raw_in(src, scratch, src->data, n);
+  scr_bytes_raw_out(dst, dst->data, scratch, n);
+  free(scratch);
 }
 
 double scr_bytes_byte_len(const ScrBytes *b) {
@@ -246,94 +362,293 @@ static size_t scr_bytes_check_index(const ScrBytes *b, double i) {
 /* ToUint32: NaN/±Infinity → 0, truncate toward zero, wrap mod 2^32.
  * ToUint8 is its low byte (2^8 divides 2^32, so the residues agree). */
 static uint32_t scr_bytes_to_u32(double v) {
-  if (v != v || isinf(v)) return 0;
-  double t = trunc(v);
-  t = fmod(t, 4294967296.0);
-  if (t < 0) t += 4294967296.0;
-  return (uint32_t)t;
+  return scr_numeric_to_u32(v);
 }
 
-double scr_bytes_get(const ScrBytes *b, double i) {
-  size_t idx = scr_bytes_check_index(b, i);
-  switch (b->elem) {
+/* An element's value from its bytes. */
+static double scr_bytes_decode(ScrBytesElem elem, const uint8_t *p) {
+  switch (elem) {
     case SCR_BYTES_U8: case SCR_BYTES_U8C:
-      return (double)b->data[idx];
+      return (double)p[0];
     case SCR_BYTES_I8: {
       int8_t v;
-      memcpy(&v, b->data + idx, 1);
+      memcpy(&v, p, 1);
       return (double)v;
     }
     case SCR_BYTES_U16: {
       uint16_t v;
-      memcpy(&v, b->data + idx * 2, 2);
+      memcpy(&v, p, 2);
       return (double)v;
     }
     case SCR_BYTES_I16: {
       int16_t v;
-      memcpy(&v, b->data + idx * 2, 2);
+      memcpy(&v, p, 2);
       return (double)v;
     }
     case SCR_BYTES_U32: {
       uint32_t v;
-      memcpy(&v, b->data + idx * 4, 4);
+      memcpy(&v, p, 4);
       return (double)v;
+    }
+    case SCR_BYTES_F16: {
+      uint16_t v;
+      memcpy(&v, p, 2);
+      return scr_f16_to_f64(v);
     }
     case SCR_BYTES_F32: {
       float v;
-      memcpy(&v, b->data + idx * 4, 4);
+      memcpy(&v, p, 4);
       return (double)v;
     }
     case SCR_BYTES_F64: {
       double v;
-      memcpy(&v, b->data + idx * 8, 8);
+      memcpy(&v, p, 8);
       return v;
     }
     case SCR_BYTES_I32: {
       int32_t v;
-      memcpy(&v, b->data + idx * 4, 4);
+      memcpy(&v, p, 4);
       return (double)v;
     }
   }
   return 0; /* unreachable */
 }
 
-void scr_bytes_set(ScrBytes *b, double i, double v) {
-  if (!(i >= 0) || i != trunc(i) || i >= (double)b->len) return;
-  size_t idx = (size_t)i;
-  switch (b->elem) {
+/* An element's bytes for v, with the element type's JS conversion. */
+static void scr_bytes_encode(ScrBytesElem elem, uint8_t *p, double v) {
+  switch (elem) {
     case SCR_BYTES_U8: case SCR_BYTES_I8:
-      b->data[idx] = (uint8_t)scr_bytes_to_u32(v);
+      p[0] = (uint8_t)scr_bytes_to_u32(v);
       break;
     case SCR_BYTES_U8C:
-      b->data[idx] = (uint8_t)scr_bytes_to_u8_clamp(v);
+      p[0] = (uint8_t)scr_bytes_to_u8_clamp(v);
       break;
     case SCR_BYTES_U16: case SCR_BYTES_I16: {
       uint16_t u = (uint16_t)scr_bytes_to_u32(v);
-      memcpy(b->data + idx * 2, &u, 2);
+      memcpy(p, &u, 2);
       break;
     }
-    case SCR_BYTES_U32: {
+    case SCR_BYTES_U32: case SCR_BYTES_I32: {
+      /* ToInt32 is ToUint32 reinterpreted signed (same 2^32 residue). */
       uint32_t u = scr_bytes_to_u32(v);
-      memcpy(b->data + idx * 4, &u, 4);
+      memcpy(p, &u, 4);
+      break;
+    }
+    case SCR_BYTES_F16: {
+      uint16_t h = scr_f16_from_f64(v);
+      memcpy(p, &h, 2);
       break;
     }
     case SCR_BYTES_F32: {
       float f = (float)v; /* round-to-nearest-even, exactly Float32Array */
-      memcpy(b->data + idx * 4, &f, 4);
+      memcpy(p, &f, 4);
       break;
     }
     case SCR_BYTES_F64:
-      memcpy(b->data + idx * 8, &v, 8);
+      memcpy(p, &v, 8);
       break;
-    case SCR_BYTES_I32: {
-      /* ToInt32 is ToUint32 reinterpreted signed (same 2^32 residue). */
-      uint32_t u = scr_bytes_to_u32(v);
-      int32_t s;
-      memcpy(&s, &u, 4);
-      memcpy(b->data + idx * 4, &s, 4);
+  }
+}
+
+/* Shared elements are read and written as one relaxed atomic access of the
+ * element's width. Atomics operations on the same elements use atomic
+ * instructions without a lock, and an ordinary access of an aligned element
+ * never tears (ECMA-262 shared memory model). Views of shared storage are
+ * aligned to their element size. */
+static void scr_bytes_shared_read(const ScrBytes *b, size_t idx, uint8_t out[8]) {
+  size_t width = scr_bytes_elem_size(b->elem);
+  const uint8_t *p = b->data + idx * width;
+  switch (width) {
+    case 1: out[0] = __atomic_load_n(p, __ATOMIC_RELAXED); break;
+    case 2: {
+      uint16_t v = __atomic_load_n((const uint16_t *)p, __ATOMIC_RELAXED);
+      memcpy(out, &v, 2);
+      break;
+    }
+    case 4: {
+      uint32_t v = __atomic_load_n((const uint32_t *)p, __ATOMIC_RELAXED);
+      memcpy(out, &v, 4);
+      break;
+    }
+    default: {
+      uint64_t v = __atomic_load_n((const uint64_t *)p, __ATOMIC_RELAXED);
+      memcpy(out, &v, 8);
       break;
     }
   }
+}
+
+static void scr_bytes_shared_write(ScrBytes *b, size_t idx, const uint8_t in[8]) {
+  size_t width = scr_bytes_elem_size(b->elem);
+  uint8_t *p = b->data + idx * width;
+  switch (width) {
+    case 1: __atomic_store_n(p, in[0], __ATOMIC_RELAXED); break;
+    case 2: {
+      uint16_t v;
+      memcpy(&v, in, 2);
+      __atomic_store_n((uint16_t *)p, v, __ATOMIC_RELAXED);
+      break;
+    }
+    case 4: {
+      uint32_t v;
+      memcpy(&v, in, 4);
+      __atomic_store_n((uint32_t *)p, v, __ATOMIC_RELAXED);
+      break;
+    }
+    default: {
+      uint64_t v;
+      memcpy(&v, in, 8);
+      __atomic_store_n((uint64_t *)p, v, __ATOMIC_RELAXED);
+      break;
+    }
+  }
+}
+
+/* The element at a valid index, as a number. */
+static double scr_bytes_load(const ScrBytes *b, size_t idx) {
+  if (b->shared) {
+    uint8_t bits[8];
+    scr_bytes_shared_read(b, idx, bits);
+    return scr_bytes_decode(b->elem, bits);
+  }
+  return scr_bytes_decode(b->elem, b->data + idx * scr_bytes_elem_size(b->elem));
+}
+
+double scr_bytes_get(const ScrBytes *b, double i) {
+  return scr_bytes_load(b, scr_bytes_check_index(b, i));
+}
+
+/* The numeric view of an ordinary typed-array read: Node answers undefined
+ * for an index that is not an integer in [0, length), which ToNumber turns
+ * into NaN. Never touches storage out of bounds. */
+double scr_bytes_get_or_nan(const ScrBytes *b, double i) {
+  if (!(i >= 0) || i != trunc(i) || i >= (double)b->len) return NAN;
+  return scr_bytes_get(b, i);
+}
+
+/* Store v at a valid index with the element type's JS conversion. */
+static void scr_bytes_store(ScrBytes *b, size_t idx, double v) {
+  if (b->shared) {
+    uint8_t bits[8];
+    scr_bytes_encode(b->elem, bits, v);
+    scr_bytes_shared_write(b, idx, bits);
+    return;
+  }
+  scr_bytes_encode(b->elem, b->data + idx * scr_bytes_elem_size(b->elem), v);
+}
+
+void scr_bytes_set(ScrBytes *b, double i, double v) {
+  if (!(i >= 0) || i != trunc(i) || i >= (double)b->len) return;
+  scr_bytes_store(b, (size_t)i, v);
+}
+
+/* Compiled code validates the index against the view's length, which never
+ * changes, before it takes these shared-view paths. */
+int32_t scr_bytes_shared_get_int(const ScrBytes *b, size_t i) {
+  if (b->elem == SCR_BYTES_F32 || b->elem == SCR_BYTES_F64)
+    scr_trap("scriptc: integer read of a float typed array\n");
+  /* Uint32 elements read as their bit pattern, every other kind exactly. */
+  double v = scr_bytes_load(b, i);
+  return b->elem == SCR_BYTES_U32 ? (int32_t)(uint32_t)v : (int32_t)v;
+}
+
+double scr_bytes_shared_get_f64(const ScrBytes *b, size_t i) {
+  return scr_bytes_load(b, i);
+}
+
+void scr_bytes_shared_set(ScrBytes *b, size_t i, double v) {
+  scr_bytes_store(b, i, v);
+}
+
+/* Dispatch once per bounded block, not once per element. Loads and stores
+ * use memcpy so views and external storage need no stronger alignment or
+ * aliasing promise. A bounded scratch block avoids a kind-pair code matrix. */
+static void scr_bytes_read_numbers(double *out, const uint8_t *src, ScrBytesElem elem, size_t count) {
+#define SCR_READ_NUMBERS(kind, type) \
+  case kind: \
+    for (size_t i = 0; i < count; i++) { \
+      type value; \
+      memcpy(&value, src + i * sizeof value, sizeof value); \
+      out[i] = (double)value; \
+    } \
+    return
+  switch (elem) {
+    case SCR_BYTES_U8C:
+    SCR_READ_NUMBERS(SCR_BYTES_U8, uint8_t);
+    SCR_READ_NUMBERS(SCR_BYTES_I8, int8_t);
+    SCR_READ_NUMBERS(SCR_BYTES_U16, uint16_t);
+    SCR_READ_NUMBERS(SCR_BYTES_I16, int16_t);
+    SCR_READ_NUMBERS(SCR_BYTES_U32, uint32_t);
+    SCR_READ_NUMBERS(SCR_BYTES_I32, int32_t);
+    SCR_READ_NUMBERS(SCR_BYTES_F32, float);
+    SCR_READ_NUMBERS(SCR_BYTES_F64, double);
+    case SCR_BYTES_F16:
+      for (size_t i = 0; i < count; i++) {
+        uint16_t value;
+        memcpy(&value, src + i * sizeof value, sizeof value);
+        out[i] = scr_f16_to_f64(value);
+      }
+      return;
+  }
+#undef SCR_READ_NUMBERS
+}
+
+static void scr_bytes_write_numbers(uint8_t *dst, ScrBytesElem elem, const double *src, size_t count) {
+#define SCR_WRITE_NUMBERS(type, expression) \
+  for (size_t i = 0; i < count; i++) { \
+    type value = (expression); \
+    memcpy(dst + i * sizeof value, &value, sizeof value); \
+  } \
+  return
+  switch (elem) {
+    case SCR_BYTES_U8: case SCR_BYTES_I8: {
+      SCR_WRITE_NUMBERS(uint8_t, (uint8_t)scr_numeric_to_u32(src[i]));
+    }
+    case SCR_BYTES_U8C: {
+      SCR_WRITE_NUMBERS(uint8_t, (uint8_t)scr_bytes_to_u8_clamp(src[i]));
+    }
+    case SCR_BYTES_U16: case SCR_BYTES_I16: {
+      SCR_WRITE_NUMBERS(uint16_t, (uint16_t)scr_numeric_to_u32(src[i]));
+    }
+    case SCR_BYTES_U32: case SCR_BYTES_I32: {
+      SCR_WRITE_NUMBERS(uint32_t, scr_numeric_to_u32(src[i]));
+    }
+    case SCR_BYTES_F16: {
+      SCR_WRITE_NUMBERS(uint16_t, scr_f16_from_f64(src[i]));
+    }
+    case SCR_BYTES_F32: {
+      SCR_WRITE_NUMBERS(float, (float)src[i]);
+    }
+    case SCR_BYTES_F64: {
+      memcpy(dst, src, count * sizeof(double));
+      return;
+    }
+  }
+#undef SCR_WRITE_NUMBERS
+}
+
+/* Caller guarantees disjoint spans, or snapshots the source before entry. */
+static void scr_bytes_convert_span(uint8_t *dst, ScrBytesElem dest_elem,
+                                    const uint8_t *src, ScrBytesElem src_elem, size_t count) {
+  size_t source_width = scr_bytes_elem_size(src_elem);
+  size_t dest_width = scr_bytes_elem_size(dest_elem);
+  double values[128];
+  while (count) {
+    size_t block = count < 128 ? count : 128;
+    scr_bytes_read_numbers(values, src, src_elem, block);
+    scr_bytes_write_numbers(dst, dest_elem, values, block);
+    src += block * source_width;
+    dst += block * dest_width;
+    count -= block;
+  }
+}
+
+ScrBytes *scr_bytes_convert(ScrBytesElem elem, const ScrBytes *src) {
+  SCR_BYTES_SNAPSHOT(src);
+  if (elem == src->elem) return scr_bytes_copy(src);
+  ScrBytes *out = scr_bytes_alloc_private(elem, src->len);
+  scr_bytes_convert_span(out->data, elem, src->data, src->elem, src->len);
+  return out;
 }
 
 /* ── slice (copy) / subarray (view) ────────────────────────────────────── */
@@ -353,8 +668,8 @@ ScrBytes *scr_bytes_slice(const ScrBytes *b, double start, double end) {
   size_t e = scr_bytes_rel_index(end, b->len);
   size_t count = e > s ? e - s : 0;
   size_t esize = scr_bytes_elem_size(b->elem);
-  ScrBytes *out = scr_bytes_alloc(b->elem, count);
-  memcpy(out->data, b->data + s * esize, count * esize);
+  ScrBytes *out = scr_bytes_alloc_private(b->elem, count);
+  scr_bytes_raw_in(b, out->data, b->data + s * esize, count * esize);
   return out;
 }
 
@@ -365,7 +680,12 @@ ScrBytes *scr_bytes_copy_within(ScrBytes *b, double target, double start, double
   size_t count = e > s ? e - s : 0;
   if (count > b->len - t) count = b->len - t;
   size_t width = scr_bytes_elem_size(b->elem);
-  memmove(b->data + t * width, b->data + s * width, count * width);
+  if (b->shared) {
+    uint8_t *scratch = scr_bytes_scratch(count * width);
+    scr_shared_load(scratch, b->data + s * width, count * width);
+    scr_shared_store(b->data + t * width, scratch, count * width);
+    free(scratch);
+  } else memmove(b->data + t * width, b->data + s * width, count * width);
   return scr_bytes_retain(b);
 }
 
@@ -376,7 +696,27 @@ ScrBytes *scr_bytes_copy_within(ScrBytes *b, double target, double start, double
 ScrBytes *scr_bytes_fill_elem(ScrBytes *b, double v, double start, double end) {
   size_t s = scr_bytes_rel_index(start, b->len);
   size_t e = scr_bytes_rel_index(end, b->len);
-  for (size_t i = s; i < e; i++) scr_bytes_set(b, (double)i, v);
+  if (e > s) {
+    size_t width = scr_bytes_elem_size(b->elem);
+    uint8_t pattern[8];
+    scr_bytes_write_numbers(pattern, b->elem, &v, 1);
+    size_t bytes = (e - s) * width;
+    uint8_t *dst = b->shared ? scr_bytes_scratch(bytes) : b->data + s * width;
+    if (width == 1) memset(dst, pattern[0], bytes);
+    else {
+      memcpy(dst, pattern, width);
+      size_t filled = width;
+      while (filled < bytes) {
+        size_t copy = filled < bytes - filled ? filled : bytes - filled;
+        memcpy(dst + filled, dst, copy);
+        filled += copy;
+      }
+    }
+    if (b->shared) {
+      scr_shared_store(b->data + s * width, dst, bytes);
+      free(dst);
+    }
+  }
   return scr_bytes_retain(b);
 }
 
@@ -401,6 +741,10 @@ ScrBytes *scr_bytes_subarray(ScrBytes *b, double start, double end) {
   v->is_buffer = b->is_buffer;
   v->is_data_view = false;
   v->external = false;
+  v->untransferable = false;
+  v->shared = owner->shared;
+  v->properties = NULL;
+  v->properties_traced = false;
 #ifdef SCR_RC_AUDIT
   scr_live_bytes++;
 #endif
@@ -414,16 +758,54 @@ void scr_bytes_set_from(ScrBytes *dst, const ScrBytes *src, double offset) {
     scr_throw_error_msg(SCR_ERR_RANGE, msg, sizeof msg - 1);
     return;
   }
-  if (dst->elem != src->elem) {
-    // Snapshot before writing: views can overlap even with distinct kinds.
-    ScrBytes *copy = scr_bytes_convert(dst->elem, src);
-    memcpy(dst->data + (size_t)t * scr_bytes_elem_size(dst->elem), copy->data,
-           copy->len * scr_bytes_elem_size(copy->elem));
-    scr_bytes_release(copy);
+  size_t width = scr_bytes_elem_size(dst->elem);
+  if (dst->shared || src->shared) {
+    SCR_BYTES_SNAPSHOT(src);
+    size_t bytes = src->len * width;
+    uint8_t *target = dst->data + (size_t)t * width;
+    if (dst->elem == src->elem) {
+      /* The same element kind copies the source's bytes, NaN payloads
+       * included. A source range that overlaps the target range (views of
+       * one buffer, where no snapshot was taken) is copied out first. */
+      uintptr_t to = (uintptr_t)target, from = (uintptr_t)src->data;
+      bool overlap = to <= from ? from - to < bytes : to - from < bytes;
+      if (!overlap) {
+        scr_bytes_raw_out(dst, target, src->data, bytes);
+        return;
+      }
+      uint8_t *copy = scr_bytes_scratch(bytes);
+      scr_bytes_raw_in(src, copy, src->data, bytes);
+      scr_bytes_raw_out(dst, target, copy, bytes);
+      free(copy);
+      return;
+    }
+    /* Convert a private copy of the source, then publish the target range. */
+    uint8_t *scratch = scr_bytes_scratch(bytes);
+    scr_bytes_convert_span(scratch, dst->elem, src->data, src->elem, src->len);
+    scr_bytes_raw_out(dst, target, scratch, bytes);
+    free(scratch);
     return;
   }
-  size_t esize = scr_bytes_elem_size(dst->elem);
-  memmove(dst->data + (size_t)t * esize, src->data, src->len * esize);
+  uint8_t *target = dst->data + (size_t)t * width;
+  if (dst->elem == src->elem) {
+    memmove(target, src->data, src->len * width);
+    return;
+  }
+  size_t source_bytes = src->len * scr_bytes_elem_size(src->elem);
+  size_t dest_bytes = src->len * width;
+  uintptr_t to = (uintptr_t)target, from = (uintptr_t)src->data;
+  bool overlap = to <= from ? from - to < dest_bytes : to - from < source_bytes;
+  if (overlap) {
+    /* Snapshot raw source bytes before cross-kind writes. Distinct external
+     * wrappers can alias even without a shared backing identity. */
+    uint8_t *copy = malloc(source_bytes ? source_bytes : 1);
+    if (!copy) scr_bytes_oom();
+    memcpy(copy, src->data, source_bytes);
+    scr_bytes_convert_span(target, dst->elem, copy, src->elem, src->len);
+    free(copy);
+  } else {
+    scr_bytes_convert_span(target, dst->elem, src->data, src->elem, src->len);
+  }
 }
 
 /* Checked-native array-like sources. Runtime objects with an unsupported
@@ -504,9 +886,11 @@ ScrBytes *scr_bytes_from_dyn(ScrBytesElem elem, const ScrDyn *value, bool from) 
     return out;
   }
   if (value->kind == SCR_DYN_BYTES) return scr_bytes_convert(elem, value->v.bytes);
-  if (!from && scr_array_buffer_is(value)) return scr_array_buffer_view(elem, value, scr_dyn_undefined(), scr_dyn_undefined());
+  if (!from && scr_buffer_storage_is(value)) return scr_array_buffer_view(elem, value, scr_dyn_undefined(), scr_dyn_undefined());
   if (!from && (value->kind == SCR_DYN_NUM || value->kind == SCR_DYN_BOOL ||
-                value->kind == SCR_DYN_STR || value->kind == SCR_DYN_NULL || value->kind == SCR_DYN_UNDEF)) {
+                value->kind == SCR_DYN_STR || value->kind == SCR_DYN_NULL || value->kind == SCR_DYN_UNDEF ||
+                value->kind == SCR_DYN_SYMBOL || value->kind == SCR_DYN_BIGINT)) {
+    /* ToIndex: a Symbol or BigInt length throws ToNumber's TypeError. */
     double number;
     if (!scr_dyn_number_coerce_js(value, &number)) return NULL;
     return scr_bytes_new(elem, number);
@@ -514,6 +898,21 @@ ScrBytes *scr_bytes_from_dyn(ScrBytesElem elem, const ScrDyn *value, bool from) 
   // Constructors drain array iterators before element coercion. Node's .from
   // fast path reads ordinary array elements during conversion instead. Strings
   // supplied to .from iterate by code point (set reads UTF-16 code units).
+  // An object with a Symbol.iterator method iterates; others are array-like.
+  ScrDyn *method = scr_dyn_iterator_method(value);
+  if (method) {
+    ScrDyn *items = scr_dyn_iterate_with(value, method);
+    scr_dyn_release(method);
+    if (!items) return NULL;
+    ScrBytes *out = scr_bytes_new(elem, (double)items->v.arr.len);
+    if (out && !scr_bytes_copy_array_like(out, items, 0, out->len)) {
+      scr_bytes_release(out);
+      out = NULL;
+    }
+    scr_dyn_release(items);
+    return out;
+  }
+  if (scr_exc_pending()) return NULL;
   if ((!from && value->kind == SCR_DYN_ARR) || (from && value->kind == SCR_DYN_STR)) {
     ScrDyn *items = scr_dyn_iter_pack(value, NULL);
     if (!items) return NULL;
@@ -615,6 +1014,10 @@ ScrBytes *scr_dataview_new(ScrBytes *src, double byte_off, bool has_len, double 
   v->is_buffer = false;
   v->is_data_view = true;
   v->external = false;
+  v->untransferable = false;
+  v->shared = owner->shared;
+  v->properties = NULL;
+  v->properties_traced = false;
 #ifdef SCR_RC_AUDIT
   scr_live_bytes++;
 #endif
@@ -652,6 +1055,7 @@ static size_t scr_dataview_get_size(ScrDataViewGet kind) {
       return 1;
     case SCR_DV_U16:
     case SCR_DV_I16:
+    case SCR_DV_F16:
       return 2;
     case SCR_DV_U32:
     case SCR_DV_I32:
@@ -672,7 +1076,8 @@ double scr_dataview_get(const ScrBytes *b, double byte_off, ScrDataViewGet kind,
     scr_throw_error_msg(SCR_ERR_RANGE, msg, sizeof msg - 1);
     return 0;
   }
-  const uint8_t *p = b->data + (size_t)off;
+  uint8_t p[8];
+  scr_bytes_raw_in(b, p, b->data + (size_t)off, width);
   /* Assemble host-independently; le false is the JS big-endian default. */
   uint64_t u = 0;
   for (size_t i = 0; i < width; i++) {
@@ -689,6 +1094,8 @@ double scr_dataview_get(const ScrBytes *b, double byte_off, ScrDataViewGet kind,
       return (double)(int16_t)u;
     case SCR_DV_I32:
       return (double)(int32_t)u;
+    case SCR_DV_F16:
+      return scr_f16_to_f64((uint16_t)u);
     case SCR_DV_F32: {
       uint32_t bits = (uint32_t)u;
       float f;
@@ -733,6 +1140,9 @@ void scr_dataview_set(ScrBytes *b, double byte_off, double value, ScrDataViewGet
     case SCR_DV_I32:
       u = (uint64_t)scr_bytes_to_u32(value);
       break;
+    case SCR_DV_F16:
+      u = scr_f16_from_f64(value);
+      break;
     case SCR_DV_F32: {
       float f = (float)value;
       uint32_t bits;
@@ -747,10 +1157,11 @@ void scr_dataview_set(ScrBytes *b, double byte_off, double value, ScrDataViewGet
       return; /* BigInt setters use scr_dataview_write_u64_raw. */
   }
   /* Scatter host-independently; le false is the JS big-endian default. */
-  uint8_t *p = b->data + (size_t)off;
+  uint8_t p[8];
   for (size_t i = 0; i < width; i++) {
     p[le ? i : width - 1 - i] = (uint8_t)(u >> (8 * i));
   }
+  scr_bytes_raw_out(b, b->data + (size_t)off, p, width);
 }
 
 /* ── encodings (u8 only — the compiler routes only u8 receivers here) ──── */
@@ -766,79 +1177,77 @@ static void scr_td_invalid(const char *encoding) {
   scr_throw_error_msg_code(SCR_ERR_TYPE, message, (size_t)n, "ERR_ENCODING_INVALID_ENCODED_DATA");
 }
 
+/* Stop before the first non-ASCII byte; every word load stays in the span. */
+static size_t scr_bytes_ascii_prefix(const uint8_t *data, size_t len) {
+  return scr_bytes_ascii_span((const char *)data, len);
+}
+
+/* Length of the well-formed prefix. On failure, next skips exactly the
+ * maximal invalid subpart; an offending continuation is reprocessed. */
+static size_t scr_bytes_utf8_prefix(const uint8_t *data, size_t len, size_t *next) {
+  size_t i = 0;
+  while (i < len) {
+    i += scr_bytes_ascii_prefix(data + i, len - i);
+    if (i == len) break;
+    size_t start = i;
+    unsigned byte = data[i++], count;
+    unsigned low = 0x80, high = 0xbf;
+    if (byte < 0x80) continue;
+    if (byte >= 0xc2 && byte <= 0xdf) count = 1;
+    else if (byte >= 0xe0 && byte <= 0xef) {
+      count = 2;
+      if (byte == 0xe0) low = 0xa0;
+      if (byte == 0xed) high = 0x9f;
+    } else if (byte >= 0xf0 && byte <= 0xf4) {
+      count = 3;
+      if (byte == 0xf0) low = 0x90;
+      if (byte == 0xf4) high = 0x8f;
+    } else { *next = i; return start; }
+    for (unsigned j = 0; j < count; j++) {
+      if (i == len || data[i] < low || data[i] > high) {
+        *next = i;
+        return start;
+      }
+      i++;
+      low = 0x80;
+      high = 0xbf;
+    }
+  }
+  *next = len;
+  return len;
+}
+
+/* Measure first, then write into final string storage. Invalid input can
+ * expand, but neither valid prefixes nor retained output need a 3x buffer. */
+static size_t scr_bytes_utf8_repair(const uint8_t *in, size_t n,
+                                  size_t prefix, size_t next, char *out) {
+  size_t written = 0, offset = 0;
+  for (;;) {
+    if (prefix > SIZE_MAX - written) scr_bytes_oom();
+    if (out && prefix) memcpy(out + written, in + offset, prefix);
+    written += prefix;
+    if (prefix == n - offset) return written;
+    if (written > SIZE_MAX - 3) scr_bytes_oom();
+    if (out) memcpy(out + written, "\xef\xbf\xbd", 3);
+    written += 3;
+    offset += next;
+    prefix = scr_bytes_utf8_prefix(in + offset, n - offset, &next);
+  }
+}
+
 static ScrStr *scr_bytes_decode_utf8_options(const uint8_t *in, size_t n, bool fatal) {
   if (in == NULL && n != 0) {
     scr_trap("scriptc: native callback passed a NULL span with nonzero length\n");
   }
-  if (n > (SIZE_MAX - 1) / 3) scr_bytes_oom();
-  char *out = malloc(n * 3 + 1);
-  if (!out) scr_bytes_oom();
-  size_t o = 0;
-  uint32_t cp = 0;
-  int needed = 0;
-  uint8_t lower = 0x80, upper = 0xbf;
-  for (size_t i = 0; i <= n; i++) {
-    if (i == n) {
-      if (needed > 0) { /* EOF inside a sequence: one replacement */
-        if (fatal) { free(out); scr_td_invalid("utf-8"); return NULL; }
-        memcpy(out + o, "\xef\xbf\xbd", 3);
-        o += 3;
-      }
-      break;
-    }
-    uint8_t byte = in[i];
-    if (needed == 0) {
-      if (byte <= 0x7f) {
-        out[o++] = (char)byte;
-      } else if (byte >= 0xc2 && byte <= 0xdf) {
-        needed = 1; cp = byte & 0x1f;
-      } else if (byte >= 0xe0 && byte <= 0xef) {
-        if (byte == 0xe0) lower = 0xa0;
-        if (byte == 0xed) upper = 0x9f;
-        needed = 2; cp = byte & 0xf;
-      } else if (byte >= 0xf0 && byte <= 0xf4) {
-        if (byte == 0xf0) lower = 0x90;
-        if (byte == 0xf4) upper = 0x8f;
-        needed = 3; cp = byte & 0x7;
-      } else {
-        if (fatal) { free(out); scr_td_invalid("utf-8"); return NULL; }
-        memcpy(out + o, "\xef\xbf\xbd", 3);
-        o += 3;
-      }
-      continue;
-    }
-    if (byte < lower || byte > upper) {
-      /* Invalid continuation: replace the subpart, REPROCESS this byte. */
-      if (fatal) { free(out); scr_td_invalid("utf-8"); return NULL; }
-      memcpy(out + o, "\xef\xbf\xbd", 3);
-      o += 3;
-      needed = 0; lower = 0x80; upper = 0xbf;
-      i--;
-      continue;
-    }
-    lower = 0x80; upper = 0xbf;
-    cp = (cp << 6) | (byte & 0x3f);
-    if (--needed == 0) {
-      /* Re-encode the (valid, non-surrogate, <= 10FFFF) code point. */
-      if (cp <= 0x7f) {
-        out[o++] = (char)cp;
-      } else if (cp <= 0x7ff) {
-        out[o++] = (char)(0xc0 | (cp >> 6));
-        out[o++] = (char)(0x80 | (cp & 0x3f));
-      } else if (cp <= 0xffff) {
-        out[o++] = (char)(0xe0 | (cp >> 12));
-        out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-        out[o++] = (char)(0x80 | (cp & 0x3f));
-      } else {
-        out[o++] = (char)(0xf0 | (cp >> 18));
-        out[o++] = (char)(0x80 | ((cp >> 12) & 0x3f));
-        out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-        out[o++] = (char)(0x80 | (cp & 0x3f));
-      }
-    }
-  }
-  ScrStr *s = scr_str_new(out, o);
-  free(out);
+  if (n == 0) return scr_str_new("", 0);
+  size_t next;
+  size_t prefix = scr_bytes_utf8_prefix(in, n, &next);
+  if (prefix == n) return scr_str_new((const char *)in, n);
+  if (fatal) { scr_td_invalid("utf-8"); return NULL; }
+  size_t length = scr_bytes_utf8_repair(in, n, prefix, next, NULL);
+  ScrStr *s = scr_str_alloc_raw(length, length);
+  scr_bytes_utf8_repair(in, n, prefix, next, s->data);
+  s->data[length] = '\0';
   return s;
 }
 
@@ -850,11 +1259,50 @@ ScrStr *scr_str_from_utf8_lossy(const uint8_t *bytes, size_t len) {
   return scr_bytes_decode_utf8(bytes, len);
 }
 
+/* The WHATWG decode above for bytes already read into string storage (file
+ * contents): well-formed input, by far the common case, keeps its storage
+ * and records whether it is all ASCII, so the read needs neither an
+ * intermediate buffer nor a copy. Only malformed input is repaired into a
+ * new string. Consumes the uniquely owned `raw`; returns +1. */
+ScrStr *scr_str_adopt_utf8_lossy(ScrStr *raw, size_t ascii) {
+  const uint8_t *in = (const uint8_t *)raw->data;
+  size_t n = raw->len;
+  if (ascii > n) ascii = n;
+  ascii += scr_bytes_ascii_prefix(in + ascii, n - ascii);
+  if (ascii == n) {
+    scr_str_note_ascii(raw);
+    return raw;
+  }
+  size_t next;
+  size_t prefix = ascii + scr_bytes_utf8_prefix(in + ascii, n - ascii, &next);
+  if (prefix == n) return raw;
+  next += ascii;
+  size_t length = scr_bytes_utf8_repair(in, n, prefix, next, NULL);
+  ScrStr *s = scr_str_alloc_raw(length, length);
+  scr_bytes_utf8_repair(in, n, prefix, next, s->data);
+  s->data[length] = '\0';
+  scr_str_release(raw);
+  return s;
+}
+
+/* Whether a validated runtime encoding name decodes as UTF-8: Node's ASCII
+ * case-insensitive "utf8" / "utf-8" spellings. */
+bool scr_bytes_encoding_is_utf8(const ScrStr *enc) {
+  if (enc->len != 4 && enc->len != 5) return false;
+  char name[5];
+  for (size_t i = 0; i < enc->len; i++) {
+    char c = enc->data[i];
+    name[i] = c >= 'A' && c <= 'Z' ? (char)(c + ('a' - 'A')) : c;
+  }
+  return enc->len == 4 ? memcmp(name, "utf8", 4) == 0 : memcmp(name, "utf-8", 5) == 0;
+}
+
 /* WHATWG TextDecoder.decode (utf-8, default options): the SAME maximal-
  * subpart replacement decode as toString("utf8") above, with one
  * difference — a leading UTF-8 BOM is stripped (ignoreBOM defaults to
  * false in the spec; Buffer.toString keeps the BOM as U+FEFF). */
 ScrStr *scr_text_decode_options(const ScrBytes *b, bool fatal, bool ignore_bom) {
+  SCR_BYTES_SNAPSHOT(b);
   const uint8_t *in = b->data;
   size_t n = b->len;
   if (!ignore_bom && n >= 3 && in[0] == 0xef && in[1] == 0xbb && in[2] == 0xbf) {
@@ -877,7 +1325,7 @@ ScrBytes *scr_bytes_buffer_source(const ScrDyn *value) {
     ScrBytes *bytes = value->v.bytes;
     return scr_bytes_buffer_view(bytes, SCR_BYTES_U8, scr_bytes_byte_offset(bytes), true, scr_bytes_byte_len(bytes));
   }
-  if (scr_array_buffer_is(value)) {
+  if (scr_buffer_storage_is(value)) {
     return scr_array_buffer_view(SCR_BYTES_U8, value, scr_dyn_undefined(), scr_dyn_undefined());
   }
   static const char message[] = "The input argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.";
@@ -1048,12 +1496,14 @@ static ScrStr *scr_strdec_step(const ScrStr *enc, double pending, const ScrBytes
 
 /* decoder.write(chunk): the decoded complete prefix (+1). */
 ScrStr *scr_strdec_write(const ScrStr *enc, double pending, const ScrBytes *chunk) {
+  SCR_BYTES_SNAPSHOT(chunk);
   double hold;
   return scr_strdec_step(enc, pending, chunk, true, &hold);
 }
 
 /* The decoder state AFTER a write: the packed trailing partial sequence. */
 double scr_strdec_next(const ScrStr *enc, double pending, const ScrBytes *chunk) {
+  SCR_BYTES_SNAPSHOT(chunk);
   double hold = 0;
   scr_strdec_step(enc, pending, chunk, false, &hold);
   return hold;
@@ -1062,8 +1512,8 @@ double scr_strdec_next(const ScrStr *enc, double pending, const ScrBytes *chunk)
 /* decoder.end(): the buffered partial flushes — utf8's truncated sequence
  * becomes its replacement chars (the maximal-subpart rule), base64's
  * remainder encodes (padded; unpadded for base64url), utf16le's held
- * bytes decode as they stand (an odd byte drops; a held lead surrogate is
- * the documented U+FFFD divergence), and the stateless encodings flush
+ * bytes decode as they stand (an odd byte drops; a held lead surrogate
+ * stays lone), and the stateless encodings flush
  * nothing. +1. */
 ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
   uint8_t pend[3];
@@ -1080,8 +1530,10 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
 static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
                                     size_t *s0_out, size_t *e0_out) {
   size_t len = b->len;
-  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
-  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
+  /* Clamped before the conversion: NaN and values at or below 0 are 0,
+   * values at or past the length (Infinity included) are the length. */
+  size_t s0 = !(start > 0) ? 0 : start >= (double)len ? len : (size_t)start;
+  size_t e0 = !(end > 0) ? 0 : end >= (double)len ? len : (size_t)end;
   if (e0 < s0) e0 = s0;
   *s0_out = s0;
   *e0_out = e0;
@@ -1094,6 +1546,7 @@ static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
  * form). Delegates to the whole-buffer decoder
  * through a stack view — no allocation, no rc traffic. */
 ScrStr *scr_bytes_to_str_range(const ScrBytes *b, const ScrStr *enc, double start, double end) {
+  SCR_BYTES_SNAPSHOT(b);
   size_t s0, e0;
   scr_bytes_to_str_bounds(b, start, end, &s0, &e0);
   ScrBytes view = { .rc = 1, .len = e0 - s0, .elem = b->elem, .data = b->data + s0, .backing = NULL };
@@ -1109,23 +1562,30 @@ static ScrStr *scr_bytes_encode_b64(const uint8_t *in, size_t n, bool url) {
   static const char url_abc[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   const char *abc = url ? url_abc : std_abc;
-  size_t outlen = (n + 2) / 3 * 4;
-  char *out = malloc(outlen + 1);
-  if (!out) scr_bytes_oom();
-  size_t o = 0;
-  for (size_t i = 0; i < n; i += 3) {
-    unsigned v = (unsigned)in[i] << 16;
-    if (i + 1 < n) v |= (unsigned)in[i + 1] << 8;
-    if (i + 2 < n) v |= (unsigned)in[i + 2];
-    out[o++] = abc[(v >> 18) & 63];
+  size_t groups = n / 3, tail = n % 3;
+  size_t suffix = tail ? (url ? tail + 1 : 4) : 0;
+  if (groups > (SIZE_MAX - suffix) / 4) scr_bytes_oom();
+  size_t outlen = groups * 4 + suffix;
+  ScrStr *s = scr_str_alloc_raw(outlen, outlen);
+  char *out = s->data;
+  size_t i = 0, o = 0;
+  for (; i < groups * 3; i += 3) {
+    unsigned v = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8) | in[i + 2];
+    out[o++] = abc[v >> 18];
     out[o++] = abc[(v >> 12) & 63];
-    if (i + 1 < n) out[o++] = abc[(v >> 6) & 63];
-    else if (!url) out[o++] = '=';
-    if (i + 2 < n) out[o++] = abc[v & 63];
-    else if (!url) out[o++] = '=';
+    out[o++] = abc[(v >> 6) & 63];
+    out[o++] = abc[v & 63];
   }
-  ScrStr *s = scr_str_new(out, o);
-  free(out);
+  if (tail) {
+    unsigned v = (unsigned)in[i] << 16;
+    if (tail == 2) v |= (unsigned)in[i + 1] << 8;
+    out[o++] = abc[v >> 18];
+    out[o++] = abc[(v >> 12) & 63];
+    if (tail == 2) out[o++] = abc[(v >> 6) & 63];
+    else if (!url) out[o++] = '=';
+    if (!url) out[o++] = '=';
+  }
+  out[outlen] = '\0';
   return s;
 }
 
@@ -1137,6 +1597,7 @@ static size_t scr_bytes_put_cp(char *out, size_t o, uint32_t cp) {
     out[o++] = (char)(0xc0 | (cp >> 6));
     out[o++] = (char)(0x80 | (cp & 0x3f));
   } else if (cp <= 0xffff) {
+    if (cp >= 0xd800 && cp <= 0xdfff) scr_wtf8_note(); /* a lone UTF-16 unit */
     out[o++] = (char)(0xe0 | (cp >> 12));
     out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
     out[o++] = (char)(0x80 | (cp & 0x3f));
@@ -1689,6 +2150,7 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b, bool fatal) {
 }
 
 ScrStr *scr_text_decode_legacy_options(const ScrBytes *b, double encoding_value, bool fatal, bool ignore_bom) {
+  SCR_BYTES_SNAPSHOT(b);
   unsigned encoding = (unsigned)encoding_value;
   if (encoding == 36) encoding = 7; /* ISO-8859-8-I */
   if (encoding == 37) encoding = SCR_TD_GB18030; /* GBK */
@@ -1729,6 +2191,7 @@ static size_t scr_td_utf8_tail(const uint8_t *bytes, size_t n) {
 
 ScrStr *scr_text_decode_stream(ScrDyn *state, const ScrBytes *input,
     double encoding, bool fatal, bool ignore_bom, bool stream) {
+  SCR_BYTES_SNAPSHOT(input);
   if (encoding == 36) encoding = 7; /* ISO-8859-8-I is a single-byte decoder. */
   ScrDyn *saved = scr_dyn_obj_read(state, "pending", 7);
   size_t pending = saved->kind == SCR_DYN_BYTES ? saved->v.bytes->len : 0;
@@ -1817,14 +2280,27 @@ ScrDyn *scr_text_encode_into(const ScrDyn *source, const ScrDyn *destination) {
   const ScrStr *text = source->v.str;
   ScrBytes *dest = destination->v.bytes;
   size_t read = 0, written = 0;
-  while (written < text->len) {
+  size_t limit = text->len < dest->len ? text->len : dest->len;
+  while (written < limit) {
+    size_t ascii = scr_bytes_ascii_prefix((const uint8_t *)text->data + written, limit - written);
+    written += ascii;
+    read += ascii;
+    if (written == limit) break;
     size_t end = written;
     uint32_t cp = scr_bytes_next_cp((const uint8_t *)text->data, &end);
     if (end > dest->len) break;
     read += cp > 0xffff ? 2 : 1;
     written = end;
   }
-  if (written) memcpy(dest->data, text->data, written);
+  if (written) {
+    uint8_t *out = dest->shared ? scr_bytes_scratch(written) : dest->data;
+    memcpy(out, text->data, written);
+    if (!text->ascii) scr_wtf8_to_utf8((char *)out, written);
+    if (dest->shared) {
+      scr_shared_store(dest->data, out, written);
+      free(out);
+    }
+  }
   ScrDyn *result = scr_dyn_new_obj();
   scr_dyn_obj_set(result, "read", 4, scr_dyn_new_num((double)read));
   scr_dyn_obj_set(result, "written", 7, scr_dyn_new_num((double)written));
@@ -1832,7 +2308,7 @@ ScrDyn *scr_text_encode_into(const ScrDyn *source, const ScrDyn *destination) {
 }
 
 static ScrBytes *scr_buffer_validation_input(const ScrDyn *input) {
-  if ((input->kind == SCR_DYN_BYTES && !input->v.bytes->is_data_view) || scr_array_buffer_is(input)) {
+  if ((input->kind == SCR_DYN_BYTES && !input->v.bytes->is_data_view) || scr_buffer_storage_is(input)) {
     return scr_bytes_buffer_source(input);
   }
   scr_dyn_arg_type_fail("input", "an instance of ArrayBuffer, Buffer, or TypedArray", input);
@@ -1840,33 +2316,16 @@ static ScrBytes *scr_buffer_validation_input(const ScrDyn *input) {
 }
 
 static bool scr_buffer_utf8_valid(const uint8_t *data, size_t len) {
-  size_t i = 0;
-  while (i < len) {
-    unsigned byte = data[i++], count;
-    unsigned low = 0x80, high = 0xbf;
-    if (byte < 0x80) continue;
-    if (byte >= 0xc2 && byte <= 0xdf) count = 1;
-    else if (byte >= 0xe0 && byte <= 0xef) {
-      count = 2;
-      if (byte == 0xe0) low = 0xa0;
-      if (byte == 0xed) high = 0x9f;
-    } else if (byte >= 0xf0 && byte <= 0xf4) {
-      count = 3;
-      if (byte == 0xf0) low = 0x90;
-      if (byte == 0xf4) high = 0x8f;
-    } else return false;
-    if (count > len - i || data[i] < low || data[i] > high) return false;
-    i++;
-    for (unsigned j = 1; j < count; j++, i++) if (data[i] < 0x80 || data[i] > 0xbf) return false;
-  }
-  return true;
+  size_t next;
+  return scr_bytes_utf8_prefix(data, len, &next) == len;
 }
 
 bool scr_buffer_is_ascii(const ScrDyn *input) {
   ScrBytes *bytes = scr_buffer_validation_input(input);
   if (!bytes) return false;
-  bool result = true;
-  for (size_t i = 0; i < bytes->len; i++) if (bytes->data[i] > 0x7f) { result = false; break; }
+  ScrBytes *view = bytes;
+  SCR_BYTES_SNAPSHOT(view);
+  bool result = scr_bytes_ascii_prefix(view->data, view->len) == view->len;
   scr_bytes_release(bytes);
   return result;
 }
@@ -1874,7 +2333,9 @@ bool scr_buffer_is_ascii(const ScrDyn *input) {
 bool scr_buffer_is_utf8(const ScrDyn *input) {
   ScrBytes *bytes = scr_buffer_validation_input(input);
   if (!bytes) return false;
-  bool result = scr_buffer_utf8_valid(bytes->data, bytes->len);
+  ScrBytes *view = bytes;
+  SCR_BYTES_SNAPSHOT(view);
+  bool result = scr_buffer_utf8_valid(view->data, view->len);
   scr_bytes_release(bytes);
   return result;
 }
@@ -1964,6 +2425,7 @@ ScrBytes *scr_buffer_transcode(const ScrDyn *source, const ScrDyn *from, const S
     return NULL;
   }
   const ScrBytes *input = source->v.bytes;
+  SCR_BYTES_SNAPSHOT(input);
   size_t len = input->len;
   if (!len) { ScrBytes *empty = scr_bytes_alloc(SCR_BYTES_U8, 0); empty->is_buffer = true; return empty; }
   int from_encoding = scr_transcode_encoding(from), to_encoding = scr_transcode_encoding(to);
@@ -2018,66 +2480,110 @@ static bool scr_enc_is(const ScrStr *enc, const char *name) {
 
 /* toString("utf16le"): LE code-unit pairs (an odd tail byte drops, like
  * Node). Valid surrogate pairs combine into their code point; a LONE
- * surrogate becomes U+FFFD — Node keeps it as a lone UTF-16 unit, which
- * UTF-8 string storage cannot hold (SEMANTICS.md divergence; stdout
- * agrees byte-for-byte because Node's own write replaces it there too). */
+ * surrogate stays a lone UTF-16 unit, as in Node. */
+/* Consume one code point or unpaired surrogate. */
+static uint32_t scr_bytes_utf16le_cp(const uint8_t *in, size_t units, size_t *u) {
+  uint32_t cu = (uint32_t)in[*u * 2] | ((uint32_t)in[*u * 2 + 1] << 8);
+  (*u)++;
+  if (cu >= 0xd800 && cu <= 0xdbff && *u < units) {
+    uint32_t lo = (uint32_t)in[*u * 2] | ((uint32_t)in[*u * 2 + 1] << 8);
+    if (lo >= 0xdc00 && lo <= 0xdfff) {
+      (*u)++;
+      return 0x10000 + ((cu - 0xd800) << 10) + (lo - 0xdc00);
+    }
+  }
+  return cu;
+}
+
+/* Four units below 0x80 copy as four bytes (one word holds them), and
+ * other units outside the surrogate range are written inline; surrogates
+ * take scr_bytes_utf16le_cp. The string has one UTF-16 unit per input
+ * unit, which is recorded so its length needs no walk. */
 static ScrStr *scr_bytes_decode_utf16le(const uint8_t *in, size_t n) {
   size_t units = n / 2;
-  char *out = malloc(units * 3 + 2);
-  if (!out) scr_bytes_oom();
-  size_t o = 0;
-  for (size_t u = 0; u < units; u++) {
-    uint32_t cu = (uint32_t)in[u * 2] | ((uint32_t)in[u * 2 + 1] << 8);
-    if (cu >= 0xd800 && cu <= 0xdbff && u + 1 < units) {
-      uint32_t lo = (uint32_t)in[(u + 1) * 2] | ((uint32_t)in[(u + 1) * 2 + 1] << 8);
-      if (lo >= 0xdc00 && lo <= 0xdfff) {
-        o = scr_bytes_put_cp(out, o, 0x10000 + ((cu - 0xd800) << 10) + (lo - 0xdc00));
-        u++;
+  if (units > SIZE_MAX / 3) scr_bytes_oom();
+  ScrStr *s = scr_str_alloc_raw(0, units * 3);
+  uint8_t *out = (uint8_t *)s->data;
+  size_t o = 0, u = 0;
+  while (u < units) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (units - u >= 4) {
+      uint64_t w;
+      memcpy(&w, in + u * 2, 8);
+      if (!(w & UINT64_C(0xff80ff80ff80ff80))) {
+        out[o] = (uint8_t)w;
+        out[o + 1] = (uint8_t)(w >> 16);
+        out[o + 2] = (uint8_t)(w >> 32);
+        out[o + 3] = (uint8_t)(w >> 48);
+        o += 4;
+        u += 4;
         continue;
       }
     }
-    o = scr_bytes_put_cp(out, o, cu >= 0xd800 && cu <= 0xdfff ? 0xfffd : cu);
+#endif
+    uint32_t cu = (uint32_t)in[u * 2] | ((uint32_t)in[u * 2 + 1] << 8);
+    if (cu >= 0x800 && (cu < 0xd800 || cu > 0xdfff)) {
+      /* Three bytes in one four-byte store; the next write (or the
+       * terminator) replaces the fourth. */
+      uint8_t seq[4] = {(uint8_t)(0xe0 | (cu >> 12)), (uint8_t)(0x80 | ((cu >> 6) & 0x3f)),
+                        (uint8_t)(0x80 | (cu & 0x3f)), 0};
+      memcpy(out + o, seq, 4);
+      o += 3;
+      u++;
+    } else if (cu < 0x80) {
+      out[o++] = (uint8_t)cu;
+      u++;
+    } else if (cu < 0x800) {
+      out[o] = (uint8_t)(0xc0 | (cu >> 6));
+      out[o + 1] = (uint8_t)(0x80 | (cu & 0x3f));
+      o += 2;
+      u++;
+    } else {
+      o = scr_bytes_put_cp(s->data, o, scr_bytes_utf16le_cp(in, units, &u));
+    }
   }
-  ScrStr *s = scr_str_new(out, o);
-  free(out);
+  s->len = o;
+  s->data[o] = '\0';
+  if (o == units) scr_str_note_ascii(s);
+  else scr_str_note_utf16_len(s, units);
   return s;
 }
 
 ScrStr *scr_bytes_to_str(const ScrBytes *b, const ScrStr *enc) {
+  SCR_BYTES_SNAPSHOT(b);
   const uint8_t *in = b->data;
   size_t n = b->len; /* u8: len == byte length */
   /* Implicit native string/number coercions have no encoding argument. */
   if (!enc) return scr_bytes_decode_utf8(in, n);
   if (scr_enc_is(enc, "hex")) {
-    char *out = malloc(n * 2 + 1);
-    if (!out) scr_bytes_oom();
+    if (n > SIZE_MAX / 2) scr_bytes_oom();
+    ScrStr *s = scr_str_alloc_raw(n * 2, n * 2);
+    char *out = s->data;
     for (size_t i = 0; i < n; i++) {
       out[i * 2] = scr_hex_digits[in[i] >> 4];
       out[i * 2 + 1] = scr_hex_digits[in[i] & 0xf];
     }
-    ScrStr *s = scr_str_new(out, n * 2);
-    free(out);
+    out[n * 2] = '\0';
     return s;
   }
   if (scr_enc_is(enc, "base64")) return scr_bytes_encode_b64(in, n, false);
   if (scr_enc_is(enc, "base64url")) return scr_bytes_encode_b64(in, n, true);
   if (scr_enc_is(enc, "latin1")) {
     /* Each byte is U+00XX ("binary" normalizes here upstream). */
-    char *out = malloc(n * 2 + 1);
-    if (!out) scr_bytes_oom();
+    size_t high = 0;
+    for (size_t i = 0; i < n; i++) high += in[i] >> 7;
+    if (n > SIZE_MAX - high) scr_bytes_oom();
+    ScrStr *s = scr_str_alloc_raw(n + high, n + high);
     size_t o = 0;
-    for (size_t i = 0; i < n; i++) o = scr_bytes_put_cp(out, o, in[i]);
-    ScrStr *s = scr_str_new(out, o);
-    free(out);
+    for (size_t i = 0; i < n; i++) o = scr_bytes_put_cp(s->data, o, in[i]);
+    s->data[o] = '\0';
     return s;
   }
   if (scr_enc_is(enc, "ascii")) {
     /* Node's ascii decode masks the high bit: byte & 0x7f. */
-    char *out = malloc(n + 1);
-    if (!out) scr_bytes_oom();
-    for (size_t i = 0; i < n; i++) out[i] = (char)(in[i] & 0x7f);
-    ScrStr *s = scr_str_new(out, n);
-    free(out);
+    ScrStr *s = scr_str_alloc_raw(n, n);
+    for (size_t i = 0; i < n; i++) s->data[i] = (char)(in[i] & 0x7f);
+    s->data[n] = '\0';
     return s;
   }
   if (scr_enc_is(enc, "utf16le")) return scr_bytes_decode_utf16le(in, n);
@@ -2099,7 +2605,7 @@ static bool scr_enc_eq_ci(const ScrStr *raw, const char *name) {
   return true;
 }
 
-static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
+ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
   static const struct { const char *from; const char *to; } map[] = {
     {"utf8", "utf8"}, {"utf-8", "utf8"}, {"hex", "hex"},
     {"base64", "base64"}, {"base64url", "base64url"},
@@ -2124,6 +2630,22 @@ static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
                            "ERR_UNKNOWN_ENCODING");
   free(msg);
   return NULL;
+}
+
+/* new StringDecoder(encoding) with an encoding known only at run time:
+ * Node's normalizeEncoding. undefined, null and "" are utf8; a Buffer
+ * encoding name in any ASCII case answers its canonical name (+1); any
+ * other string throws ERR_UNKNOWN_ENCODING (NULL). Encodings that are not
+ * strings have no lowering. */
+ScrStr *scr_strdec_encoding(const ScrDyn *enc) {
+  if (enc->kind == SCR_DYN_UNDEF || enc->kind == SCR_DYN_NULL) return scr_str_new("utf8", 4);
+  if (enc->kind != SCR_DYN_STR) {
+    static const char message[] = "new StringDecoder with an encoding that is not a string has no lowering";
+    scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+    return NULL;
+  }
+  if (enc->v.str->len == 0) return scr_str_new("utf8", 4);
+  return scr_bytes_normalize_encoding(enc->v.str);
 }
 
 ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc) {
@@ -2158,23 +2680,149 @@ static int scr_hex_val(uint8_t c) {
   return -1;
 }
 
-static int scr_b64_val(uint8_t c) {
-  if (c >= 'A' && c <= 'Z') return c - 'A';
-  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-  if (c >= '0' && c <= '9') return c - '0' + 52;
-  if (c == '+' || c == '-') return 62; /* '-': base64url, accepted like Node */
-  if (c == '/' || c == '_') return 63; /* '_': base64url */
-  return -1;
+/* Both alphabets are accepted by both Buffer base64 encoding names. */
+static const int8_t scr_b64_values[256] = {
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, 62, -1, 63,
+  52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+  -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+  15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, 63,
+  -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+  41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
+/* Conversion destinations are private until their initialized length is set.
+ * General typed-array allocation must remain zero-filled. */
+/* Where scr_bytes_encode_str writes: room bytes at `at` in the current pool
+ * slab, or (at == NULL, or more than room needed) fresh private storage. */
+typedef struct {
+  uint8_t *at;
+  size_t room;
+  ScrBytes header; /* the temporary view handed to the encoders */
+} ScrBytesSink;
+
+static ScrBytes *scr_bytes_conversion_storage_in(ScrBytesSink *sink, size_t capacity) {
+  if (sink && sink->at && capacity <= sink->room) {
+    sink->header = (ScrBytes){.rc = 1, .len = 0, .elem = SCR_BYTES_U8, .data = sink->at};
+    return &sink->header;
+  }
+  uint8_t *data = malloc(capacity ? capacity : 1);
+  if (!data) scr_bytes_oom();
+  return scr_bytes_take_data(data, 0);
 }
 
-ScrBytes *scr_bytes_from_str(const ScrStr *s, const ScrStr *enc) {
+static ScrBytes *scr_bytes_conversion_storage(size_t capacity) {
+  return scr_bytes_conversion_storage_in(NULL, capacity);
+}
+
+/* scr_b64_values, each value shifted into its place in a four-character
+ * group's 24 bits; a character outside both alphabets sets bit 24. */
+#define SCR_B64_VALUE(c)                                                       \
+  ((c) >= 'A' && (c) <= 'Z'   ? (c) - 'A'                                     \
+   : (c) >= 'a' && (c) <= 'z' ? (c) - 'a' + 26                                \
+   : (c) >= '0' && (c) <= '9' ? (c) - '0' + 52                                \
+   : (c) == '+' || (c) == '-' ? 62                                            \
+   : (c) == '/' || (c) == '_' ? 63                                            \
+                              : -1)
+#define SCR_B64_AT(c, shift)                                                   \
+  (SCR_B64_VALUE(c) < 0 ? UINT32_C(0x1000000) : (uint32_t)SCR_B64_VALUE(c) << (shift))
+#define SCR_B64_4(c, s) SCR_B64_AT(c, s), SCR_B64_AT(c + 1, s), SCR_B64_AT(c + 2, s), SCR_B64_AT(c + 3, s)
+#define SCR_B64_16(c, s) SCR_B64_4(c, s), SCR_B64_4(c + 4, s), SCR_B64_4(c + 8, s), SCR_B64_4(c + 12, s)
+#define SCR_B64_64(c, s) SCR_B64_16(c, s), SCR_B64_16(c + 16, s), SCR_B64_16(c + 32, s), SCR_B64_16(c + 48, s)
+#define SCR_B64_256(s) SCR_B64_64(0, s), SCR_B64_64(64, s), SCR_B64_64(128, s), SCR_B64_64(192, s)
+static const uint32_t scr_b64_shifted[4][256] = {
+    {SCR_B64_256(18)}, {SCR_B64_256(12)}, {SCR_B64_256(6)}, {SCR_B64_256(0)}};
+
+/* One group's 24 bits as three bytes, in a four-byte store whose last byte
+ * the next store overwrites (the destination holds two spare bytes). */
+static inline void scr_b64_put_group(uint8_t *out, uint32_t bits) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  uint32_t word = __builtin_bswap32(bits << 8);
+#else
+  uint32_t word = bits << 8;
+#endif
+  memcpy(out, &word, 4);
+}
+
+static ScrBytes *scr_bytes_decode_b64(ScrBytesSink *sink, const uint8_t *in, size_t n) {
+  ScrBytes *b = scr_bytes_conversion_storage_in(sink, n / 4 * 3 + 2);
+  /* A local copy: a byte store could otherwise change b->data. */
+  uint8_t *out = b->data;
+  const uint32_t(*t)[256] = scr_b64_shifted;
+  size_t i = 0, o = 0;
+  unsigned acc = 0, have = 0;
+  while (i < n) {
+    /* Complete groups, two per step: each character's shifted value comes
+     * from a table and one bit test covers all eight. The second store
+     * ends at o + 6, within the destination while eight characters remain. */
+    if (have == 0) {
+      while (n - i >= 8) {
+        uint32_t first = t[0][in[i]] | t[1][in[i + 1]] | t[2][in[i + 2]] | t[3][in[i + 3]];
+        uint32_t second = t[0][in[i + 4]] | t[1][in[i + 5]] | t[2][in[i + 6]] | t[3][in[i + 7]];
+        if ((first | second) & UINT32_C(0x1000000)) break;
+        scr_b64_put_group(out + o, first);
+        scr_b64_put_group(out + o + 3, second);
+        o += 6;
+        i += 8;
+      }
+    }
+    /* Common complete groups need neither per-character branches nor state. */
+    if (have == 0 && n - i >= 4) {
+      int a = scr_b64_values[in[i]], c = scr_b64_values[in[i + 1]];
+      int d = scr_b64_values[in[i + 2]], e = scr_b64_values[in[i + 3]];
+      if ((a | c | d | e) >= 0) {
+        unsigned v = ((unsigned)a << 18) | ((unsigned)c << 12) | ((unsigned)d << 6) | (unsigned)e;
+        out[o++] = (uint8_t)(v >> 16);
+        out[o++] = (uint8_t)(v >> 8);
+        out[o++] = (uint8_t)v;
+        i += 4;
+        continue;
+      }
+    }
+    uint8_t byte = in[i++];
+    if (byte == '=') break;
+    int v = scr_b64_values[byte];
+    if (v < 0) continue;
+    acc = (acc << 6) | (unsigned)v;
+    if (++have == 4) {
+      out[o++] = (uint8_t)(acc >> 16);
+      out[o++] = (uint8_t)(acc >> 8);
+      out[o++] = (uint8_t)acc;
+      acc = 0;
+      have = 0;
+    }
+  }
+  if (have == 2) out[o++] = (uint8_t)(acc >> 4);
+  else if (have == 3) {
+    out[o++] = (uint8_t)(acc >> 10);
+    out[o++] = (uint8_t)(acc >> 2);
+  }
+  b->len = o;
+  return b;
+}
+
+/* Encodes s into sink's pool room when its upper bound fits there, else into
+ * fresh private storage. The result's len is the bytes written; a pool
+ * result is &sink->header, never released. */
+static ScrBytes *scr_bytes_encode_str(ScrBytesSink *sink, const ScrStr *s, const ScrStr *enc) {
   const uint8_t *in = (const uint8_t *)s->data;
   size_t n = s->len;
   if (scr_enc_is(enc, "latin1") || scr_enc_is(enc, "ascii")) {
     /* Node writes charCodeAt(i) & 0xFF for BOTH spellings — an astral
      * code point contributes its two surrogates' low bytes. */
-    ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, n);
-    size_t o = 0, i = 0;
+    ScrBytes *b = scr_bytes_conversion_storage_in(sink, n);
+    /* An ASCII prefix (all of an ASCII string) is its own encoding. */
+    size_t o = s->ascii ? n : scr_bytes_ascii_prefix(in, n), i = o;
+    memcpy(b->data, in, o);
     while (i < n) {
       uint32_t cp = scr_bytes_next_cp(in, &i);
       if (cp > 0xffff) {
@@ -2189,7 +2837,8 @@ ScrBytes *scr_bytes_from_str(const ScrStr *s, const ScrStr *enc) {
     return b;
   }
   if (scr_enc_is(enc, "utf16le")) {
-    ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, n * 2);
+    if (n > SIZE_MAX / 2) scr_bytes_oom();
+    ScrBytes *b = scr_bytes_conversion_storage_in(sink, n * 2);
     size_t o = 0, i = 0;
     while (i < n) {
       uint32_t cp = scr_bytes_next_cp(in, &i);
@@ -2208,63 +2857,427 @@ ScrBytes *scr_bytes_from_str(const ScrStr *s, const ScrStr *enc) {
     b->len = o;
     return b;
   }
-  if (enc->len == 3 && memcmp(enc->data, "hex", 3) == 0) {
-    /* Node-lenient: parse pairs, stop at the first invalid pair or the
-     * odd tail (Buffer.from("a1g2", "hex") is <Buffer a1>). */
-    ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, n / 2);
-    size_t o = 0;
-    for (size_t i = 0; i + 1 < n; i += 2) {
-      int hi = scr_hex_val(in[i]);
-      int lo = scr_hex_val(in[i + 1]);
-      if (hi < 0 || lo < 0) break;
-      b->data[o++] = (uint8_t)((hi << 4) | lo);
+  bool hex = scr_enc_is(enc, "hex");
+  if (hex || scr_enc_is(enc, "base64") || scr_enc_is(enc, "base64url")) {
+    /* Node interprets encoded text as the low byte of each UTF-16 unit.
+     * ASCII can borrow storage; non-ASCII must preserve that truncation. */
+    ScrBytes *narrowed = NULL;
+    if (!scr_str_known_ascii(s) && scr_bytes_ascii_prefix(in, n) != n) {
+      ScrStr *latin1 = scr_str_new("latin1", 6);
+      narrowed = scr_bytes_encode_str(NULL, s, latin1);
+      scr_str_release(latin1);
+      in = narrowed->data;
+      n = narrowed->len;
     }
-    b->len = o; /* never grows: shrinking the count is safe */
-    return b;
-  }
-  if (scr_enc_is(enc, "base64") || scr_enc_is(enc, "base64url")) {
-    /* Node-lenient: skip bytes outside the (standard + url-safe)
-     * alphabets — whitespace, '=', stray punctuation; decode 4-char
-     * groups, and a 2/3-char tail into 1/2 bytes. Both spellings share
-     * the decoder (Node accepts either alphabet under either name). */
-    ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, n / 4 * 3 + 2);
-    size_t o = 0;
-    unsigned acc = 0;
-    int have = 0;
-    for (size_t i = 0; i < n; i++) {
-      int v = scr_b64_val(in[i]);
-      if (v < 0) continue;
-      acc = (acc << 6) | (unsigned)v;
-      if (++have == 4) {
-        b->data[o++] = (uint8_t)(acc >> 16);
-        b->data[o++] = (uint8_t)(acc >> 8);
-        b->data[o++] = (uint8_t)acc;
-        acc = 0;
-        have = 0;
+    ScrBytes *b;
+    if (hex) {
+      /* Stop at the first invalid pair, discarding an odd tail. */
+      b = scr_bytes_conversion_storage_in(sink, n / 2);
+      size_t o = 0;
+      for (size_t i = 0; i + 1 < n; i += 2) {
+        int hi = scr_hex_val(in[i]), lo = scr_hex_val(in[i + 1]);
+        if (hi < 0 || lo < 0) break;
+        b->data[o++] = (uint8_t)((hi << 4) | lo);
       }
+      b->len = o;
+    } else {
+      b = scr_bytes_decode_b64(sink, in, n);
     }
-    if (have == 2) b->data[o++] = (uint8_t)(acc >> 4);
-    else if (have == 3) {
-      b->data[o++] = (uint8_t)(acc >> 10);
-      b->data[o++] = (uint8_t)(acc >> 2);
-    }
-    b->len = o;
+    scr_bytes_release(narrowed);
     return b;
   }
-  /* utf8: ScrStr storage IS the bytes */
-  ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, n);
+  /* utf8: ScrStr storage IS the bytes, once lone surrogates become U+FFFD
+   * (same length) */
+  ScrBytes *b = scr_bytes_conversion_storage_in(sink, n);
   memcpy(b->data, in, n);
+  if (!s->ascii) scr_wtf8_to_utf8((char *)b->data, n);
+  b->len = n;
   return b;
 }
 
-ScrBytes *scr_bytes_from_arr(ScrBytesElem elem, const ScrArr *arr) {
-  ScrBytes *b = scr_bytes_alloc(elem, arr->len);
-  for (size_t i = 0; i < arr->len; i++) {
-    // Iteration reads holes as undefined: floating arrays store NaN and
-    // integer arrays store zero through their normal element conversion.
-    scr_bytes_set(b, (double)i, scr_arr_get_number(arr, (double)i));
+ScrBytes *scr_bytes_from_str(const ScrStr *s, const ScrStr *enc) {
+  return scr_bytes_encode_str(NULL, s, enc);
+}
+
+/* ── the Buffer pool ────────────────────────────────────────────────────
+ * Node's lib/buffer.js: Buffer.poolSize starts at 64 KiB, and the first
+ * slab exists from startup with that size. A pooled request (size <
+ * Buffer.poolSize >>> 1) that does not fit the current slab's remainder
+ * starts a new slab of Buffer.poolSize bytes; a slab created later uses the
+ * value at that time. Views start at 8-byte aligned offsets. The pool holds
+ * one reference to the current slab and each view another, so a slab is
+ * freed once it is replaced and its last view is released (Node keeps a
+ * slab alive the same way). */
+#define SCR_BUFFER_POOL_DEFAULT 65536.0
+size_t scr_num_received(double v, char out[48]);
+static SCR_TL double scr_pool_setting = SCR_BUFFER_POOL_DEFAULT;
+static SCR_TL ScrBytes *scr_pool_slab;
+static SCR_TL size_t scr_pool_offset;
+static SCR_TL bool scr_pool_started;
+static SCR_TL bool scr_pool_registered; /* scr_buffer_pool_reset runs at context exit */
+
+/* Buffer.poolSize >>> 1, kept with the setting. */
+static SCR_TL size_t scr_pool_half = 32768;
+
+SCR_TL void (*scr_buffer_pool_refresh_hook)(void) = NULL;
+SCR_TL void (*scr_buffer_pool_publish_hook)(double size) = NULL;
+
+double scr_buffer_pool_size(void) {
+  if (scr_buffer_pool_refresh_hook) scr_buffer_pool_refresh_hook();
+  return scr_pool_setting;
+}
+
+void scr_buffer_pool_apply(double size) {
+  scr_pool_setting = size;
+  double t = isfinite(size) ? fmod(trunc(size), 4294967296.0) : 0;
+  if (t < 0) t += 4294967296.0;
+  scr_pool_half = (size_t)((uint32_t)t >> 1);
+}
+
+void scr_buffer_set_pool_size(double size) {
+  scr_buffer_pool_apply(size);
+  if (scr_buffer_pool_publish_hook) scr_buffer_pool_publish_hook(size);
+}
+
+static size_t scr_pool_threshold(void) {
+  if (scr_buffer_pool_refresh_hook) scr_buffer_pool_refresh_hook();
+  return scr_pool_half;
+}
+
+/* Bytes left in the slab. Aligning can move the offset past the end of a
+ * slab whose size is not a multiple of 8; nothing is left then. */
+static size_t scr_pool_room(void) {
+  if (!scr_pool_slab || scr_pool_offset >= scr_pool_slab->len) return 0;
+  return scr_pool_slab->len - scr_pool_offset;
+}
+
+/* Replaces the slab with one of `size` bytes (Node's createPool). false
+ * with a pending RangeError when size is not a valid typed array length. */
+static bool scr_pool_create(double size) {
+  ScrBytes *slab = scr_bytes_new(SCR_BYTES_U8, size);
+  if (!slab) return false;
+  slab->untransferable = true;
+  if (!scr_pool_registered) {
+    scr_atexit(scr_buffer_pool_reset);
+    scr_pool_registered = true;
   }
+  scr_bytes_release(scr_pool_slab);
+  scr_pool_slab = slab;
+  scr_pool_offset = 0;
+  scr_pool_started = true;
+  return true;
+}
+
+/* Ensures the current slab holds `reserve` more bytes (Node's `size >
+ * poolSize - poolOffset` test before createPool). Node creates the first
+ * slab at startup with the default size, so a request it holds goes there
+ * even after Buffer.poolSize changed, and one it does not hold replaces it
+ * with a slab of the current Buffer.poolSize. Callers write `reserve`
+ * bytes at the pool offset, so the room is checked again after every new
+ * slab: a pooled request is below Buffer.poolSize >>> 1, which a slab of
+ * Buffer.poolSize bytes always holds, and anything else is an internal
+ * error rather than a write past the slab. */
+static bool scr_pool_reserve(size_t reserve) {
+  if (scr_pool_started && reserve <= scr_pool_room()) return true;
+  bool startup = !scr_pool_started && (double)reserve <= SCR_BUFFER_POOL_DEFAULT;
+  if (!scr_pool_create(startup ? SCR_BUFFER_POOL_DEFAULT : scr_pool_setting)) return false;
+  if (reserve > scr_pool_room()) scr_trap("scriptc: internal error: Buffer pool slab smaller than its reservation\n");
+  return true;
+}
+
+/* A +1 Buffer view of `len` bytes at the pool offset, which then advances
+ * past it to the next 8-byte boundary (Node's alignPool). */
+static ScrBytes *scr_pool_take(size_t len) {
+  ScrBytes *v = malloc(sizeof(ScrBytes));
+  if (!v) scr_bytes_oom();
+  v->rc = 1;
+  v->len = len;
+  v->elem = SCR_BYTES_U8;
+  v->data = scr_pool_slab->data + scr_pool_offset;
+  v->backing = scr_bytes_retain(scr_pool_slab);
+  v->is_buffer = true;
+  v->is_data_view = false;
+  v->external = false;
+  v->untransferable = false;
+  v->shared = NULL;
+  v->properties = NULL;
+  v->properties_traced = false;
+#ifdef SCR_RC_AUDIT
+  scr_live_bytes++;
+#endif
+  scr_pool_offset += len;
+  if (scr_pool_offset & 7) scr_pool_offset = (scr_pool_offset | 7) + 1;
+  return v;
+}
+
+/* An empty Buffer (Node's new FastBuffer()): its own zero-length buffer. */
+static ScrBytes *scr_buffer_empty(void) {
+  ScrBytes *b = scr_bytes_alloc(SCR_BYTES_U8, 0);
+  b->is_buffer = true;
   return b;
+}
+
+/* validateNumber(size, 'size', 0, kMaxLength). */
+static bool scr_buffer_check_size(double size) {
+  if (size >= 0 && size <= 9007199254740991.0) return true;
+  char recv[48], msg[160];
+  scr_num_received(size, recv);
+  int len = snprintf(msg, sizeof msg,
+                     "The value of \"size\" is out of range. It must be >= 0 && <= 9007199254740991. "
+                     "Received %s",
+                     recv);
+  scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+  return false;
+}
+
+ScrBytes *scr_buffer_alloc(double size) {
+  if (!scr_buffer_check_size(size)) return NULL;
+  /* Sizes past 2^31 keep scr_bytes_new's typed array length rules. */
+  ScrBytes *b = size < 2147483648.0 ? scr_bytes_alloc(SCR_BYTES_U8, (size_t)size)
+                                    : scr_bytes_new(SCR_BYTES_U8, size);
+  if (b) b->is_buffer = true;
+  return b;
+}
+
+ScrBytes *scr_buffer_alloc_unsafe_slow(double size) { return scr_buffer_alloc(size); }
+
+/* Node's allocate(size) for a validated size. */
+static ScrBytes *scr_buffer_allocate(double size) {
+  if (!(size >= 1)) return scr_buffer_empty();
+  if (size < (double)scr_pool_threshold()) {
+    size_t n = (size_t)size;
+    if (!scr_pool_reserve(n)) return NULL;
+    return scr_pool_take(n);
+  }
+  return scr_buffer_alloc(size);
+}
+
+ScrBytes *scr_buffer_alloc_unsafe(double size) {
+  if (!scr_buffer_check_size(size)) return NULL;
+  return scr_buffer_allocate(size);
+}
+
+/* Node's fromArrayLike: the values of a typed array or number[] (ToUint8). */
+ScrBytes *scr_buffer_from_bytes(const ScrBytes *src) {
+  size_t n = src->len;
+  if (n == 0) return scr_buffer_empty();
+  if (n < scr_pool_threshold()) {
+    if (!scr_pool_reserve(n)) return NULL;
+    ScrBytes *v = scr_pool_take(n);
+    if (src->elem == SCR_BYTES_U8 || src->elem == SCR_BYTES_U8C || src->elem == SCR_BYTES_I8) {
+      scr_bytes_raw_in(src, v->data, src->data, n);
+    } else {
+      for (size_t i = 0; i < n; i++) v->data[i] = (uint8_t)scr_to_uint32(scr_bytes_get(src, (double)i));
+    }
+    return v;
+  }
+  ScrBytes *b = scr_bytes_convert(SCR_BYTES_U8, src);
+  b->is_buffer = true;
+  return b;
+}
+
+static void scr_bytes_fill_from_arr(uint8_t *out, ScrBytesElem elem, const ScrArr *arr);
+
+ScrBytes *scr_buffer_from_arr(const ScrArr *arr) {
+  size_t n = arr->len;
+  if (n == 0) return scr_buffer_empty();
+  if (n < scr_pool_threshold()) {
+    /* Converting numbers runs no user code, so the values are written
+     * straight into the slab. */
+    if (!scr_pool_reserve(n)) return NULL;
+    ScrBytes *v = scr_pool_take(n);
+    scr_bytes_fill_from_arr(v->data, SCR_BYTES_U8, arr);
+    return v;
+  }
+  ScrBytes *b = scr_bytes_from_arr(SCR_BYTES_U8, arr);
+  b->is_buffer = true;
+  return b;
+}
+
+double scr_bytes_byte_length_str(ScrStr *s, const ScrStr *enc);
+
+/* Node's createFromString: an unpooled Buffer of the encoding's byte
+ * length; when fewer bytes are written it views the start of that
+ * ArrayBuffer. */
+static ScrBytes *scr_buffer_from_str_unpooled(const ScrStr *s, const ScrStr *enc, size_t length) {
+  ScrBytes *b = scr_bytes_encode_str(NULL, s, enc);
+  b->is_buffer = true;
+  if (b->len >= length) return b;
+  /* The encoders' storage bound covers the byte length. */
+  size_t actual = b->len;
+  memset(b->data + actual, 0, length - actual);
+  b->len = length;
+  ScrBytes *view = scr_bytes_subarray(b, 0, (double)actual);
+  scr_bytes_release(b);
+  return view;
+}
+
+/* Node's fromString/fromStringFast for a normalized encoding name. */
+ScrBytes *scr_buffer_from_str(const ScrStr *s, const ScrStr *enc) {
+  if (s->len == 0) return scr_buffer_empty();
+  size_t max = scr_pool_threshold();
+  /* The UTF-16 length lies between len / 3 and len (each unit is one to
+   * three stored bytes; an astral character's four bytes are two units).
+   * Node's reservation is four bytes per unit; when four bytes per stored
+   * byte already fits the threshold and the slab, the exact length cannot
+   * change the outcome. */
+  size_t units;
+  if (s->ascii) {
+    units = s->len;
+  } else if (s->len < max / 4 && scr_pool_started && s->len * 4 <= scr_pool_room()) {
+    units = s->len; /* an upper bound: reserve() succeeds without a new slab */
+  } else {
+    units = (size_t)scr_str_utf16_len((ScrStr *)s);
+  }
+  if (units >= max)
+    return scr_buffer_from_str_unpooled(s, enc, (size_t)scr_bytes_byte_length_str((ScrStr *)s, enc));
+  size_t length = units * 4;
+  if (length >= max) {
+    length = (size_t)scr_bytes_byte_length_str((ScrStr *)s, enc);
+    if (length >= max) return scr_buffer_from_str_unpooled(s, enc, length);
+  }
+  if (!scr_pool_reserve(length)) return NULL;
+  ScrBytesSink sink = {scr_pool_slab->data + scr_pool_offset, scr_pool_room()};
+  ScrBytes *b = scr_bytes_encode_str(&sink, s, enc);
+  size_t actual = b->len;
+  if (b != &sink.header) {
+    /* The encoder's storage bound exceeded the room; the bytes written
+     * never exceed Node's reservation, which fits. */
+    memcpy(scr_pool_slab->data + scr_pool_offset, b->data, actual);
+    scr_bytes_release(b);
+  }
+  return scr_pool_take(actual);
+}
+
+ScrBytes *scr_buffer_from_str_checked(const ScrStr *s, const ScrStr *enc) {
+  ScrStr *normalized = enc->len ? scr_bytes_normalize_encoding(enc) : scr_str_new("utf8", 4);
+  if (!normalized) return NULL;
+  ScrBytes *out = scr_buffer_from_str(s, normalized);
+  scr_str_release(normalized);
+  return out;
+}
+
+static ScrBytes *scr_bytes_concat_item(const ScrArr *list, size_t i);
+
+/* Buffer.concat(list[, totalLength]) into Node's allocate(totalLength). */
+static ScrBytes *scr_buffer_concat_into(const ScrArr *list, double total) {
+  ScrBytes *out = scr_buffer_allocate(total);
+  if (!out) return NULL;
+  size_t pos = 0;
+  for (size_t i = 0; i < list->len && pos < out->len; i++) {
+    ScrBytes *part = scr_bytes_concat_item(list, i);
+    if (!part) {
+      scr_bytes_release(out);
+      return NULL;
+    }
+    size_t take = part->len < out->len - pos ? part->len : out->len - pos;
+    scr_bytes_read(part, 0, out->data + pos, take);
+    pos += take;
+    scr_bytes_release(part);
+  }
+  if (pos < out->len) memset(out->data + pos, 0, out->len - pos);
+  return out;
+}
+
+ScrBytes *scr_buffer_concat(const ScrArr *list) {
+  if (list->len == 0) return scr_buffer_empty();
+  size_t total = 0;
+  bool borrowed = true;
+  for (size_t i = 0; i < list->len; i++) {
+    /* Present parts are read borrowed; copying runs no script code. */
+    const ScrBytes *part = scr_arr_has(list, (double)i) ? scr_arr_peek_ref(list, (double)i) : NULL;
+    if (!part) {
+      borrowed = false;
+      break;
+    }
+    total += part->len;
+  }
+  if (!borrowed) {
+    total = 0;
+    for (size_t i = 0; i < list->len; i++) {
+      ScrBytes *part = scr_bytes_concat_item(list, i);
+      if (!part) return NULL;
+      total += part->len;
+      scr_bytes_release(part);
+    }
+    return scr_buffer_concat_into(list, (double)total);
+  }
+  ScrBytes *out = scr_buffer_allocate((double)total);
+  if (!out) return NULL;
+  size_t pos = 0;
+  for (size_t i = 0; i < list->len; i++) {
+    const ScrBytes *part = scr_arr_peek_ref(list, (double)i);
+    scr_bytes_read(part, 0, out->data + pos, part->len);
+    pos += part->len;
+  }
+  return out;
+}
+
+ScrBytes *scr_buffer_concat_len(const ScrArr *list, double total) {
+  /* An empty list returns before the total validates, as in Node. */
+  if (list->len == 0) return scr_buffer_empty();
+  if (!scr_bytes_validate_off("length", total, 9007199254740991.0)) return NULL;
+  return scr_buffer_concat_into(list, total);
+}
+
+/* Moves an unpooled array-like copy into the pool when it is small enough
+ * (Node's fromArrayLike). Consumes `b`. */
+ScrBytes *scr_buffer_pool_adopt(ScrBytes *b) {
+  size_t n = b->len;
+  if (b->backing || b->shared || n == 0 || n >= scr_pool_threshold()) return b;
+  if (!scr_pool_reserve(n)) {
+    scr_bytes_release(b);
+    return NULL;
+  }
+  ScrBytes *v = scr_pool_take(n);
+  memcpy(v->data, b->data, n);
+  scr_bytes_release(b);
+  return v;
+}
+
+void scr_buffer_pool_reset(void) {
+  scr_bytes_release(scr_pool_slab);
+  scr_pool_slab = NULL;
+  scr_pool_offset = 0;
+  scr_pool_started = false;
+  scr_buffer_set_pool_size(SCR_BUFFER_POOL_DEFAULT);
+}
+
+/* Runtime encoding variables share the output conversion alias/error table.
+ * Buffer.from treats an empty encoding as utf8, even for an empty source. */
+ScrBytes *scr_bytes_from_str_checked(const ScrStr *s, const ScrStr *enc) {
+  ScrStr *normalized = enc->len ? scr_bytes_normalize_encoding(enc) : scr_str_new("utf8", 4);
+  if (!normalized) return NULL;
+  ScrBytes *out = scr_bytes_from_str(s, normalized);
+  scr_str_release(normalized);
+  return out;
+}
+
+ScrBytes *scr_bytes_from_arr(ScrBytesElem elem, const ScrArr *arr) {
+  ScrBytes *b = scr_bytes_alloc_private(elem, arr->len);
+  scr_bytes_fill_from_arr(b->data, elem, arr);
+  return b;
+}
+
+/* Writes arr's values, converted to `elem`, at `out` (arr->len elements). */
+static void scr_bytes_fill_from_arr(uint8_t *out, ScrBytesElem elem, const ScrArr *arr) {
+  size_t width = scr_bytes_elem_size(elem);
+  double values[128];
+  for (size_t start = 0; start < arr->len;) {
+    size_t count = arr->len - start < 128 ? arr->len - start : 128;
+    for (size_t i = 0; i < count; i++) {
+      size_t index = start + i;
+      /* Sparse tails and explicit undefined retain ordinary iteration
+       * semantics. Numeric array slots own no conversion callbacks. */
+      if (index < arr->cap) {
+        if (scr_arr_dense_state(arr, index) == SCR_ARR_VALUE)
+          memcpy(&values[i], &arr->data[index], sizeof(double));
+        else values[i] = NAN;
+      } else values[i] = scr_arr_get_number(arr, (double)index);
+    }
+    scr_bytes_write_numbers(out + start * width, elem, values, count);
+    start += count;
+  }
 }
 
 /* ── equals / compare / indexOf / fill / copy / swap / write (u8; the
@@ -2305,6 +3318,8 @@ bool scr_bytes_validate_off(const char *name, double value, double max) {
 }
 
 bool scr_bytes_equals(const ScrBytes *a, const ScrBytes *b) {
+  SCR_BYTES_SNAPSHOT(a);
+  SCR_BYTES_SNAPSHOT(b);
   return a->len == b->len && memcmp(a->data, b->data, a->len) == 0;
 }
 
@@ -2314,6 +3329,8 @@ bool scr_bytes_equals(const ScrBytes *a, const ScrBytes *b) {
  * Node's exactly. */
 double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nargs,
                          double ts, double te, double ss, double se) {
+  SCR_BYTES_SNAPSHOT(src);
+  SCR_BYTES_SNAPSHOT(target);
   size_t n = (size_t)nargs;
   if (n < 1) ts = 0;
   else if (!scr_bytes_validate_off("targetStart", ts, 9007199254740991.0)) return 0;
@@ -2337,13 +3354,61 @@ double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nar
   return sn < tn ? -1 : 1;
 }
 
+/* node_buffer.cc's IndexOfBuffer/IndexOfString for the UCS2 encoding over
+ * an encoded needle: buffer.js clamps the byteOffset to the int32 range,
+ * IndexOfOffset picks the start, the search runs over whole 2-byte units of
+ * the haystack (an odd trailing byte of either side is ignored), and a match
+ * is reported at its byte position. */
+static double scr_bytes_index_of_ucs2(const ScrBytes *haystack, const ScrBytes *needle, double at, bool fwd) {
+  int64_t length = (int64_t)haystack->len, needle_length = (int64_t)needle->len;
+  /* NaN (an omitted or non-numeric byteOffset) searches everything. */
+  if (at > 2147483647.0) at = 2147483647.0;
+  else if (at < -2147483648.0) at = -2147483648.0;
+  int64_t offset_i64 = at != at ? (fwd ? 0 : length) : (int64_t)trunc(at);
+  int64_t opt_offset;
+  if (offset_i64 < 0) {
+    if (offset_i64 + length >= 0) opt_offset = length + offset_i64;
+    else opt_offset = fwd || needle_length == 0 ? 0 : -1;
+  } else if (offset_i64 + needle_length <= length) {
+    opt_offset = offset_i64;
+  } else if (needle_length == 0) {
+    opt_offset = length;
+  } else {
+    opt_offset = fwd ? -1 : length - 1;
+  }
+  size_t search_end = haystack->len & ~(size_t)1;
+  if (needle_length == 0) return (double)(opt_offset < (int64_t)search_end ? opt_offset : (int64_t)search_end);
+  if (length == 0 || opt_offset <= -1) return -1;
+  size_t offset = (size_t)opt_offset;
+  if (offset >= search_end) {
+    if (fwd || search_end == 0) return -1;
+    offset = search_end - 1;
+  }
+  if ((fwd && needle->len + offset > search_end) || needle->len > search_end) return -1;
+  if (search_end < 2 || needle->len < 2) return -1;
+  size_t units = search_end / 2, needle_units = needle->len / 2, start = offset / 2;
+  if (units < needle_units) return -1;
+  size_t last = units - needle_units;
+  if (fwd) {
+    for (size_t p = start; p <= last; p++)
+      if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
+    return -1;
+  }
+  for (size_t p = start < last ? start : last;; p--) {
+    if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
+    if (p == 0) return -1;
+  }
+}
+
 /* The shared search core: needle bytes, a coerced byteOffset (trunc; NaN
  * means 'search everything' — 0 forward, the end backward; negatives
  * count from the end, and a still-negative backward search answers -1),
- * and the utf16le alignment stride. */
+ * and the alignment: 2 searches utf16le units (scr_bytes_index_of_ucs2). */
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd) {
+  SCR_BYTES_SNAPSHOT(b);
+  SCR_BYTES_SNAPSHOT(needle);
+  if (align == 2) return scr_bytes_index_of_ucs2(b, needle, off, fwd);
   size_t len = b->len, nlen = needle->len;
-  size_t step = align == 2 ? 2 : 1;
   double o = (off != off) ? (fwd ? 0 : (double)len) : trunc(off);
   if (o < 0) {
     o += (double)len;
@@ -2354,19 +3419,25 @@ double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off,
   }
   if (nlen == 0) return o > (double)len ? (double)len : o; /* '' matches at the clamp */
   if (nlen > len) return -1;
+  /* Candidates are the positions holding the needle's first byte; only
+   * those compare the rest. */
+  const uint8_t first = needle->data[0];
   if (fwd) {
     size_t start = o > (double)len ? len : (size_t)o;
-    if (step == 2) start += start % 2;
-    for (size_t i = start; i + nlen <= len; i += step) {
-      if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
+    const uint8_t *at = b->data + start, *end = b->data + (len - nlen) + 1;
+    while (at < end) {
+      at = memchr(at, first, (size_t)(end - at));
+      if (!at) return -1;
+      if (nlen == 1 || memcmp(at + 1, needle->data + 1, nlen - 1) == 0) return (double)(at - b->data);
+      at++;
     }
     return -1;
   }
   size_t start = o > (double)(len - nlen) ? len - nlen : (size_t)o;
-  if (step == 2) start -= start % 2;
-  for (size_t i = start;; i -= step) {
-    if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
-    if (i < step) break;
+  for (size_t i = start;; i--) {
+    if (b->data[i] == first && (nlen == 1 || memcmp(b->data + i + 1, needle->data + 1, nlen - 1) == 0))
+      return (double)i;
+    if (i == 0) break;
   }
   return -1;
 }
@@ -2375,6 +3446,55 @@ double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd)
   uint8_t byte = (uint8_t)scr_bytes_to_u32(v);
   ScrBytes needle = { .rc = 1, .len = 1, .elem = SCR_BYTES_U8, .data = &byte, .backing = NULL };
   return scr_bytes_index_of(b, &needle, off, 1, fwd);
+}
+
+/* The first index a TypedArray search from `from` starts at
+ * (ToIntegerOrInfinity, then relative to the end when negative), or false
+ * when it starts past the last element. */
+static bool scr_bytes_search_start(size_t len, double from, size_t *start) {
+  double n = from != from ? 0 : trunc(from);
+  if (n >= (double)len) return false;
+  if (n < 0) n = n + (double)len < 0 ? 0 : n + (double)len;
+  *start = (size_t)n;
+  return true;
+}
+
+double scr_bytes_index_of_elem(const ScrBytes *b, double x, double from, bool last) {
+  /* A Buffer viewed as a Uint8Array keeps Buffer's own search: the needle
+   * is taken as a byte, and a NaN byteOffset searches the whole buffer. */
+  if (scr_bytes_is_buffer(b)) return scr_bytes_index_of_num(b, x, from, !last);
+  SCR_BYTES_SNAPSHOT(b);
+  size_t len = b->len;
+  size_t size = scr_bytes_elem_size(b->elem);
+  if (len == 0 || x != x) return -1;
+  if (!last) {
+    size_t k;
+    if (!scr_bytes_search_start(len, from, &k)) return -1;
+    for (; k < len; k++)
+      if (scr_bytes_decode(b->elem, b->data + k * size) == x) return (double)k;
+    return -1;
+  }
+  double n = from != from ? 0 : trunc(from);
+  double k = n >= 0 ? (n < (double)len - 1 ? n : (double)len - 1) : (double)len + n;
+  if (k < 0) return -1;
+  for (size_t i = (size_t)k + 1; i-- > 0;)
+    if (scr_bytes_decode(b->elem, b->data + i * size) == x) return (double)i;
+  return -1;
+}
+
+bool scr_bytes_includes_elem(const ScrBytes *b, double x, double from) {
+  if (scr_bytes_is_buffer(b)) return scr_bytes_index_of_num(b, x, from, true) >= 0;
+  SCR_BYTES_SNAPSHOT(b);
+  size_t len = b->len;
+  size_t size = scr_bytes_elem_size(b->elem);
+  size_t k;
+  if (len == 0 || !scr_bytes_search_start(len, from, &k)) return false;
+  bool nan = x != x;
+  for (; k < len; k++) {
+    double v = scr_bytes_decode(b->elem, b->data + k * size);
+    if (v == x || (nan && v != v)) return true;
+  }
+  return false;
 }
 
 /* fill's shared core over a normalized byte pattern. nargs counts the
@@ -2396,18 +3516,32 @@ static ScrBytes *scr_bytes_fill_core(ScrBytes *b, const uint8_t *pat, size_t pat
   if (offset < end) {
     size_t o = (size_t)offset > b->len ? b->len : (size_t)offset;
     size_t e = (size_t)end;
+    uint8_t *dst = b->shared ? scr_bytes_scratch(e - o) : b->data + o;
     if (patn == 0) {
-      memset(b->data + o, 0, e - o);
+      memset(dst, 0, e - o);
     } else if (patn == 1) {
-      memset(b->data + o, pat[0], e - o);
+      memset(dst, pat[0], e - o);
     } else {
-      for (size_t i = o; i < e; i++) b->data[i] = pat[(i - o) % patn];
+      /* Node's fill: the pattern's first bytes (memmove: the pattern may
+       * be a view of this buffer), then the filled prefix doubled. */
+      size_t len = e - o, done = patn < len ? patn : len;
+      memmove(dst, pat, done);
+      while (done < len) {
+        size_t step = done < len - done ? done : len - done;
+        memcpy(dst + done, dst, step);
+        done += step;
+      }
+    }
+    if (b->shared) {
+      scr_shared_store(b->data + o, dst, e - o);
+      free(dst);
     }
   }
   return scr_bytes_retain(b);
 }
 
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end) {
+  SCR_BYTES_SNAPSHOT(pattern);
   return scr_bytes_fill_core(b, pattern->data, pattern->len, false, nargs, offset, end);
 }
 
@@ -2425,7 +3559,7 @@ ScrBytes *scr_bytes_fill_str(ScrBytes *b, const ScrStr *s, const ScrStr *enc,
 }
 
 /* src.copy(dst, targetStart?, sourceStart?, sourceEnd?): Node's C++-side
- * ladder — fractional indices TRUNCATE silently, targetStart/sourceEnd
+ * ladder — fractional indices TRUNCATE without an error, targetStart/sourceEnd
  * check only >= 0 (past-the-end clamps to nothing), sourceStart is
  * bounded by the source length. Returns the byte count copied. */
 double scr_bytes_copy_into(const ScrBytes *src, ScrBytes *dst, double nargs,
@@ -2444,7 +3578,12 @@ double scr_bytes_copy_into(const ScrBytes *src, ScrBytes *dst, double nargs,
   if (s0 >= e0) return 0;
   size_t count = e0 - s0;
   if (count > dst->len - t0) count = dst->len - t0;
-  memmove(dst->data + t0, src->data + s0, count);
+  if (src->shared || dst->shared) {
+    uint8_t *scratch = scr_bytes_scratch(count);
+    scr_bytes_raw_in(src, scratch, src->data + s0, count);
+    scr_bytes_raw_out(dst, dst->data + t0, scratch, count);
+    free(scratch);
+  } else memmove(dst->data + t0, src->data + s0, count);
   return (double)count;
 }
 
@@ -2452,6 +3591,17 @@ double scr_bytes_copy_into(const ScrBytes *src, ScrBytes *dst, double nargs,
  * (+1, chaining like fill). A length off the width is Node's constant
  * ERR_INVALID_BUFFER_SIZE RangeError. */
 ScrBytes *scr_bytes_swap(ScrBytes *b, double width) {
+  if (b->shared) {
+    /* Swap a private copy and publish every byte. */
+    ScrBytes *copy = scr_bytes_snapshot(b);
+    ScrBytes *swapped = scr_bytes_swap(copy, width);
+    if (swapped) {
+      scr_shared_store(b->data, copy->data, b->len);
+      scr_bytes_release(swapped);
+    }
+    scr_bytes_release(copy);
+    return swapped ? scr_bytes_retain(b) : NULL;
+  }
   size_t w = (size_t)width;
   if (b->len % w != 0) {
     char msg[64];
@@ -2459,11 +3609,29 @@ ScrBytes *scr_bytes_swap(ScrBytes *b, double width) {
     scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_INVALID_BUFFER_SIZE");
     return NULL;
   }
-  for (size_t g = 0; g < b->len; g += w) {
-    for (size_t i = 0; i < w / 2; i++) {
-      uint8_t t = b->data[g + i];
-      b->data[g + i] = b->data[g + w - 1 - i];
-      b->data[g + w - 1 - i] = t;
+  /* One load, byte swap and store per group. */
+  uint8_t *p = b->data;
+  size_t len = b->len;
+  if (w == 2) {
+    for (size_t g = 0; g < len; g += 2) {
+      uint16_t v;
+      memcpy(&v, p + g, 2);
+      v = __builtin_bswap16(v);
+      memcpy(p + g, &v, 2);
+    }
+  } else if (w == 4) {
+    for (size_t g = 0; g < len; g += 4) {
+      uint32_t v;
+      memcpy(&v, p + g, 4);
+      v = __builtin_bswap32(v);
+      memcpy(p + g, &v, 4);
+    }
+  } else {
+    for (size_t g = 0; g < len; g += 8) {
+      uint64_t v;
+      memcpy(&v, p + g, 8);
+      v = __builtin_bswap64(v);
+      memcpy(p + g, &v, 8);
     }
   }
   return scr_bytes_retain(b);
@@ -2477,6 +3645,14 @@ ScrBytes *scr_bytes_swap(ScrBytes *b, double width) {
  * lone lead), byte-level for the rest. Returns the bytes written. */
 double scr_bytes_write_str(ScrBytes *b, const ScrStr *s, const ScrStr *enc,
                            double offset, double len, bool has_len) {
+  if (b->shared) {
+    /* Encode into a private copy and publish the bytes written. */
+    ScrBytes *copy = scr_bytes_snapshot(b);
+    double written = scr_bytes_write_str(copy, s, enc, offset, len, has_len);
+    if (written > 0) scr_shared_store(b->data + (size_t)offset, copy->data + (size_t)offset, (size_t)written);
+    scr_bytes_release(copy);
+    return written;
+  }
   if (!scr_bytes_validate_off("offset", offset, (double)b->len)) return 0;
   size_t o = (size_t)offset;
   size_t remaining = b->len - o;
@@ -2486,6 +3662,104 @@ double scr_bytes_write_str(ScrBytes *b, const ScrStr *s, const ScrStr *enc,
     budget = (size_t)len > remaining ? remaining : (size_t)len;
   } else {
     budget = remaining;
+  }
+  /* UTF-8 already has its final representation, apart from lone
+   * surrogates (U+FFFD, same length). Copy only the requested prefix,
+   * backing off when the destination ends inside a scalar. */
+  if (scr_enc_is(enc, "utf8")) {
+    size_t k = s->len < budget ? s->len : budget;
+    if (k < s->len) {
+      while (k > 0 && ((uint8_t)s->data[k] & 0xc0) == 0x80) k--;
+    }
+    if (k) {
+      memcpy(b->data + o, s->data, k);
+      if (!s->ascii) scr_wtf8_to_utf8((char *)b->data + o, k);
+    }
+    return (double)k;
+  }
+  bool utf16 = scr_enc_is(enc, "utf16le");
+  if (utf16 || scr_enc_is(enc, "latin1") || scr_enc_is(enc, "ascii")) {
+    size_t i = 0, written = 0, width = utf16 ? 2 : 1;
+    const uint64_t high = UINT64_C(0x8080808080808080);
+    while (i < s->len && budget - written >= width) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+      /* utf16le of an ASCII run: zero-extend each byte to a little-endian
+       * unit, sixteen per step with vector unpacks where the target has them
+       * and eight per step with two word stores otherwise (the generic loop
+       * below stores byte by byte, because the source and destination may
+       * alias as far as the compiler knows). */
+      if (utf16) {
+        uint8_t *d = b->data + o + written;
+        size_t n = 0, room = (budget - written) / 16, left = (s->len - i) / 8;
+        size_t steps = room < left ? room : left;
+#if defined(__SSE2__)
+        const __m128i zero = _mm_setzero_si128();
+        for (; n + 2 <= steps; n += 2) {
+          __m128i v = _mm_loadu_si128((const __m128i *)(s->data + i + 8 * n));
+          if (_mm_movemask_epi8(v)) break;
+          _mm_storeu_si128((__m128i *)(d + 16 * n), _mm_unpacklo_epi8(v, zero));
+          _mm_storeu_si128((__m128i *)(d + 16 * n + 16), _mm_unpackhi_epi8(v, zero));
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        for (; n + 2 <= steps; n += 2) {
+          uint8x16_t v = vld1q_u8((const uint8_t *)s->data + i + 8 * n);
+          if (vmaxvq_u8(v) & 0x80) break;
+          vst1q_u8(d + 16 * n, vreinterpretq_u8_u16(vmovl_u8(vget_low_u8(v))));
+          vst1q_u8(d + 16 * n + 16, vreinterpretq_u8_u16(vmovl_high_u8(v)));
+        }
+#endif
+        for (; n < steps; n++) {
+          uint64_t w;
+          memcpy(&w, s->data + i + 8 * n, 8);
+          if (w & high) break;
+          uint64_t lo = w & UINT64_C(0xffffffff), hi = w >> 32;
+          lo = (lo | (lo << 16)) & UINT64_C(0x0000ffff0000ffff);
+          lo = (lo | (lo << 8)) & UINT64_C(0x00ff00ff00ff00ff);
+          hi = (hi | (hi << 16)) & UINT64_C(0x0000ffff0000ffff);
+          hi = (hi | (hi << 8)) & UINT64_C(0x00ff00ff00ff00ff);
+          memcpy(d + 16 * n, &lo, 8);
+          memcpy(d + 16 * n + 8, &hi, 8);
+        }
+        i += 8 * n;
+        written += 16 * n;
+        if (n != 0) continue;
+      }
+#endif
+      /* ASCII runs encode byte-for-unit: widen (or copy) eight bytes per
+       * step while the budget holds them all, else one code point below. */
+      if (s->len - i >= 8 && budget - written >= 8 * width) {
+        uint64_t w;
+        memcpy(&w, s->data + i, 8);
+        if (!(w & high)) {
+          uint8_t *d = b->data + o + written;
+          if (utf16) {
+            for (int k = 0; k < 8; k++) {
+              d[2 * k] = (uint8_t)s->data[i + k];
+              d[2 * k + 1] = 0;
+            }
+          } else {
+            memcpy(d, s->data + i, 8);
+          }
+          i += 8;
+          written += 8 * width;
+          continue;
+        }
+      }
+      uint32_t cp = scr_bytes_next_cp((const uint8_t *)s->data, &i);
+      uint32_t first = cp, second = 0;
+      if (cp > 0xffff) {
+        cp -= 0x10000;
+        first = 0xd800 + (cp >> 10);
+        second = 0xdc00 + (cp & 0x3ff);
+      }
+      b->data[o + written++] = (uint8_t)first;
+      if (utf16) b->data[o + written++] = (uint8_t)(first >> 8);
+      if (second && budget - written >= width) {
+        b->data[o + written++] = (uint8_t)second;
+        if (utf16) b->data[o + written++] = (uint8_t)(second >> 8);
+      }
+    }
+    return (double)written;
   }
   ScrBytes *encd = scr_bytes_from_str(s, enc);
   size_t k = encd->len < budget ? encd->len : budget;
@@ -2550,7 +3824,7 @@ ScrBytes *scr_bytes_concat_len(const ScrArr *list, double total) {
       return NULL;
     }
     size_t take = part->len < b->len - o ? part->len : b->len - o;
-    memcpy(b->data + o, part->data, take);
+    scr_bytes_read(part, 0, b->data + o, take);
     o += take;
     scr_bytes_release(part);
   }
@@ -2616,7 +3890,7 @@ ScrBytes *scr_bytes_concat(const ScrArr *list) {
       scr_bytes_release(b);
       return NULL;
     }
-    memcpy(b->data + o, part->data, part->len);
+    scr_bytes_read(part, 0, b->data + o, part->len);
     o += part->len;
     scr_bytes_release(part);
   }
@@ -2625,7 +3899,7 @@ ScrBytes *scr_bytes_concat(const ScrArr *list) {
 
 /* ── the buf.read* / buf.write* numeric families (Node's exact bounds
  * discipline; the error ladders below mirror lib/internal/buffer.js's
- * boundsError/checkInt/checkBounds byte-for-byte — pinned by corpus
+ * boundsError/checkInt/checkBounds exactly — pinned by corpus
  * 1660 against the live Node oracle) ───────────────────────────────── */
 
 /* ERR_OUT_OF_RANGE's "Received" rendering: integers with |v| > 2^32 get
@@ -2749,7 +4023,8 @@ static size_t scr_bytes_num_width(ScrBytesNumKind kind) {
 double scr_bytes_read_num(const ScrBytes *b, double offset, ScrBytesNumKind kind, bool le) {
   size_t width = scr_bytes_num_width(kind);
   if (!scr_bytes_rw_check(b, offset, width)) return 0;
-  const uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
+  scr_bytes_raw_in(b, p, b->data + (size_t)offset, width);
   uint64_t u = 0;
   for (size_t i = 0; i < width; i++) {
     u |= (uint64_t)p[le ? i : width - 1 - i] << (8 * i);
@@ -2802,10 +4077,11 @@ double scr_bytes_write_num(ScrBytes *b, double value, double offset, ScrBytesNum
     if (t != t) t = 0; /* NaN passed the range gate: zeros, like Node */
     u = (uint64_t)(int64_t)t; /* two's complement of the truncation */
   }
-  uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
   for (size_t i = 0; i < width; i++) {
     p[le ? i : width - 1 - i] = (uint8_t)(u >> (8 * i));
   }
+  scr_bytes_raw_out(b, b->data + (size_t)offset, p, width);
   return offset + (double)width;
 }
 
@@ -2818,7 +4094,8 @@ double scr_bytes_read_var(const ScrBytes *b, double offset, double byte_length, 
   }
   size_t width = (size_t)byte_length;
   if (!scr_bytes_rw_check(b, offset, width)) return 0;
-  const uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
+  scr_bytes_raw_in(b, p, b->data + (size_t)offset, width);
   uint64_t u = 0;
   for (size_t i = 0; i < width; i++) {
     u |= (uint64_t)p[le ? i : width - 1 - i] << (8 * i);
@@ -2841,16 +4118,18 @@ double scr_bytes_write_var(ScrBytes *b, double value, double offset, double byte
   double t = trunc(value);
   if (t != t) t = 0;
   uint64_t u = (uint64_t)(int64_t)t;
-  uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
   for (size_t i = 0; i < width; i++) {
     p[le ? i : width - 1 - i] = (uint8_t)(u >> (8 * i));
   }
+  scr_bytes_raw_out(b, b->data + (size_t)offset, p, width);
   return offset + (double)width;
 }
 
 bool scr_bytes_read_u64_raw(const ScrBytes *b, double offset, bool le, uint64_t *out) {
   if (!scr_bytes_rw_check(b, offset, 8)) return false;
-  const uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
+  scr_bytes_raw_in(b, p, b->data + (size_t)offset, 8);
   uint64_t value = 0;
   for (size_t i = 0; i < 8; i++) value |= (uint64_t)p[le ? i : 7 - i] << (8 * i);
   *out = value;
@@ -2859,8 +4138,9 @@ bool scr_bytes_read_u64_raw(const ScrBytes *b, double offset, bool le, uint64_t 
 
 bool scr_bytes_write_u64_raw(ScrBytes *b, double offset, bool le, uint64_t value) {
   if (!scr_bytes_rw_check(b, offset, 8)) return false;
-  uint8_t *p = b->data + (size_t)offset;
+  uint8_t p[8];
   for (size_t i = 0; i < 8; i++) p[le ? i : 7 - i] = (uint8_t)(value >> (8 * i));
+  scr_bytes_raw_out(b, b->data + (size_t)offset, p, 8);
   return true;
 }
 
@@ -2877,7 +4157,8 @@ static bool scr_dataview_u64_check(const ScrBytes *b, double byte_off) {
 bool scr_dataview_read_u64_raw(const ScrBytes *b, double offset, bool le, uint64_t *out) {
   double off = (offset != offset) ? 0 : trunc(offset);
   if (!scr_dataview_u64_check(b, offset)) return false;
-  const uint8_t *p = b->data + (size_t)off;
+  uint8_t p[8];
+  scr_bytes_raw_in(b, p, b->data + (size_t)off, 8);
   uint64_t value = 0;
   for (size_t i = 0; i < 8; i++) value |= (uint64_t)p[le ? i : 7 - i] << (8 * i);
   *out = value;
@@ -2887,8 +4168,9 @@ bool scr_dataview_read_u64_raw(const ScrBytes *b, double offset, bool le, uint64
 bool scr_dataview_write_u64_raw(ScrBytes *b, double offset, bool le, uint64_t value) {
   double off = (offset != offset) ? 0 : trunc(offset);
   if (!scr_dataview_u64_check(b, offset)) return false;
-  uint8_t *p = b->data + (size_t)off;
+  uint8_t p[8];
   for (size_t i = 0; i < 8; i++) p[le ? i : 7 - i] = (uint8_t)(value >> (8 * i));
+  scr_bytes_raw_out(b, b->data + (size_t)off, p, 8);
   return true;
 }
 
@@ -2905,4 +4187,64 @@ ScrStr *scr_bytes_join(const ScrBytes *b, const ScrStr *separator) {
   ScrStr *out = scr_arr_join(values, (ScrStr *)separator);
   scr_arr_release(values);
   return out;
+}
+
+/* ── the checked-dynamic Buffer compare/equals validators ──────────────
+ * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
+ * over dyn-boxed arguments (the invalid-input probes: string needles,
+ * '0' offsets, null/object range args). A well-typed dyn still computes
+ * the real answer — validation, not a constant fence. */
+
+/* A bytes payload or the API's own ERR_INVALID_ARG_TYPE (borrowed). */
+static ScrBytes *scr_bytes_chk_u8(const ScrDyn *d, const char *argname) {
+  if (!scr_dyn_bytes_is(d, SCR_BYTES_U8)) {
+    scr_dyn_arg_type_fail(argname, "an instance of Buffer or Uint8Array", d);
+    return NULL;
+  }
+  return d->v.bytes;
+}
+
+double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b) {
+  ScrBytes *b1 = scr_bytes_chk_u8(a, "buf1");
+  if (!b1) return 0;
+  ScrBytes *b2 = scr_bytes_chk_u8(b, "buf2");
+  if (!b2) return 0;
+  return scr_bytes_compare(b1, b2, 0, 0, 0, 0, 0);
+}
+
+bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other) {
+  ScrBytes *o = scr_bytes_chk_u8(other, "otherBuffer");
+  if (!o) return false;
+  return scr_bytes_equals(recv, o);
+}
+
+/* One offset slot: undefined takes the Node default, non-numbers throw
+ * ERR_INVALID_ARG_TYPE "of type number", numbers run validateOffset. */
+static bool scr_bytes_chk_off(const ScrDyn *d, const char *name, double max,
+                              double dflt, double *out) {
+  if (d->kind == SCR_DYN_UNDEF) {
+    *out = dflt;
+    return true;
+  }
+  if (d->kind != SCR_DYN_NUM) {
+    scr_dyn_arg_type_fail(name, "of type number", d);
+    return false;
+  }
+  *out = d->v.num;
+  return scr_bytes_validate_off(name, *out, max);
+}
+
+double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
+                             const ScrDyn *ts, const ScrDyn *te,
+                             const ScrDyn *ss, const ScrDyn *se) {
+  ScrBytes *t = scr_bytes_chk_u8(target, "target");
+  if (!t) return 0;
+  double tsv, tev, ssv, sev;
+  if (!scr_bytes_chk_off(ts, "targetStart", 9007199254740991.0, 0, &tsv)) return 0;
+  if (!scr_bytes_chk_off(te, "targetEnd", (double)t->len, (double)t->len, &tev)) return 0;
+  if (!scr_bytes_chk_off(ss, "sourceStart", 9007199254740991.0, 0, &ssv)) return 0;
+  if (!scr_bytes_chk_off(se, "sourceEnd", (double)src->len, (double)src->len, &sev)) return 0;
+  /* Every slot validated or defaulted above; nargs 4 revalidates the
+   * now-known-good numbers (a no-op) and keeps one comparison core. */
+  return scr_bytes_compare(src, t, 4, tsv, tev, ssv, sev);
 }

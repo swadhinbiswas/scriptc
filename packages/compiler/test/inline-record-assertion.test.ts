@@ -43,14 +43,18 @@ test("inline static record assertions reshape reads to the asserted representati
       'const rec = { a: 1, b: "two" };',
       'console.log((rec as Record<string, unknown>)["a"]);',
       "const wide = { a: 3, b: 4 };",
-      "console.log((wide as { a: number }).a, (wide as { a: number })[\"a\"]);",
+      'console.log((wide as { a: number }).a, (wide as { a: number })["a"]);',
       "",
     ].join("\n"),
   );
 
   const result = await compile(entry, { outDir, outPath, outputKind: "ir" });
   if (!result.ok) {
-    throw new Error(result.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("\n"));
+    throw new Error(
+      result.diagnostics
+        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+        .join("\n"),
+    );
   }
 
   const module = deserializeModule(await readFile(outPath, "utf8"));

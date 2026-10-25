@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/stdlib-fence.ts"
+ ],
+ "diags": []
+}

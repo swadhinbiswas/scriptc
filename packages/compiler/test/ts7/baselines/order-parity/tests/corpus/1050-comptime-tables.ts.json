@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1050-comptime-tables.ts"
+ ],
+ "diags": []
+}

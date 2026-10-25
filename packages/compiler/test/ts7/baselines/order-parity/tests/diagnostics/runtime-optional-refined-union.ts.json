@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/runtime-optional-refined-union.ts"
+ ],
+ "diags": []
+}

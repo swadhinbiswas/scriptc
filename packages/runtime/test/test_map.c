@@ -10,6 +10,7 @@
  * - live-iteration index stability while iter_depth is held.
  */
 #include "../src/scr_runtime.h"
+#include "../src/scr_key.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -35,8 +36,89 @@ static void check(bool ok, const char *what) {
 
 static ScrStr *S(const char *s) { return scr_str_new(s, strlen(s)); }
 
+/* Map descriptors for the tests, kept in a pool that outlives every map. */
+static const ScrMapOps *ops_of(void *(*key_retain)(void *), void (*key_release)(void *),
+                               ScrTraceFn key_trace, void *(*val_retain)(void *),
+                               void (*val_release)(void *), ScrTraceFn val_trace,
+                               const uint8_t *union_keys) {
+  static ScrMapOps pool[32];
+  static size_t used = 0;
+  ScrMapOps want = { key_retain, key_release, key_trace, val_retain, val_release, val_trace, union_keys };
+  for (size_t i = 0; i < used; i++) {
+    if (memcmp(&pool[i], &want, sizeof want) == 0) return &pool[i];
+  }
+  if (used == sizeof pool / sizeof pool[0]) abort();
+  pool[used] = want;
+  return &pool[used++];
+}
+
+/* Exact-sized allocations leave no readable terminator or tail padding.
+ * Exercise the load boundaries at each alignment, including embedded zero
+ * bytes and a mismatch at every position. */
+static void test_key_bytes(void) {
+  for (size_t length = 0; length <= 65; length++) {
+    for (size_t offset = 0; offset < 8; offset++) {
+      char *allocation = malloc(offset + length + 1);
+      char *a = allocation + offset + 1;
+      char *b = malloc(length ? length : 1);
+      for (size_t i = 0; i < length; i++) a[i] = b[i] = (char)(i * 71);
+      uint64_t hash = scr_key_hash(a, length);
+      check(hash == scr_key_hash(b, length) && scr_key_equal(a, b, length),
+            "unaligned content-equal byte keys agree");
+      for (size_t i = 0; i < length; i++) {
+        b[i] ^= 1;
+        check(!scr_key_equal(a, b, length), "every key byte participates in equality");
+        b[i] ^= 1;
+      }
+      free(b);
+      free(allocation);
+    }
+  }
+}
+
+static void test_string_bucket_collisions(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  ScrStr *keys[12];
+  size_t count = 0;
+  for (unsigned i = 0; i < 65536 && count < 12; i++) {
+    char bytes[9];
+    snprintf(bytes, sizeof bytes, "%08x", i);
+    uint64_t hash = scr_key_hash(bytes, 8);
+    if (((uint32_t)(hash ^ (hash >> 32)) & 127) != 0) continue; /* folded map hash */
+    keys[count] = scr_str_new(bytes, 8);
+    scr_map_set_str_f64(m, keys[count], (double)count);
+    count++;
+  }
+  check(count == 12 && m->nbuckets == 32, "colliding keys promote to bucket storage");
+  scr_map_iter_enter(m);
+  for (size_t i = 0; i < count; i += 2) {
+    check(scr_map_delete_str(m, keys[i]), "collision chain deletion");
+  }
+  for (size_t i = 0; i < count; i++) {
+    ScrStr *probe = scr_str_new(keys[i]->data, keys[i]->len);
+    double out = -1;
+    bool found = scr_map_get_str_f64(m, probe, &out);
+    check(found == (i % 2 != 0) && (!found || out == (double)i),
+          "content probe crosses collision-chain tombstones");
+    out = -1;
+    found = scr_map_get_span_f64(m, probe->data, probe->len, &out);
+    check(found == (i % 2 != 0) && (!found || out == (double)i),
+          "span probe crosses collision-chain tombstones");
+    scr_map_set_str_f64(m, probe, (double)i + 100);
+    check(scr_map_has_str(m, probe), "collision-chain overwrite or reinsertion");
+    scr_str_release(probe);
+    scr_str_release(keys[i]);
+  }
+  scr_map_iter_exit(m);
+  scr_map_clear(m);
+  ScrStr *empty = S("");
+  check(!scr_map_has_str(m, empty), "cleared bucket table misses without hashing");
+  scr_str_release(empty);
+  scr_map_release(m);
+}
+
 static void test_string_keys(void) {
-  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
   ScrStr *ka = S("alpha");
   ScrStr *kb = S("beta");
   scr_map_set_str_f64(m, ka, 1);
@@ -60,8 +142,180 @@ static void test_string_keys(void) {
   scr_map_release(m);
 }
 
+/* scr_map_entry_str: the entry of a string key, for generated code that
+ * reads the value slot and retains it with the value type's own retain. The
+ * lookup itself takes no reference, in linear and bucketed maps alike. */
+static void test_string_entries(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_REF, ops_of(NULL, NULL, NULL, scr_str_retain_v, scr_str_release_v, NULL, NULL));
+  ScrStr *missing = S("missing");
+  check(scr_map_entry_str(m, missing) == NULL, "empty map has no entry");
+  char name[16];
+  for (int i = 0; i < 40; i++) {
+    snprintf(name, sizeof name, "key%d", i);
+    ScrStr *k = S(name);
+    scr_map_set_str_ref(m, k, S(name)); /* value +1 moves in */
+    scr_str_release(k);
+    ScrStr *probe = S("key0"); /* a different object with equal bytes */
+    const ScrMapEntry *e = scr_map_entry_str(m, probe);
+    check(e != NULL, "entry found by content");
+    ScrStr *v = (ScrStr *)(uintptr_t)e->val;
+    check(v->len == 4 && memcmp(v->data, "key0", 4) == 0, "entry value slot holds the value");
+    check(v->rc == 1, "entry lookup takes no reference");
+    scr_str_release(probe);
+  }
+  check(scr_map_entry_str(m, missing) == NULL, "absent key has no entry");
+  ScrStr *k7 = S("key7");
+  check(scr_map_delete_str(m, k7), "delete");
+  check(scr_map_entry_str(m, k7) == NULL, "deleted key has no entry");
+  scr_str_release(k7);
+  scr_str_release(missing);
+  scr_map_release(m);
+}
+
+/* String keys hash to 32 bits; heap strings cache the value in their header
+ * and static strings (compiler literals, runtime one-character strings)
+ * carry it precomputed. The vectors are shared with the compiler's
+ * string-key-hash.test.ts: literal keys only work if both sides agree. */
+static const struct { const char *bytes; size_t length; uint32_t hash; } hash_vectors[] = {
+  {"", 0, 0x993d6596u},
+  {"a", 1, 0x16793313u},
+  {"q", 1, 0x81558571u},
+  {"ab", 2, 0x2985501fu},
+  {"abc", 3, 0xd7f8c3adu},
+  {"alpha", 5, 0x837effcdu},
+  {"kalomi", 6, 0x4ed53d7du},
+  {"hello world!", 12, 0xd1ecb7bbu},
+  {"\xEF\xBF\xBD", 3, 0xeba2c495u},
+  {"a much longer key of 31 bytes!!", 31, 0x1a2fe80fu},
+  {"\xC3\xA9t\xC3\xA9", 5, 0x17c315c4u},
+};
+
+static void test_string_hash_cache(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  for (size_t i = 0; i < sizeof hash_vectors / sizeof hash_vectors[0]; i++) {
+    ScrStr *key = scr_str_new(hash_vectors[i].bytes, hash_vectors[i].length);
+    scr_map_set_str_f64(m, key, (double)i);
+#if SCR_STR_HASH_CACHE
+    check(key->hash == hash_vectors[i].hash, "pinned 32-bit key hash (shared with the compiler)");
+    check(key->cap == key->len, "hash half leaves the capacity intact");
+#endif
+    double out = -1;
+    check(scr_map_get_span_f64(m, hash_vectors[i].bytes, hash_vectors[i].length, &out) && out == (double)i,
+          "span probes hash like cached strings");
+    scr_str_release(key);
+  }
+  scr_map_release(m);
+
+  /* Immortal one-character and empty strings carry the same hash as heap
+   * strings with equal bytes, so either form finds the other's entry. */
+  m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  ScrStr *source = S("qa");
+  ScrStr *q = scr_str_char_at(source, 0);
+  ScrStr *empty = scr_str_char_at(source, 9);
+  check(q->rc == SIZE_MAX && empty->rc == SIZE_MAX, "one-character and empty strings are immortal");
+#if SCR_STR_HASH_CACHE
+  check(q->hash == 0x81558571u && q->cap == 1, "static one-character hash precomputed");
+  check(empty->hash == 0x993d6596u && empty->cap == 0, "static empty-string hash precomputed");
+#endif
+  ScrStr *heap_q = S("q");
+  ScrStr *heap_empty = S("");
+  scr_map_set_str_f64(m, q, 1);
+  scr_map_set_str_f64(m, heap_empty, 2);
+  double out = 0;
+  check(scr_map_get_str_f64(m, heap_q, &out) && out == 1, "heap probe finds static key");
+  check(scr_map_get_str_f64(m, empty, &out) && out == 2, "static probe finds heap key");
+  scr_str_release(heap_q);
+  scr_str_release(heap_empty);
+  scr_str_release(source);
+  scr_map_clear(m);
+
+  /* A uniquely owned string appended in place must drop its cached hash:
+   * a stale hash would probe the old content's bucket and miss. */
+  ScrStr *ab = S("ab");
+  ScrStr *cd = S("cd");
+  ScrStr *grown = scr_str_concat(ab, cd); /* rc 1, spare capacity */
+  scr_str_release(ab);
+  ScrStr *full = S("abcde");
+  scr_map_set_str_f64(m, full, 5);
+  check(!scr_map_has_str(m, grown), "prefix misses (and caches its hash)");
+  ScrStr *e = S("e");
+  ScrStr *appended = scr_str_concat(grown, e);
+  check(appended == grown, "unique string appended in place");
+  check(scr_map_get_str_f64(m, appended, &out) && out == 5, "in-place append invalidates the cached hash");
+  scr_str_release(appended);
+  scr_str_release(grown);
+  scr_str_release(e);
+  scr_str_release(cd);
+  scr_str_release(full);
+  scr_map_release(m);
+}
+
+/* Probes need neither a terminator nor readable padding and never retain
+ * their source. Returned references keep independent snapshot ownership. */
+static void test_span_keys(void) {
+  ScrMap *numbers = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  ScrMap *flags = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_BOOL, NULL);
+  ScrMap *refs = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_REF,
+                            ops_of(NULL, NULL, NULL, scr_str_retain_v, scr_str_release_v, NULL, NULL));
+  for (size_t length = 0; length < 70; length++) {
+    char *bytes = malloc(length ? length : 1);
+    for (size_t i = 0; i < length; i++) bytes[i] = (char)(i * 71);
+    ScrStr *key = scr_str_new(bytes, length);
+    scr_map_set_str_f64(numbers, key, (double)length);
+    scr_map_set_str_bool(flags, key, length % 2 != 0);
+    scr_map_set_str_ref(refs, key, scr_str_retain(key));
+    double number = -1;
+    bool flag = false;
+    check(scr_map_get_span_f64(numbers, bytes, length, &number) && number == (double)length,
+          "bounded span finds number key");
+    check(scr_map_get_span_bool(flags, bytes, length, &flag) && flag == (length % 2 != 0),
+          "bounded span finds boolean key");
+    ScrStr *snapshot = scr_map_get_span_ref(refs, bytes, length);
+    scr_map_clear(refs);
+    check(snapshot && scr_str_eq(snapshot, key), "span result survives clearing its map");
+    scr_str_release(snapshot);
+    check(scr_map_delete_str(numbers, key) && !scr_map_get_span_f64(numbers, bytes, length, &number),
+          "span misses deleted entry");
+    scr_str_release(key);
+    free(bytes);
+  }
+  scr_map_release(refs);
+  scr_map_release(flags);
+  scr_map_release(numbers);
+}
+
+/* A scratch slice probes like any key; an insertion stores a heap copy, so
+ * the stored key survives the buffer's next contents. */
+static void test_scratch_keys(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  ScrStr *line = S("alpha beta alpha");
+  _Alignas(16) unsigned char buffer[96];
+  ScrStr *alpha = scr_str_slice_scratch(line, 0, 5, false, (ScrStr *)buffer, sizeof buffer);
+  check(alpha == (ScrStr *)buffer && scr_str_is_scratch(alpha), "short ASCII slice uses the buffer");
+  scr_map_set_str_f64(m, alpha, 1);
+  double out = 0;
+  check(scr_map_get_str_f64(m, alpha, &out) && out == 1, "scratch key probes its entry");
+  ScrStr *beta = scr_str_slice_scratch(line, 6, 10, false, (ScrStr *)buffer, sizeof buffer);
+  check(!scr_map_has_str(m, beta), "refilled buffer probes its new text");
+  scr_map_set_str_f64(m, beta, 2);
+  ScrStr *again = scr_str_slice_scratch(line, 11, 16, false, (ScrStr *)buffer, sizeof buffer);
+  scr_map_set_str_f64(m, again, 3);
+  check(scr_map_size(m) == 2, "scratch overwrite keeps one entry");
+  ScrStr *first = scr_map_iter_key_str(m, 0), *second = scr_map_iter_key_str(m, 1);
+  ScrStr *a = S("alpha"), *b = S("beta");
+  check(!scr_str_is_scratch(first) && scr_str_eq(first, a), "stored key is an owned copy");
+  check(!scr_str_is_scratch(second) && scr_str_eq(second, b), "second stored key is a copy");
+  check(scr_map_get_str_f64(m, a, &out) && out == 3, "overwrite through scratch key");
+  scr_str_release(a);
+  scr_str_release(b);
+  scr_str_release(first);
+  scr_str_release(second);
+  scr_str_release(line);
+  scr_map_release(m);
+}
+
 static void test_same_value_zero(void) {
-  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_BOOL, NULL, NULL, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_BOOL, NULL);
   scr_map_set_f64_bool(m, 0.0 / 0.0, true); /* NaN key */
   check(scr_map_has_f64(m, NAN), "NaN finds NaN");
   check(scr_map_has_f64(m, -NAN), "any NaN bit pattern finds NaN");
@@ -85,7 +339,7 @@ static void test_rc_accounting(void) {
   long strings0 = scr_str_live_count();
   long maps0 = scr_map_live_count();
   ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_REF,
-                           scr_str_retain_v, scr_str_release_v, NULL);
+                           ops_of(NULL, NULL, NULL, scr_str_retain_v, scr_str_release_v, NULL, NULL));
   check(scr_map_live_count() == maps0 + 1, "map counted live");
   ScrStr *k = S("key");
   scr_map_set_str_ref(m, k, S("v1")); /* value +1 moves in; key retained */
@@ -115,7 +369,7 @@ static void test_rc_accounting(void) {
 #endif
 
 static void test_churn_stays_bounded(void) {
-  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
   for (int i = 0; i < 100000; i++) {
     double k = (double)(i % 13);
     scr_map_set_f64_f64(m, k, i);
@@ -129,7 +383,7 @@ static void test_churn_stays_bounded(void) {
 }
 
 static void test_live_iteration_indices(void) {
-  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
   for (int i = 0; i < 4; i++) scr_map_set_f64_f64(m, i, i * 10);
   scr_map_iter_enter(m);
   int visited = 0;
@@ -165,12 +419,78 @@ static void test_live_iteration_indices(void) {
   scr_map_release(m);
 }
 
+/* A small (linear) map that must grow its lookup index while an iteration
+ * is active may not compact: entry indices, tombstones and the append
+ * position stay put. Integer keys in a compact range move to the direct
+ * index (dense) from the second entry, any other number keys to the bucket
+ * table from the ninth; both transitions are covered by running the same
+ * script with `offset` 0 and 0.5. The walk deletes `victim`, an existing
+ * key, then appends the key that makes the index grow. */
+static void run_small_storage_transitions(double offset) {
+  bool dense = offset == 0;
+  int n = dense ? 1 : 8; /* entries a linear map holds before its index grows */
+  int victim = dense ? 0 : 1;
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
+  for (int i = 0; i < n; i++) scr_map_set_f64_f64(m, i + offset, i + 10);
+  check(m->nbuckets == 0 && m->buckets == NULL && m->ndense == 0,
+        "small map has no index allocation");
+  for (int i = 0; i < 100; i++) {
+    scr_map_delete_f64(m, n - 1 + offset);
+    scr_map_set_f64_f64(m, n - 1 + offset, i);
+  }
+  check(m->nbuckets == 0 && m->ndense == 0 && m->nentries == (uint32_t)n,
+        "small churn compacts without an index");
+  ScrMap *copy = scr_map_clone(m, false, NULL);
+  check(copy->nbuckets == 0 && copy->ndense == 0, "small clone preserves compact storage");
+  scr_map_iter_enter(m);
+  scr_map_delete_f64(m, victim + offset);
+  scr_map_set_f64_f64(m, n + offset, 14);
+  check(dense ? m->ndense > 0 && m->nbuckets == 0 : m->nbuckets > 0 && m->ndense == 0,
+        "live iteration promotes without moving entry indices");
+  check(m->nentries == (uint32_t)n + 1 && !scr_map_iter_live(m, victim) &&
+            scr_map_iter_key_f64(m, n) == n + offset,
+        "promotion preserves tombstones and append position");
+  for (int i = n + 1; i < 64; i++) scr_map_set_f64_f64(m, i + offset, i + 10);
+  check(m->nentries == 64 && !scr_map_iter_live(m, victim) && scr_map_iter_key_f64(m, 63) == 63 + offset,
+        "growth during iteration keeps entry indices");
+  double out = 0;
+  check(dense ? scr_map_get_f64_f64(m, n + offset, &out) && out == 14
+              : scr_map_get_f64_f64(m, offset, &out) && out == 10,
+        "keys written before the promotion survive it and the growth");
+  check(!scr_map_has_f64(m, victim + offset), "deleted small key stays absent after rehash");
+  scr_map_iter_exit(m);
+  check(scr_map_has_f64(copy, victim + offset) && !scr_map_has_f64(copy, n + offset),
+        "small clone remains independent");
+  scr_map_clear(copy);
+  scr_map_iter_enter(copy);
+  for (int i = 0; i < n + 2; i++) {
+    scr_map_clear(copy);
+    scr_map_set_f64_f64(copy, i + offset, i);
+  }
+  check((dense ? copy->ndense > 0 : copy->nbuckets > 0) && copy->nentries == (uint32_t)n + 2 &&
+            copy->nlive == 1,
+        "clear and append preserve active small iterator positions");
+  check(!scr_map_iter_live(copy, n) && scr_map_iter_live(copy, n + 1) &&
+            scr_map_iter_key_f64(copy, n + 1) == n + 1 + offset,
+        "post-clear append lands past the iterator's tombstones");
+  scr_map_iter_exit(copy);
+  check(scr_map_has_f64(copy, n + 1 + offset) && !scr_map_has_f64(copy, n + offset),
+        "post-clear entry survives iterator compaction");
+  scr_map_release(copy);
+  scr_map_release(m);
+}
+
+static void test_small_storage_transitions(void) {
+  run_small_storage_transitions(0);
+  run_small_storage_transitions(0.5);
+}
+
 static void test_identity_key_ownership(void) {
   ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
   ScrArr *b = scr_arr_new(SCR_ELEM_F64, 0);
-  ScrMap *m = scr_map_new_typed(SCR_MAP_KEY_REF, SCR_MAP_VAL_REF,
-      scr_arr_retain_v, scr_arr_release_v, NULL,
-      scr_str_retain_v, scr_str_release_v, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_REF,
+      ops_of(scr_arr_retain_v, scr_arr_release_v, NULL,
+      scr_str_retain_v, scr_str_release_v, NULL, NULL));
   scr_map_set_ref_ref(m, a, S("first"));
   scr_map_set_ref_ref(m, b, S("second"));
   check(a->rc == 2 && b->rc == 2, "identity keys retained on insertion");
@@ -199,10 +519,10 @@ static void test_identity_key_ownership(void) {
 static void test_identity_scalar_values(void) {
   ScrArr *key = scr_arr_new(SCR_ELEM_F64, 0);
   ScrArr *other = scr_arr_new(SCR_ELEM_F64, 0);
-  ScrMap *numbers = scr_map_new_typed(SCR_MAP_KEY_REF, SCR_MAP_VAL_F64,
-      scr_arr_retain_v, scr_arr_release_v, NULL, NULL, NULL, NULL);
-  ScrMap *flags = scr_map_new_typed(SCR_MAP_KEY_REF, SCR_MAP_VAL_BOOL,
-      scr_arr_retain_v, scr_arr_release_v, NULL, NULL, NULL, NULL);
+  ScrMap *numbers = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_F64,
+      ops_of(scr_arr_retain_v, scr_arr_release_v, NULL, NULL, NULL, NULL, NULL));
+  ScrMap *flags = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_BOOL,
+      ops_of(scr_arr_retain_v, scr_arr_release_v, NULL, NULL, NULL, NULL, NULL));
   double number = 99;
   bool flag = true;
   check(!scr_map_get_ref_f64(numbers, key, &number) && number == 99, "numeric miss preserves out parameter");
@@ -226,8 +546,8 @@ static ScrUnion *wrap_key(uint32_t tag, ScrArr *key, ScrTraceFn trace) {
 }
 
 static void test_reboxed_keys_and_rehash(void) {
-  ScrMap *m = scr_map_new_typed(SCR_MAP_KEY_UNION_REF, SCR_MAP_VAL_F64,
-      scr_union_retain_v, scr_union_release_v, NULL, NULL, NULL, NULL);
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_UNION_REF, SCR_MAP_VAL_F64,
+      ops_of(scr_union_retain_v, scr_union_release_v, NULL, NULL, NULL, NULL, NULL));
   ScrArr *keys[128];
   for (int i = 0; i < 128; i++) {
     keys[i] = scr_arr_new(SCR_ELEM_F64, 0);
@@ -268,25 +588,78 @@ static void test_reboxed_keys_and_rehash(void) {
   scr_map_release(m);
 }
 
+static void test_value_keys_and_copies(void) {
+  static const uint8_t kinds[] = { SCR_MAP_KEY_F64, SCR_MAP_KEY_BOOL, SCR_MAP_KEY_REF, SCR_MAP_KEY_REF };
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_UNION_VALUE, SCR_MAP_VAL_F64,
+    ops_of(scr_union_retain_v, scr_union_release_v, NULL, NULL, NULL, NULL, kinds));
+  ScrUnion *negative_zero = scr_union_new_f64(0, -0.0);
+  ScrUnion *zero = scr_union_new_f64(0, 0.0);
+  ScrUnion *flag = scr_union_new_bool(1, false);
+  scr_map_set_ref_f64(m, negative_zero, 10);
+  scr_map_set_ref_f64(m, flag, 20);
+  check(m->entries[0].hash == 1 && m->entries[1].hash == 1, "zero hashes remap without conflating key kinds");
+  check(signbit(scr_union_get_f64(negative_zero)), "normalization leaves caller's union unchanged");
+  ScrUnion *stored = scr_map_iter_key_ref(m, 0);
+  check(!signbit(scr_union_get_f64(stored)), "stored numeric union has positive zero");
+  scr_union_release(stored);
+  double out = 0;
+  check(scr_map_get_ref_f64(m, zero, &out) && out == 10, "value-equal union probe finds zero");
+  check(scr_map_get_ref_f64(m, flag, &out) && out == 20, "same full hash still checks primitive kind");
+  ScrArr *key = scr_arr_new(SCR_ELEM_F64, 0);
+  ScrUnion *left = wrap_key(2, key, NULL), *right = wrap_key(3, key, NULL);
+  scr_map_set_ref_f64(m, left, 30);
+  check(scr_map_has_ref(m, right), "reference identity survives different union arm tags");
+  scr_map_delete_ref(m, flag);
+  ScrMap *copy = scr_map_clone(m, false, NULL);
+  ScrMap *keys = scr_map_clone(m, true, NULL);
+  check(copy->nentries == 2 && copy->nlive == 2 && copy->ecap == 2, "copy allocates only live entries");
+  check(keys->nentries == 2 && keys->val_kind == SCR_MAP_VAL_F64, "key copy keeps compact Set storage");
+  scr_map_clear(m);
+  check(scr_map_get_ref_f64(copy, right, &out) && out == 30, "copy owns the original reference key");
+  scr_map_set_ref_f64(copy, flag, 40);
+  check(!scr_map_has_ref(keys, flag), "copy insertion leaves its sibling independent");
+  scr_union_release(negative_zero); scr_union_release(zero); scr_union_release(flag);
+  scr_union_release(left); scr_union_release(right);
+  scr_map_release(m); scr_map_release(copy); scr_map_release(keys);
+  check(key->rc == 1, "all copied union key owners released");
+  scr_arr_release(key);
+
+  ScrStr *decimal = S("18446744073709551616"), *hex = S("0x10000000000000000");
+  ScrBigInt *a = scr_bigint_parse(decimal), *b = scr_bigint_parse(hex);
+  scr_str_release(decimal); scr_str_release(hex);
+  check(scr_bigint_eq(a, b) && scr_bigint_hash(a) == scr_bigint_hash(b), "equal parsed bigint values hash alike");
+  ScrMap *big = scr_map_new(SCR_MAP_KEY_BIGINT, SCR_MAP_VAL_F64,
+    ops_of(scr_bigint_retain_v, scr_bigint_release_v, NULL, NULL, NULL, NULL, NULL));
+  scr_map_set_ref_f64(big, a, 1);
+  scr_map_set_ref_f64(big, b, 2);
+  scr_bigint_release(a);
+  check(big->nlive == 1 && scr_map_get_ref_f64(big, b, &out) && out == 2, "bigint keys compare values across owners");
+  scr_bigint_release(b);
+  scr_map_release(big);
+}
+
 #ifdef SCR_RC_AUDIT
+static ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
+
 static void test_identity_cycles(void) {
   scr_collect_cycles();
   long maps = scr_map_live_count();
   long arrays = scr_arr_live_count();
   long strings = scr_str_live_count();
   long unions = scr_union_live_count();
-  for (int mode = 0; mode < 4; mode++) {
+  for (int mode = 0; mode < 5; mode++) {
     for (int i = 0; i < 100; i++) {
-      ScrArr *key = scr_arr_new_ref(scr_map_retain_v, scr_map_release_v, scr_map_trace_v, 0);
-      bool wrapped = mode == 3;
+      ScrArr *key = scr_arr_new_ops(&map_arr_ops, 0);
+      bool wrapped = mode >= 3;
       ScrMapValKind value_kind = mode == 0 ? SCR_MAP_VAL_F64 : SCR_MAP_VAL_REF;
       ScrTraceFn value_trace = mode == 2 ? scr_arr_trace_v : NULL;
-      ScrMap *m = scr_map_new_typed(wrapped ? SCR_MAP_KEY_UNION_REF : SCR_MAP_KEY_REF, value_kind,
-          wrapped ? scr_union_retain_v : scr_arr_retain_v,
+      static const uint8_t union_kinds[] = { SCR_MAP_KEY_REF };
+      ScrMap *m = scr_map_new(mode == 4 ? SCR_MAP_KEY_UNION_VALUE : wrapped ? SCR_MAP_KEY_UNION_REF : SCR_MAP_KEY_REF, value_kind,
+          ops_of(wrapped ? scr_union_retain_v : scr_arr_retain_v,
           wrapped ? scr_union_release_v : scr_arr_release_v,
           wrapped ? scr_union_trace_v : scr_arr_trace_v,
           mode == 2 ? scr_arr_retain_v : scr_str_retain_v,
-          mode == 2 ? scr_arr_release_v : scr_str_release_v, value_trace);
+          mode == 2 ? scr_arr_release_v : scr_str_release_v, value_trace, mode == 4 ? union_kinds : NULL));
       ScrUnion *box = wrapped ? wrap_key(0, key, scr_arr_trace_v) : NULL;
       void *stored_key = wrapped ? (void *)box : (void *)key;
       if (mode == 0) scr_map_set_ref_f64(m, stored_key, i);
@@ -306,17 +679,261 @@ static void test_identity_cycles(void) {
 }
 #endif
 
+/* The absent-key filter: every live entry's hash bits stay in m->filter
+ * through appends, overwrites, deletes, compaction, growth, clears (also
+ * during an iteration), direct-index transitions and clones, so a filtered
+ * miss is always a true miss. A seeded model checks membership of a key
+ * universe after every operation, for string, number and reference keys. */
+static uint64_t filter_bits(uint64_t hash) {
+  return (UINT64_C(1) << (hash >> 44 & 63)) | (UINT64_C(1) << (hash >> 50 & 63));
+}
+
+/* A live entry's hash: cached, or for a number-key entry (no hash field)
+ * the key word's mix, as scr_map.c computes it. */
+static uint64_t entry_hash(const ScrMap *m, size_t e) {
+  if (!scr_map_entry_live(m, e)) return 0;
+  const ScrMapEntry *entry = scr_map_entry_at(m, e);
+  if (m->key_kind != SCR_MAP_KEY_F64) return entry->hash;
+  uint64_t h = scr_key_mix(entry->key);
+  return h ? h : 1;
+}
+
+static bool filter_covers_live(const ScrMap *m) {
+  for (size_t e = 0; e < m->nentries; e++) {
+    uint64_t h = entry_hash(m, e);
+    if (h && (m->filter & filter_bits(h)) != filter_bits(h)) return false;
+  }
+  return true;
+}
+
+static void *filter_ref_retain(void *p) { return p; }
+static void filter_ref_release(void *p) { (void)p; }
+
+static uint32_t filter_rng = 12345;
+static uint32_t filter_next(void) {
+  filter_rng = filter_rng * 1103515245u + 12345u;
+  return filter_rng >> 8;
+}
+
+static void test_absent_key_filter(void) {
+  enum { UNIVERSE = 600 };
+  ScrStr *names[UNIVERSE];
+  static int refs[UNIVERSE];
+  char buf[32];
+  for (int i = 0; i < UNIVERSE; i++) {
+    snprintf(buf, sizeof buf, "k%d", i * 7919);
+    names[i] = S(buf);
+  }
+  ScrMap *ms = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
+  ScrMap *mf = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
+  ScrMap *mr = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_F64,
+                          ops_of(filter_ref_retain, filter_ref_release, NULL, NULL, NULL, NULL, NULL));
+  static bool in_s[UNIVERSE], in_f[UNIVERSE], in_r[UNIVERSE];
+  memset(in_s, 0, sizeof in_s);
+  memset(in_f, 0, sizeof in_f);
+  memset(in_r, 0, sizeof in_r);
+  bool ok = true, covered = true;
+  int iterating = 0;
+  for (int step = 0; step < 40000; step++) {
+    uint32_t r = filter_next();
+    /* Phases: grow to a few hundred keys, then shrink, repeatedly, so the
+     * maps pass through linear, bucketed and direct-index storage. */
+    int span = (step / 4000) % 2 ? 40 : UNIVERSE;
+    int i = (int)(r % (uint32_t)span);
+    /* Number keys alternate between dense indices and sparse values. */
+    double fk = (step / 8000) % 2 ? (double)i : (double)i * 1000.5;
+    switch ((r >> 20) % 16) {
+    case 0: case 1: case 2: case 3: case 4: case 5:
+      scr_map_set_str_f64(ms, names[i], (double)step);
+      in_s[i] = true;
+      scr_map_set_f64_f64(mf, fk, (double)step);
+      in_f[i] = true;
+      scr_map_set_ref_f64(mr, &refs[i], 0);
+      in_r[i] = true;
+      break;
+    case 6: case 7: case 8: case 9:
+      ok &= scr_map_delete_str(ms, names[i]) == in_s[i];
+      in_s[i] = false;
+      ok &= scr_map_delete_f64(mf, fk) == in_f[i];
+      in_f[i] = false;
+      ok &= scr_map_delete_ref(mr, &refs[i]) == in_r[i];
+      in_r[i] = false;
+      break;
+    case 10:
+      if ((r >> 4) % 64 == 0) {
+        scr_map_clear(ms);
+        scr_map_clear(mf);
+        scr_map_clear(mr);
+        memset(in_s, 0, sizeof in_s);
+        memset(in_f, 0, sizeof in_f);
+        memset(in_r, 0, sizeof in_r);
+      }
+      break;
+    case 11:
+      /* Hold or release an iteration: growth keeps tombstones meanwhile. */
+      if (!iterating) {
+        scr_map_iter_enter(ms);
+        scr_map_iter_enter(mf);
+        scr_map_iter_enter(mr);
+        iterating = 1;
+      } else {
+        scr_map_iter_exit(ms);
+        scr_map_iter_exit(mf);
+        scr_map_iter_exit(mr);
+        iterating = 0;
+      }
+      break;
+    case 12: {
+      ScrMap *copy = scr_map_clone(ms, false, NULL);
+      covered &= filter_covers_live(copy);
+      for (int j = 0; j < span; j++) ok &= scr_map_has_str(copy, names[j]) == in_s[j];
+      scr_map_release(copy);
+      break;
+    }
+    default:
+      break;
+    }
+    covered &= filter_covers_live(ms) && filter_covers_live(mf) && filter_covers_live(mr);
+    if (step % 97 == 0) {
+      for (int j = 0; j < UNIVERSE; j++) {
+        double fj = (step / 8000) % 2 ? (double)j : (double)j * 1000.5;
+        ok &= scr_map_has_str(ms, names[j]) == in_s[j];
+        ScrStr *probe = scr_str_new(names[j]->data, names[j]->len); /* uncached hash */
+        ok &= (scr_map_entry_str(ms, probe) != NULL) == in_s[j];
+        scr_str_release(probe);
+        ok &= scr_map_has_f64(mf, fj) == in_f[j];
+        ok &= scr_map_has_ref(mr, &refs[j]) == in_r[j];
+      }
+    }
+    /* A number-key phase change re-keys the model: drop everything. */
+    if (step % 8000 == 7999) {
+      scr_map_clear(mf);
+      memset(in_f, 0, sizeof in_f);
+    }
+  }
+  if (iterating) {
+    scr_map_iter_exit(ms);
+    scr_map_iter_exit(mf);
+    scr_map_iter_exit(mr);
+  }
+  check(covered, "filter keeps every live entry's bits");
+  check(ok, "filtered lookups agree with the model");
+  /* A cleared map's filter is empty, and refills cover new keys. */
+  scr_map_clear(ms);
+  check(ms->filter == 0, "clear empties the filter");
+  scr_map_set_str_f64(ms, names[3], 1);
+  check(scr_map_has_str(ms, names[3]) && !scr_map_has_str(ms, names[4]), "refill after clear");
+  scr_map_release(ms);
+  scr_map_release(mf);
+  scr_map_release(mr);
+  for (int i = 0; i < UNIVERSE; i++) scr_str_release(names[i]);
+}
+
+/* SCR_MAP_VAL_CREF: string keys with compact class values in 16-byte
+ * entries (a 32-bit hash, the value as an address over 8). The values here
+ * are stand-in addresses, never dereferenced. */
+static uint64_t cref_val(size_t i) { return (uint64_t)(i + 1) * 8; }
+
+static void test_compact_values(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_CREF, NULL);
+  enum { N = 2000 };
+  char buf[32];
+  ScrStr *keys[N];
+  for (size_t i = 0; i < N; i++) {
+    snprintf(buf, sizeof buf, "k%zu", i);
+    keys[i] = S(buf);
+    scr_map_set_str_ref(m, keys[i], (void *)(uintptr_t)cref_val(i));
+  }
+  check(scr_map_size(m) == N, "cref: size after inserts");
+  bool all = true;
+  for (size_t i = 0; i < N; i++) {
+    all &= scr_map_get_str_ref(m, keys[i]) == (void *)(uintptr_t)cref_val(i);
+    const ScrMapCEntry *e = scr_map_entry_str_c(m, keys[i]);
+    all &= e && ((uint64_t)e->val << 3) == cref_val(i) && e->key == (uint64_t)(uintptr_t)keys[i];
+  }
+  check(all, "cref: get and entry_str_c find every value");
+  ScrStr *missing = S("absent");
+  check(!scr_map_get_str_ref(m, missing) && !scr_map_entry_str_c(m, missing), "cref: absent key");
+  check(scr_map_get_span_ref(m, "k7", 2) == (void *)(uintptr_t)cref_val(7), "cref: span lookup");
+  /* A key object other than the stored one, equal bytes. */
+  ScrStr *again = S("k42");
+  check(scr_map_entry_str_c(m, again) && scr_map_get_str_ref(m, again) == (void *)(uintptr_t)cref_val(42),
+        "cref: equal key bytes, other object");
+  scr_str_release(again);
+  for (size_t i = 0; i < N; i += 2) scr_map_set_str_ref(m, keys[i], (void *)(uintptr_t)cref_val(i + N));
+  all = true;
+  for (size_t i = 0; i < N; i++)
+    all &= scr_map_get_str_ref(m, keys[i]) == (void *)(uintptr_t)cref_val(i % 2 ? i : i + N);
+  check(all && scr_map_size(m) == N, "cref: overwrite keeps the entry");
+  for (size_t i = 0; i < N; i++)
+    if (i % 4) scr_map_delete_str(m, keys[i]);
+  check(scr_map_size(m) == N / 4, "cref: deletes");
+  all = true;
+  for (size_t i = 0; i < N; i++) {
+    bool want = i % 4 == 0;
+    all &= scr_map_has_str(m, keys[i]) == want;
+    if (want) all &= scr_map_get_str_ref(m, keys[i]) == (void *)(uintptr_t)cref_val(i + N);
+  }
+  check(all, "cref: lookups after compaction");
+  /* Iteration order and values. */
+  size_t seen = 0;
+  all = true;
+  scr_map_iter_enter(m);
+  for (double i = scr_map_iter_start(m); i < scr_map_iter_count(m); i = scr_map_iter_skip(m, i + 1)) {
+    ScrStr *k = scr_map_iter_key_str(m, i);
+    void *v = scr_map_iter_val_ref(m, i);
+    size_t want = seen * 4;
+    all &= k->len == keys[want]->len && memcmp(k->data, keys[want]->data, k->len) == 0;
+    all &= v == (void *)(uintptr_t)cref_val(want + N);
+    scr_str_release(k);
+    seen++;
+  }
+  scr_map_iter_exit(m);
+  check(all && seen == N / 4, "cref: iteration order and values");
+  /* Copies keep the layout; a key-only copy takes the 24-byte one. */
+  ScrMap *copy = scr_map_clone(m, false, NULL);
+  ScrMap *set = scr_map_clone(m, true, NULL);
+  all = scr_map_size(copy) == N / 4 && scr_map_size(set) == N / 4;
+  for (size_t i = 0; i < N; i += 4) {
+    all &= scr_map_get_str_ref(copy, keys[i]) == (void *)(uintptr_t)cref_val(i + N);
+    all &= scr_map_has_str(set, keys[i]);
+  }
+  all &= !scr_map_has_str(set, keys[1]);
+  check(all, "cref: clone and key-only clone");
+  scr_map_set_str_ref(copy, keys[1], (void *)(uintptr_t)cref_val(1));
+  check(!scr_map_has_str(m, keys[1]) && scr_map_size(copy) == N / 4 + 1, "cref: copies are independent");
+  scr_map_clear(m);
+  check(scr_map_size(m) == 0 && !scr_map_has_str(m, keys[0]), "cref: clear");
+  scr_map_set_str_ref(m, keys[3], (void *)(uintptr_t)cref_val(3));
+  check(scr_map_get_str_ref(m, keys[3]) == (void *)(uintptr_t)cref_val(3), "cref: reuse after clear");
+  scr_map_release(copy);
+  scr_map_release(set);
+  scr_map_release(m);
+  scr_str_release(missing);
+  for (size_t i = 0; i < N; i++) scr_str_release(keys[i]);
+}
+
 int main(void) {
+  test_key_bytes();
+  test_string_bucket_collisions();
   test_string_keys();
+  test_string_entries();
+  test_compact_values();
   test_same_value_zero();
+  test_span_keys();
+  test_scratch_keys();
+  test_string_hash_cache();
 #ifdef SCR_RC_AUDIT
   test_rc_accounting();
 #endif
   test_churn_stays_bounded();
   test_live_iteration_indices();
+  test_small_storage_transitions();
   test_identity_key_ownership();
   test_identity_scalar_values();
   test_reboxed_keys_and_rehash();
+  test_value_keys_and_copies();
+  test_absent_key_filter();
 #ifdef SCR_RC_AUDIT
   test_identity_cycles();
   scr_collect_cycles();

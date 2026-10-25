@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2400-kill-return-edge.ts"
+ ],
+ "diags": []
+}

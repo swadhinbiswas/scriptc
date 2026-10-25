@@ -57,3 +57,10 @@ for (let i = 0; i < 40; i++) {
   if (temporary.length !== 0) throw new Error("not empty");
 }
 console.log("removed");
+
+// A typed array of checked values needs no extra union box for undefined.
+function shiftChecked<T>(values: T[]): T | undefined { return values.shift(); }
+function popChecked<T>(values: T[]): T | undefined { return values.pop(); }
+const checked: unknown[] = [{ value: 7 }, "last"];
+console.log(popChecked(checked), shiftChecked(checked));
+console.log(popChecked(checked), shiftChecked(checked), checked.length);

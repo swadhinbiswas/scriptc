@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/512-array-join-chains.ts"
+ ],
+ "diags": []
+}

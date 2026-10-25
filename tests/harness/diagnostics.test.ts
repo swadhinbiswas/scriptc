@@ -3,7 +3,7 @@
  * must FAIL to compile, and the full rendered output (codes, spans, code
  * frames, hints) is snapshotted.
  */
-import { globSync, readFileSync } from "node:fs";
+import { globSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -25,18 +25,25 @@ describe(`diagnostics corpus (${files.length} programs)`, () => {
       // Flavor-split scratch: some entries reach the backend and emit
       // artifacts (.ll etc.) before failing, and the other flavor's
       // concurrent suite writes the same names — never share the dir.
-      const outDir = join(tmpdir(), `scriptc-diag-${process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain"}`);
-      // `// @dynamic` on the entry's FIRST line: compile with the island
-      // engine embedded — for diagnostics only --dynamic builds can reach
-      // (dynamic-import resolution failures, island-only fences).
-      const dynamic = /^\/\/ @dynamic\s*$/.test(
-        readFileSync(file, "utf8").split("\n", 1)[0] ?? "",
+      const outDir = join(
+        tmpdir(),
+        `scriptc-diag-${process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain"}`,
       );
       // Deliberately NO backend pin: every program here must fail before
       // any backend runs (that is the suite's contract), so the default
       // lane is irrelevant by construction — and riding it proves the
       // fallback machinery never turns a diagnostic into a build.
-      const result = await compile(file, { outPath: join(outDir, "never"), outDir, dynamic });
+      // The checker-panic programs exercise tsgo's own failures (a panic, and a
+      // +Infinity it cannot send), so they compile with tsgo.
+      const checker = process.env["SCRIPTC_CHECKER"];
+      if (name.startsWith("checker-panic-")) process.env["SCRIPTC_CHECKER"] = "tsgo";
+      let result: Awaited<ReturnType<typeof compile>>;
+      try {
+        result = await compile(file, { outPath: join(outDir, "never"), outDir });
+      } finally {
+        if (checker === undefined) delete process.env["SCRIPTC_CHECKER"];
+        else process.env["SCRIPTC_CHECKER"] = checker;
+      }
       if (result.ok) {
         expect.unreachable(`${name} compiled successfully but must produce diagnostics`);
       }

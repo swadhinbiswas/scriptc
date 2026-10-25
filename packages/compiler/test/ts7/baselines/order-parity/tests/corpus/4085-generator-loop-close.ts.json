@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4085-generator-loop-close.ts"
+ ],
+ "diags": []
+}

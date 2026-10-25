@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/ee-computed-unrestricted.ts"
+ ],
+ "diags": []
+}

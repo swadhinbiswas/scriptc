@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4952-regex-compiled-anchors-classes.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1623-cjs-require-diamond/shared.js",
+  "<repo>/tests/corpus/1623-cjs-require-diamond/left.js",
+  "<repo>/tests/corpus/1623-cjs-require-diamond/right.js",
+  "<repo>/tests/corpus/1623-cjs-require-diamond/main.js"
+ ],
+ "diags": []
+}

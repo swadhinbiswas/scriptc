@@ -6,15 +6,15 @@
 // form beside the unsupported element domains below.
 const seeded = new Set(new Set(["a", "b"]));
 
-// Boolean elements remain unsupported — the new-site diagnostic names the
-// element type.
+// Boolean elements compile beside the remaining method and serialization
+// boundaries.
 const byFlag = new Set<boolean>();
 
 // Record elements now use pointer identity and cycle tracing.
 const recs = new Set<{ id: number }>();
 
-// Set-typed slots elsewhere report the ordinary unsupported-type diagnostic.
-function useBad(s: Set<boolean>): number {
+// Boolean elements also compile in Set-typed parameter slots.
+function useFlags(s: Set<boolean>): number {
   return s.size;
 }
 
@@ -33,8 +33,7 @@ console.log(JSON.stringify(s));
 
 // Set methods have no bound-value form — call them directly.
 const adder = s.add;
-
 // Reached: collection defers its diagnostics until a reference makes
 // them relevant; these references are what makes them count.
-useBad(new Set<boolean>());
+useFlags(new Set<boolean>());
 maybeSet(true);

@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1627-mjs-import-cjs-requires/base.mjs",
+  "<repo>/tests/corpus/1627-mjs-import-cjs-requires/cjspart.js",
+  "<repo>/tests/corpus/1627-mjs-import-cjs-requires/main.mjs"
+ ],
+ "diags": []
+}

@@ -45,17 +45,33 @@ import { InternalCompilerError } from "../errors.js";
  * reach that slot proved whole-in-range. Undeclared numeric slots keep
  * spelling `f64` and the empty list stays a valid attestation that no
  * slot was integer-classed. `deterministic` is computed from the module
- * graph (ir/ir.ts's conservative ambient-surface scan), never
+ * graph (ir-policy.ts's conservative ambient-surface scan), never
  * defaulted. */
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { libSidecarComputedDiag, libSidecarDiag, libSidecarMergedDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
-import type { ContractFacts, ContractField, ContractTypeDecl, ContractTypeShape } from "../frontend/lib-contract.js";
+import {
+  libSidecarComputedDiag,
+  libSidecarDiag,
+  libSidecarMergedDiag,
+  type ScrDiagnostic,
+} from "../diagnostics/diagnostic.js";
+import type {
+  ContractFacts,
+  ContractField,
+  ContractTypeDecl,
+  ContractTypeShape,
+} from "../frontend/lib-contract.js";
 import type { SrcLoc } from "../ir/ir.js";
 import type { LibraryProfile, LibrarySidecarConfig } from "./library-profile.js";
-import { BUILD_ID_SEED, hex16, lengthPrefixedStream, SOURCE_HASH_SEED, wyhash64 } from "./wyhash.js";
+import {
+  BUILD_ID_SEED,
+  hex16,
+  lengthPrefixedStream,
+  SOURCE_HASH_SEED,
+  wyhash64,
+} from "./wyhash.js";
 
 /** The sidecar schema's format this emitter writes. */
 export const SIDECAR_FORMAT = 1;
@@ -148,7 +164,9 @@ let releaseVersion: string | null = null;
 let installedReleaseVersion: string | null = null;
 
 /** Installed native clients read their release identity from the distribution. */
-export function setCompilerReleaseVersion(version: string): void { installedReleaseVersion = version; }
+export function setCompilerReleaseVersion(version: string): void {
+  installedReleaseVersion = version;
+}
 
 /** The package version is stable within one compilation, but a long-lived
  * source/worktree process may observe a release stamp between compilations. */
@@ -192,7 +210,10 @@ export interface CanonicalModule {
  * module outside the compilation root (the profile file's directory)
  * cannot spell a canonical relative path, so it rides the `profile:`
  * namespace under its basename — deterministic and absolute-path-free. */
-export function canonicalModuleGraph(rootDir: string, sources: ReadonlyMap<string, string>): CanonicalModule[] {
+export function canonicalModuleGraph(
+  rootDir: string,
+  sources: ReadonlyMap<string, string>,
+): CanonicalModule[] {
   const enc = new TextEncoder();
   const entries: CanonicalModule[] = [];
   for (const [file, text] of sources) {
@@ -260,7 +281,13 @@ type TaggedArm = { name: string; fields: ContractField[]; loc: SrcLoc };
 type ScalarContractShape = Extract<ContractTypeShape, { k: "bool" | "number" | "text" | "bytes" }>;
 
 type Classified =
-  | { c: "struct"; storage: "node" | "value"; fields: ContractField[]; decl: ContractTypeDecl; index: number }
+  | {
+      c: "struct";
+      storage: "node" | "value";
+      fields: ContractField[];
+      decl: ContractTypeDecl;
+      index: number;
+    }
   | { c: "enum"; members: string[]; decl: ContractTypeDecl; index: number }
   | { c: "tagged"; parts: TaggedPart[]; decl: ContractTypeDecl; index: number }
   /** A named scalar has no sidecar identity: references project as the
@@ -269,7 +296,13 @@ type Classified =
   /** `type A = B` — transparent: projection follows to the aliased
    * declaration; the alias itself never joins the table. */
   | { c: "alias"; target: string; decl: ContractTypeDecl; index: number }
-  | { c: "unsupported"; why: string; computed?: "conditional" | "mapped"; decl: ContractTypeDecl; index: number };
+  | {
+      c: "unsupported";
+      why: string;
+      computed?: "conditional" | "mapped";
+      decl: ContractTypeDecl;
+      index: number;
+    };
 
 /** The sidecar syntax's exact IR-shape projection. Record integer facts
  * carry this structural pattern into the post-lowering join so it can use
@@ -318,7 +351,13 @@ function classify(decl: ContractTypeDecl, index: number): Classified {
       : { c: "unsupported", why: s.text, computed: s.computed, decl, index };
   }
   if (s.k === "object") {
-    return { c: "struct", storage: decl.form === "interface" ? "node" : "value", fields: s.fields, decl, index };
+    return {
+      c: "struct",
+      storage: decl.form === "interface" ? "node" : "value",
+      fields: s.fields,
+      decl,
+      index,
+    };
   }
   if (
     decl.form === "alias" &&
@@ -327,7 +366,8 @@ function classify(decl: ContractTypeDecl, index: number): Classified {
     return { c: "scalar", shape: s, decl, index };
   }
   if (decl.form === "alias" && s.k === "ref") return { c: "alias", target: s.name, decl, index };
-  if (decl.form === "alias" && s.k === "stringLit") return { c: "enum", members: [s.text], decl, index };
+  if (decl.form === "alias" && s.k === "stringLit")
+    return { c: "enum", members: [s.text], decl, index };
   if (decl.form === "alias" && s.k === "union") {
     if (s.parts.every((p) => p.k === "stringLit")) {
       return { c: "enum", members: s.parts.map((p) => (p as { text: string }).text), decl, index };
@@ -339,17 +379,37 @@ function classify(decl: ContractTypeDecl, index: number): Classified {
         continue;
       }
       if (p.k !== "object") {
-        return { c: "unsupported", why: "a union mixing non-object constituents (a tagged union's arms are object literals with a string-literal 'kind', or references to other kind-tagged unions)", decl, index };
+        return {
+          c: "unsupported",
+          why: "a union mixing non-object constituents (a tagged union's arms are object literals with a string-literal 'kind', or references to other kind-tagged unions)",
+          decl,
+          index,
+        };
       }
       const kindField = p.fields.find((f) => f.name === "kind");
       if (kindField === undefined || kindField.shape.k !== "stringLit" || kindField.optional) {
-        return { c: "unsupported", why: "a union constituent without a non-optional string-literal 'kind' discriminant", decl, index };
+        return {
+          c: "unsupported",
+          why: "a union constituent without a non-optional string-literal 'kind' discriminant",
+          decl,
+          index,
+        };
       }
-      parts.push({ p: "arm", name: kindField.shape.text, fields: p.fields.filter((f) => f.name !== "kind"), loc: kindField.loc });
+      parts.push({
+        p: "arm",
+        name: kindField.shape.text,
+        fields: p.fields.filter((f) => f.name !== "kind"),
+        loc: kindField.loc,
+      });
     }
     return { c: "tagged", parts, decl, index };
   }
-  return { c: "unsupported", why: `a shape outside the sidecar's vocabulary (${s.k})`, decl, index };
+  return {
+    c: "unsupported",
+    why: `a shape outside the sidecar's vocabulary (${s.k})`,
+    decl,
+    index,
+  };
 }
 
 /* ── the projector ─────────────────────────────────────────────────────── */
@@ -400,8 +460,8 @@ class Projector {
   private synthCounter = 0;
   /** The profile's declared integer slots (ask 4), by slot path; entries
    * move to `intConsumed` as the projection spells them — a declared path
-   * the projection never touches refuses (a typo'd path would silently
-   * drop an ABI obligation). */
+   * the projection never touches refuses (a typo'd path would otherwise
+   * drop an ABI obligation without a diagnostic). */
   private readonly intDeclared = new Map<string, "i64" | "u64">();
   readonly intConsumed = new Map<string, "i64" | "u64">();
   /** The record-field slots' resolution facts for the inference: the
@@ -512,9 +572,7 @@ class Projector {
 
   private irFieldPattern(field: ContractField): SidecarIrTypePattern {
     const inner = this.irTypePattern(field.shape, field.loc);
-    return field.optional
-      ? this.irUnionPattern([inner, { kind: "undefinedT" }])
-      : inner;
+    return field.optional ? this.irUnionPattern([inner, { kind: "undefinedT" }]) : inner;
   }
 
   private irRecordPattern(fields: ContractField[], tagged = false): SidecarIrRecordPattern {
@@ -566,9 +624,7 @@ class Projector {
         // A declared `{}` annotation is TypeScript's top non-nullish type,
         // not the inferred shape of an empty object literal. The frontend
         // therefore lowers it to dyn (type-mapper.ts's declared-empty rule).
-        return shape.fields.length === 0
-          ? { kind: "dyn" }
-          : this.irRecordPattern(shape.fields);
+        return shape.fields.length === 0 ? { kind: "dyn" } : this.irRecordPattern(shape.fields);
       case "ref": {
         const resolved = this.resolve(shape.name, loc);
         if (resolved.c.c === "scalar") return this.irTypePattern(resolved.c.shape, loc);
@@ -603,7 +659,7 @@ class Projector {
 
   /** A declared slot path that the whole projection never spelled: the
    * path names nothing (or names a slot outside the schema's integer
-   * grammar), and silently ignoring it would drop an ABI obligation. */
+   * grammar), and ignoring it without a diagnostic would drop an ABI obligation. */
   checkIntConsumed(): void {
     for (const [slot, cls] of this.intDeclared) {
       if (!this.intConsumed.has(slot)) {
@@ -618,7 +674,10 @@ class Projector {
   lookup(name: string, loc: SrcLoc): Exclude<Classified, { c: "unsupported" }> {
     const c = this.byName.get(name);
     if (c === undefined) {
-      throw new SidecarError(`'${name}' is not an exported type declaration of the program's modules`, loc);
+      throw new SidecarError(
+        `'${name}' is not an exported type declaration of the program's modules`,
+        loc,
+      );
     }
     // Define-or-refuse: a name whose members gather from several
     // declaration sites has no single-source order — refuse the moment
@@ -639,7 +698,10 @@ class Projector {
   /** Follow `type A = B` alias chains to the aliased declaration: the
    * table derives from the target's declaration site, and the alias
    * introduces no entry and no reordering. */
-  resolve(name: string, loc: SrcLoc): { name: string; c: Exclude<Classified, { c: "unsupported" | "alias" }> } {
+  resolve(
+    name: string,
+    loc: SrcLoc,
+  ): { name: string; c: Exclude<Classified, { c: "unsupported" | "alias" }> } {
     const seen = new Set<string>();
     let cur = name;
     for (;;) {
@@ -671,15 +733,24 @@ class Projector {
    * declaration order, at the position of the reference. An arm name
    * arriving from several constituents keeps its FIRST occurrence; a
    * repeat among one declaration's own inline arms stays a refusal. */
-  unionArms(unionName: string, loc: SrcLoc): { name: string; fields: ContractField[]; loc: SrcLoc }[] {
+  unionArms(
+    unionName: string,
+    loc: SrcLoc,
+  ): { name: string; fields: ContractField[]; loc: SrcLoc }[] {
     const memo = this.flatArms.get(unionName);
     if (memo !== undefined) return memo;
     if (this.flattening.has(unionName)) {
-      throw new SidecarError(`union composition is cyclic through '${unionName}' — a union cannot spread itself`, loc);
+      throw new SidecarError(
+        `union composition is cyclic through '${unionName}' — a union cannot spread itself`,
+        loc,
+      );
     }
     const c = this.lookup(unionName, loc);
     if (c.c !== "tagged") {
-      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
+      throw new SidecarError(
+        `'${unionName}' is not a kind-tagged union of object literals`,
+        c.decl.loc,
+      );
     }
     this.flattening.add(unionName);
     try {
@@ -724,11 +795,17 @@ class Projector {
     const memo = this.allFlatArms.get(unionName);
     if (memo !== undefined) return memo;
     if (this.allFlattening.has(unionName)) {
-      throw new SidecarError(`union composition is cyclic through '${unionName}' — a union cannot spread itself`, loc);
+      throw new SidecarError(
+        `union composition is cyclic through '${unionName}' — a union cannot spread itself`,
+        loc,
+      );
     }
     const c = this.lookup(unionName, loc);
     if (c.c !== "tagged") {
-      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
+      throw new SidecarError(
+        `'${unionName}' is not a kind-tagged union of object literals`,
+        c.decl.loc,
+      );
     }
     this.allFlattening.add(unionName);
     try {
@@ -834,10 +911,11 @@ class Projector {
     cls: "i64" | "u64",
     path: string,
   ): void {
-    const selectedOptional =
-      intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
+    const selectedOptional = intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
     if (intifiedRef.kind !== "i64" && !selectedOptional) {
-      throw new InternalCompilerError(`sidecar pattern bug: synthesized integer field '${path}' has ref '${intifiedRef.kind}'`);
+      throw new InternalCompilerError(
+        `sidecar pattern bug: synthesized integer field '${path}' has ref '${intifiedRef.kind}'`,
+      );
     }
     for (const variant of context.variants()) {
       if (variant.fields === null) {
@@ -892,10 +970,11 @@ class Projector {
     path: string,
     loc: SrcLoc,
   ): void {
-    const selectedOptional =
-      intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
+    const selectedOptional = intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
     if (intifiedRef.kind !== "i64" && !selectedOptional) {
-      throw new InternalCompilerError(`sidecar pattern bug: integer arm '${path}' has ref '${intifiedRef.kind}'`);
+      throw new InternalCompilerError(
+        `sidecar pattern bug: integer arm '${path}' has ref '${intifiedRef.kind}'`,
+      );
     }
     for (const arm of this.allUnionArms(unionName, loc)) {
       if (arm.name !== armName) continue;
@@ -1011,7 +1090,10 @@ class Projector {
       case "bytes":
         return { kind: "bytes" };
       case "array":
-        return { kind: "slice", elem: this.shapeRef(shape.elem, container, member, loc, synthesizedContext) };
+        return {
+          kind: "slice",
+          elem: this.shapeRef(shape.elem, container, member, loc, synthesizedContext),
+        };
       case "union": {
         const present = shape.parts.filter((p): boolean => p.k !== "absent");
         const absents = shape.parts.length - present.length;
@@ -1068,13 +1150,25 @@ class Projector {
           loc,
         );
       case "void":
-        throw new SidecarError(`'${container}.${member}' is void — void exists only as a bare union arm's payload`, loc);
+        throw new SidecarError(
+          `'${container}.${member}' is void — void exists only as a bare union arm's payload`,
+          loc,
+        );
       case "absent":
-        throw new SidecarError(`'${container}.${member}' is null/undefined alone — pair it with a value type for an optional slot`, loc);
+        throw new SidecarError(
+          `'${container}.${member}' is null/undefined alone — pair it with a value type for an optional slot`,
+          loc,
+        );
       case "tuple":
-        throw new SidecarError(`'${container}.${member}' is a tuple — the sidecar vocabulary has slices and named records, not positional tuples`, loc);
+        throw new SidecarError(
+          `'${container}.${member}' is a tuple — the sidecar vocabulary has slices and named records, not positional tuples`,
+          loc,
+        );
       case "unsupported":
-        throw new SidecarError(`'${container}.${member}' has no sidecar projection: ${shape.text}`, loc);
+        throw new SidecarError(
+          `'${container}.${member}' has no sidecar projection: ${shape.text}`,
+          loc,
+        );
     }
   }
 
@@ -1087,7 +1181,10 @@ class Projector {
       throw new SidecarError(`the designated msg union '${name}' cannot join the type table`, loc);
     }
     if (this.inProgress.has(name)) {
-      throw new SidecarError(`the contract type graph is cyclic through '${name}' — recursive contract types cannot encode`, loc);
+      throw new SidecarError(
+        `the contract type graph is cyclic through '${name}' — recursive contract types cannot encode`,
+        loc,
+      );
     }
     const c = this.lookup(name, loc);
     if (c.c === "alias") {
@@ -1106,10 +1203,16 @@ class Projector {
       if (c.c === "enum") {
         const seen = new Set<string>();
         for (const m of c.members) {
-          if (seen.has(m)) throw new SidecarError(`enum '${name}' repeats member '${m}'`, c.decl.loc);
+          if (seen.has(m))
+            throw new SidecarError(`enum '${name}' repeats member '${m}'`, c.decl.loc);
           seen.add(m);
         }
-        this.table.set(name, { kind: "enum", entry: { name, members: c.members }, anchor: c.index, sub: -1 });
+        this.table.set(name, {
+          kind: "enum",
+          entry: { name, members: c.members },
+          anchor: c.index,
+          sub: -1,
+        });
         return;
       }
       if (c.c === "struct") {
@@ -1118,11 +1221,19 @@ class Projector {
         // inProgress; the entry lands complete.
         const seen = new Set<string>();
         for (const f of c.fields) {
-          if (seen.has(f.name)) throw new SidecarError(`record '${name}' repeats field '${f.name}'`, f.loc);
+          if (seen.has(f.name))
+            throw new SidecarError(`record '${name}' repeats field '${f.name}'`, f.loc);
           seen.add(f.name);
           entry.fields.push({
             name: f.name,
-            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, false, f.loc),
+            type: this.intifyStructField(
+              this.fieldRef(f, name),
+              name,
+              f.name,
+              c.fields,
+              false,
+              f.loc,
+            ),
           });
         }
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
@@ -1158,13 +1269,24 @@ class Projector {
   /** A named union arm's payload TypeRef: void for bare arms, the single
    * payload field's type, or a synthesized by-value record for
    * multi-field inline payloads. */
-  armPayloadRef(unionName: string, arm: { name: string; fields: ContractField[]; loc: SrcLoc }): TypeRef {
+  armPayloadRef(
+    unionName: string,
+    arm: { name: string; fields: ContractField[]; loc: SrcLoc },
+  ): TypeRef {
     if (arm.fields.length === 0) return { kind: "void" };
     const synthesizedContext = this.synthesizedArmContext(unionName, arm.name, arm.loc);
-    if (arm.fields.length === 1) return this.fieldRef(arm.fields[0]!, unionName, synthesizedContext);
+    if (arm.fields.length === 1)
+      return this.fieldRef(arm.fields[0]!, unionName, synthesizedContext);
     return {
       kind: "value",
-      name: this.tableSynthesized(unionName, arm.name, arm.fields, true, arm.loc, synthesizedContext),
+      name: this.tableSynthesized(
+        unionName,
+        arm.name,
+        arm.fields,
+        true,
+        arm.loc,
+        synthesizedContext,
+      ),
     };
   }
 
@@ -1221,7 +1343,11 @@ class Projector {
     });
     const seen = new Set<string>();
     for (const f of fields) {
-      if (seen.has(f.name)) throw new SidecarError(`the inline record at '${container}.${member}' repeats field '${f.name}'`, f.loc);
+      if (seen.has(f.name))
+        throw new SidecarError(
+          `the inline record at '${container}.${member}' repeats field '${f.name}'`,
+          f.loc,
+        );
       seen.add(f.name);
       entry.fields.push({
         name: f.name,
@@ -1240,7 +1366,10 @@ class Projector {
   }
 
   /** A msg arm's payload descriptor (§5's five families). */
-  msgDescriptor(msgName: string, arm: { name: string; fields: ContractField[]; loc: SrcLoc }): PayloadDescriptor {
+  msgDescriptor(
+    msgName: string,
+    arm: { name: string; fields: ContractField[]; loc: SrcLoc },
+  ): PayloadDescriptor {
     const fields = arm.fields;
     if (fields.length === 0) return { kind: "void" };
     const synthesizedContext = this.synthesizedArmContext(msgName, arm.name, arm.loc);
@@ -1272,7 +1401,12 @@ class Projector {
             first.loc,
           );
         }
-        return { kind: "number_bytes", number_field: first.name, number_class: numRef.kind as "f64" | "i64", bytes_field: second.name };
+        return {
+          kind: "number_bytes",
+          number_field: first.name,
+          number_class: numRef.kind as "f64" | "i64",
+          bytes_field: second.name,
+        };
       }
     }
     if (fields.length === 1 && !fields[0]!.optional) {
@@ -1362,7 +1496,13 @@ export interface SidecarBuildInput {
  * pattern plus the target field (IR record shapes intern by both field
  * names and field types, so the full signature is the join key). */
 export interface SidecarIntegerSlotFacts {
-  helpers: { fnName: string; kind: "param" | "return"; index?: number; cls: "i64" | "u64"; path: string }[];
+  helpers: {
+    fnName: string;
+    kind: "param" | "return";
+    index?: number;
+    cls: "i64" | "u64";
+    path: string;
+  }[];
   records: {
     shape: SidecarIrRecordPattern;
     targetField: string;
@@ -1380,7 +1520,12 @@ export type SidecarBuildResult =
  * materialized: buffers, slices, records, optionals) rather than a plain
  * scalar return. */
 function helperArena(returns: TypeRef): boolean {
-  return returns.kind !== "bool" && returns.kind !== "f64" && returns.kind !== "i64" && returns.kind !== "enum";
+  return (
+    returns.kind !== "bool" &&
+    returns.kind !== "f64" &&
+    returns.kind !== "i64" &&
+    returns.kind !== "enum"
+  );
 }
 
 export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
@@ -1401,7 +1546,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     // The model: the designated root state type, a record in the table.
     const modelClass = projector.lookup(config.model, entryLoc);
     if (modelClass.c !== "struct") {
-      throw new SidecarError(`the profile designates model '${config.model}', which is not a record type`, modelClass.decl.loc);
+      throw new SidecarError(
+        `the profile designates model '${config.model}', which is not a record type`,
+        modelClass.decl.loc,
+      );
     }
     projector.tableNamed(config.model, entryLoc);
     const modelFieldNames = new Set(modelClass.fields.map((f) => f.name));
@@ -1412,7 +1560,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     // wire tags, at most 256 arms (tags ride a u8).
     const msgClass = projector.lookup(config.msg, entryLoc);
     if (msgClass.c !== "tagged") {
-      throw new SidecarError(`the profile designates msg '${config.msg}', which is not a kind-tagged union of object literals`, msgClass.decl.loc);
+      throw new SidecarError(
+        `the profile designates msg '${config.msg}', which is not a kind-tagged union of object literals`,
+        msgClass.decl.loc,
+      );
     }
     const flatArms = projector.unionArms(config.msg, entryLoc);
     if (flatArms.length > 256) {
@@ -1430,25 +1581,51 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     // Helpers: exported functions taking the model first, in declaration
     // order (the array index is the ABI call index), minus the designated
     // init/update/subscriptions entries.
-    const designated = new Set([config.initExport, config.updateExport, config.subscriptionsExport]);
+    const designated = new Set([
+      config.initExport,
+      config.updateExport,
+      config.subscriptionsExport,
+    ]);
     const helpers: SidecarHelper[] = [];
     for (const fn of facts.functions) {
       if (designated.has(fn.name)) continue;
       const first = fn.params[0];
-      if (first === undefined || first.shape === null || first.shape.k !== "ref" || first.shape.name !== config.model) continue;
+      if (
+        first === undefined ||
+        first.shape === null ||
+        first.shape.k !== "ref" ||
+        first.shape.name !== config.model
+      )
+        continue;
       if (fn.generic) {
-        throw new SidecarError(`helper '${fn.name}' is generic — a contract helper needs one concrete signature`, fn.loc);
+        throw new SidecarError(
+          `helper '${fn.name}' is generic — a contract helper needs one concrete signature`,
+          fn.loc,
+        );
       }
       const params: TypeRef[] = [];
       fn.params.slice(1).forEach((p, i) => {
         if (p.shape === null) {
-          throw new SidecarError(`helper '${fn.name}' parameter ${i + 2} ('${p.name}') has no type annotation`, fn.loc);
+          throw new SidecarError(
+            `helper '${fn.name}' parameter ${i + 2} ('${p.name}') has no type annotation`,
+            fn.loc,
+          );
         }
         const pPath = `helpers.${fn.name}.params[${i}]`;
-        const ref = projector.intify(projector.shapeRef(p.shape, `helpers_${fn.name}`, p.name, fn.loc), pPath, fn.loc);
+        const ref = projector.intify(
+          projector.shapeRef(p.shape, `helpers_${fn.name}`, p.name, fn.loc),
+          pPath,
+          fn.loc,
+        );
         if (projector.intConsumed.has(pPath)) {
           // IR param 0 is the model receiver the schema's index skips.
-          helperIntFacts.push({ fnName: fn.name, kind: "param", index: i + 1, cls: projector.intConsumed.get(pPath)!, path: pPath });
+          helperIntFacts.push({
+            fnName: fn.name,
+            kind: "param",
+            index: i + 1,
+            cls: projector.intConsumed.get(pPath)!,
+            path: pPath,
+          });
         }
         params.push(ref);
       });
@@ -1456,15 +1633,27 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
         throw new SidecarError(`helper '${fn.name}' has no return type annotation`, fn.loc);
       }
       if (fn.returns.k === "void") {
-        throw new SidecarError(`helper '${fn.name}' returns void — a contract helper returns a value the host can read`, fn.loc);
+        throw new SidecarError(
+          `helper '${fn.name}' returns void — a contract helper returns a value the host can read`,
+          fn.loc,
+        );
       }
       // Helper-return synthesized names are two-part like everything else:
       // container 'helpers', member the helper's name — `helpers_<name>`,
       // never a '_return' suffix (the ratified spelling).
       const rPath = `helpers.${fn.name}.return`;
-      const returns = projector.intify(projector.shapeRef(fn.returns, "helpers", fn.name, fn.loc), rPath, fn.loc);
+      const returns = projector.intify(
+        projector.shapeRef(fn.returns, "helpers", fn.name, fn.loc),
+        rPath,
+        fn.loc,
+      );
       if (projector.intConsumed.has(rPath)) {
-        helperIntFacts.push({ fnName: fn.name, kind: "return", cls: projector.intConsumed.get(rPath)!, path: rPath });
+        helperIntFacts.push({
+          fnName: fn.name,
+          kind: "return",
+          cls: projector.intConsumed.get(rPath)!,
+          path: rPath,
+        });
       }
       if (helpers.some((h) => h.name === fn.name)) {
         throw new SidecarError(`helper '${fn.name}' is declared twice`, fn.loc);
@@ -1487,7 +1676,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     const returnsCmd = (which: "init" | "update", exportName: string): boolean => {
       const fn = facts.functions.find((f) => f.name === exportName);
       if (fn === undefined) {
-        throw new SidecarError(`the profile designates ${which} export '${exportName}', but the entry module exports no function by that name`, entryLoc);
+        throw new SidecarError(
+          `the profile designates ${which} export '${exportName}', but the entry module exports no function by that name`,
+          entryLoc,
+        );
       }
       const r = fn.returns;
       if (r !== null && r.k === "ref" && r.name === config.model) return false;
@@ -1519,7 +1711,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     const msgUnbound = facts.msgUnbound?.value ?? [];
     for (const name of msgUnbound) {
       if (!armByName.has(name)) {
-        throw new SidecarError(`msgUnbound names '${name}', which is not an arm of '${config.msg}'`, facts.msgUnbound!.loc);
+        throw new SidecarError(
+          `msgUnbound names '${name}', which is not an arm of '${config.msg}'`,
+          facts.msgUnbound!.loc,
+        );
       }
     }
 
@@ -1533,9 +1728,17 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       if (c === null) return null;
       const payload = armByName.get(c.value);
       if (payload === undefined) {
-        throw new SidecarError(`${constName} names '${c.value}', which is not an arm of '${config.msg}'`, c.loc);
+        throw new SidecarError(
+          `${constName} names '${c.value}', which is not an arm of '${config.msg}'`,
+          c.loc,
+        );
       }
-      if (payload.kind !== "record" && payload.kind !== "union" && payload.kind !== "enum" && payload.kind !== "scalar") {
+      if (
+        payload.kind !== "record" &&
+        payload.kind !== "union" &&
+        payload.kind !== "enum" &&
+        payload.kind !== "scalar"
+      ) {
         throw new SidecarError(
           `${constName} names arm '${c.value}', whose payload descriptor is '${payload.kind}' — a host-constructed channel arm needs a named-type-family payload`,
           c.loc,
@@ -1547,12 +1750,18 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     const seenEnv = new Set<string>();
     for (const e of envMsgs) {
       if (seenEnv.has(e.env)) {
-        throw new SidecarError(`envMsgs repeats environment variable '${e.env}'`, facts.envMsgs!.loc);
+        throw new SidecarError(
+          `envMsgs repeats environment variable '${e.env}'`,
+          facts.envMsgs!.loc,
+        );
       }
       seenEnv.add(e.env);
       const payload = armByName.get(e.msg);
       if (payload === undefined) {
-        throw new SidecarError(`envMsgs targets '${e.msg}', which is not an arm of '${config.msg}'`, facts.envMsgs!.loc);
+        throw new SidecarError(
+          `envMsgs targets '${e.msg}', which is not an arm of '${config.msg}'`,
+          facts.envMsgs!.loc,
+        );
       }
       if (payload.kind !== "bytes") {
         throw new SidecarError(
@@ -1643,11 +1852,7 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
  * exact-source identity fields may change after comment trivia edits; retain
  * the established property order and replace those two values in place.
  */
-export function updateSidecarIdentity(
-  json: string,
-  buildId: string,
-  sourceHash: string,
-): string {
+export function updateSidecarIdentity(json: string, buildId: string, sourceHash: string): string {
   const doc = JSON.parse(json) as SidecarDoc;
   doc.source_hash = sourceHash;
   doc.build_id = buildId;

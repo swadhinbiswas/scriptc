@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4720-cold-throw-paths.ts"
+ ],
+ "diags": []
+}

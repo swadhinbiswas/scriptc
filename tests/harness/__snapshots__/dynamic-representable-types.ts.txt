@@ -1,11 +1,9 @@
-dynamic-representable-types.ts:7:7 - error SC2011: values of type '[number, (string | undefined)?]' have no static representation but run in the embedded dynamic engine, which this build does not include
+dynamic-representable-types.ts:7:7 - error SC2001: values of type '[number, (string | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
 
   6 | const bare: any = 41;
   7 | const optTuple: [number, string?] = [1];
     |       ^~~~~~~~
   8 | console.log(arr.length, rec.width, fn(1), bare, optTuple.length);
-
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
 
 dynamic-representable-types.ts:8:49 - error SC2004: uses of 'optTuple' inherit the blocker on its declaration
 

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3021-buffer-union-narrow-callback.ts"
+ ],
+ "diags": []
+}

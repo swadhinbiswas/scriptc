@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5235-inline-union-fields-publish.ts"
+ ],
+ "diags": []
+}

@@ -21,8 +21,12 @@ async function normalizeMetadata(output) {
     if (
       headerEnd > bytes.length ||
       bytes.subarray(offset + 58, headerEnd).toString("ascii") !== "`\n"
-    ) throw new Error(`archiver produced a malformed member header: ${output}`);
-    const sizeText = bytes.subarray(offset + 48, offset + 58).toString("ascii").trim();
+    )
+      throw new Error(`archiver produced a malformed member header: ${output}`);
+    const sizeText = bytes
+      .subarray(offset + 48, offset + 58)
+      .toString("ascii")
+      .trim();
     if (!/^\d+$/.test(sizeText)) {
       throw new Error(`archiver produced a malformed member size: ${output}`);
     }

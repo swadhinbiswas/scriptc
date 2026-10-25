@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/954-modules-reexport/base.ts",
+  "<repo>/tests/corpus/954-modules-reexport/hub.ts",
+  "<repo>/tests/corpus/954-modules-reexport/star.ts",
+  "<repo>/tests/corpus/954-modules-reexport/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4883-await-values-and-hops.ts"
+ ],
+ "diags": []
+}

@@ -1,10 +1,11 @@
-scriptc coverage tests/diagnostics/npm-imports/main.ts
+scriptc coverage tests/corpus/native-npm-imports/main.ts
 
-  statements analyzed   6
-  compile statically    0  (0%)
+  statements analyzed   14
+  compile statically    14  (100%)
+    in dynamic tier     1  (operate on values typed only at runtime; --explain-dynamic lists them)
 
-  runs with --dynamic   9 sites (embeds a JS engine, ~620KB — static stays the default)
-      ×6  values from the 'mathkit' package run in the embedded dynamic engine, which this build does not include                                    SC2013
-      ×1  importing 'mathkit' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there      SC2013
-      ×1  importing '@acme/units' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there  SC2013
-      ×1  values from the '@acme/units' package run in the embedded dynamic engine, which this build does not include                                SC2013
+  npm package compilation:
+    mathkit      static
+    @acme/units  static
+
+  fully static — all analyzed statements compile to native code.

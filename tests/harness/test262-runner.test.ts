@@ -1,11 +1,20 @@
 import { expect, test } from "vitest";
 import { boundedRun } from "../test262/execute.js";
-import { compileFailureStatus, exclusion, matchesParseNegative, metadata, prepare, summarize, variants } from "../test262/support.mjs";
+import {
+  compileFailureStatus,
+  exclusion,
+  matchesParseNegative,
+  metadata,
+  prepare,
+  summarize,
+  variants,
+} from "../test262/support.mjs";
 
 const source = (yaml: string, body = "assert.sameValue(1, 1);") => `/*---\n${yaml}\n---*/\n${body}`;
 
 test("Test262 YAML metadata handles block text, lists, features and negative phases", () => {
-  const meta = metadata(source(`description: >
+  const meta = metadata(
+    source(`description: >
   flags: [noStrict] inside a description is not a flag
 flags:
   - onlyStrict
@@ -13,7 +22,8 @@ features: [BigInt]
 includes: [propertyHelper.js]
 negative:
   phase: parse
-  type: SyntaxError`));
+  type: SyntaxError`),
+  );
   expect(meta.flags).toEqual(["onlyStrict"]);
   expect(meta.negative).toEqual({ phase: "parse", type: "SyntaxError" });
   expect(meta.features).toEqual(["BigInt"]);
@@ -22,7 +32,12 @@ negative:
 
 test("metadata generates the upstream variants without rewriting execution goals", () => {
   expect(variants(metadata(source("description: plain")))).toEqual(["sloppy", "strict"]);
-  for (const [flag, expected] of [["onlyStrict", "strict"], ["noStrict", "sloppy"], ["module", "module"], ["raw", "raw"]]) {
+  for (const [flag, expected] of [
+    ["onlyStrict", "strict"],
+    ["noStrict", "sloppy"],
+    ["module", "module"],
+    ["raw", "raw"],
+  ]) {
     expect(variants(metadata(source(`flags: [${flag}]`)))).toEqual([expected]);
   }
   expect(() => metadata(source("flags: [onlyStrict, noStrict]"))).toThrow();
@@ -43,12 +58,21 @@ test("unsupported execution requirements and assertion reflection remain exclusi
     const text = source(head!, body);
     expect(exclusion(text, metadata(text), "strict")).toBeTypeOf("string");
   }
-  const text = source("description: scalar", "// globalThis and this in comments are harmless\nassert.sameValue('this', 'this');");
+  const text = source(
+    "description: scalar",
+    "// globalThis and this in comments are harmless\nassert.sameValue('this', 'this');",
+  );
   expect(exclusion(text, metadata(text), "strict")).toBeUndefined();
   expect(exclusion(text, metadata(text), "sloppy")).toBeUndefined();
-  const scriptGlobal = source("description: script global", "assert.sameValue((function () { return this; })(), globalThis);");
+  const scriptGlobal = source(
+    "description: script global",
+    "assert.sameValue((function () { return this; })(), globalThis);",
+  );
   expect(exclusion(scriptGlobal, metadata(scriptGlobal), "sloppy")).toBe("host:globalThis");
-  const commonJsGlobal = source("description: CommonJS global", "assert.sameValue(module.exports, {});");
+  const commonJsGlobal = source(
+    "description: CommonJS global",
+    "assert.sameValue(module.exports, {});",
+  );
   expect(exclusion(commonJsGlobal, metadata(commonJsGlobal), "sloppy")).toBe("host:module");
   const asyncText = source("flags: [async]", "Promise.resolve().then(() => $DONE());");
   expect(exclusion(asyncText, metadata(asyncText), "strict")).toBeUndefined();
@@ -61,7 +85,9 @@ test("the property helper only admits direct inline descriptor checks", () => {
   ]) {
     const text = source("includes: [propertyHelper.js]", body);
     expect(exclusion(text, metadata(text), "strict")).toBeUndefined();
-    expect(prepare(text, false, undefined, "strict", ["propertyHelper.js"])).toContain("function verifyProperty(");
+    expect(prepare(text, false, undefined, "strict", ["propertyHelper.js"])).toContain(
+      "function verifyProperty(",
+    );
   }
   for (const body of [
     "verifyProperty({}, 'x', descriptor);",
@@ -73,6 +99,26 @@ test("the property helper only admits direct inline descriptor checks", () => {
     const text = source("includes: [propertyHelper.js]", body);
     expect(exclusion(text, metadata(text), "strict")).toBe("harness:propertyHelper-surface");
   }
+});
+
+test("the typed array helper is admitted without the %TypedArray% intrinsic", () => {
+  const text = source(
+    "includes: [testTypedArray.js]",
+    "testWithTypedArrayConstructors(function(TA) { assert.sameValue(new TA(1).length, 1); });",
+  );
+  expect(exclusion(text, metadata(text), "strict")).toBeUndefined();
+  const prepared = prepare(text, false, undefined, "strict", ["testTypedArray.js"]);
+  expect(prepared).toContain("function testWithTypedArrayConstructors(");
+  expect(prepared).not.toContain("Object.getPrototypeOf(Int8Array)");
+  for (const body of [
+    "assert.sameValue(typeof TypedArray, 'function');",
+    "testWithTypedArrayConstructors(function(TA) { assert.sameValue(Object.getPrototypeOf(TA), TypedArray); });",
+  ]) {
+    const named = source("includes: [testTypedArray.js]", body);
+    expect(exclusion(named, metadata(named), "strict")).toBe("harness:TypedArray-intrinsic");
+  }
+  const other = source("includes: [testTypedArray.js, detachArrayBuffer.js]");
+  expect(exclusion(other, metadata(other), "strict")).toBe("harness-includes:detachArrayBuffer.js");
 });
 
 test("receiver-bound this is admitted without adapting script-level this", () => {
@@ -96,7 +142,10 @@ test("receiver-bound this is admitted without adapting script-level this", () =>
 
 test("arguments reads are admitted only for indexed and length access inside a function", () => {
   for (const [body, expected] of [
-    ["function f() { return arguments.length === 1 && arguments[0] === 3; } assert(f(3));", undefined],
+    [
+      "function f() { return arguments.length === 1 && arguments[0] === 3; } assert(f(3));",
+      undefined,
+    ],
     ["function f() { return arguments; }", "host:arguments"],
     ["function f() { return Array.isArray(arguments); }", "host:arguments"],
     ["assert.sameValue(arguments.length, 0);", "host:arguments"],
@@ -107,49 +156,110 @@ test("arguments reads are admitted only for indexed and length access inside a f
 });
 
 test("negative parse cases require the compiler's matching source diagnostic", () => {
-  const text = source("negative: {phase: parse, type: SyntaxError}", "$DONOTEVALUATE();\nconst = ;");
+  const text = source(
+    "negative: {phase: parse, type: SyntaxError}",
+    "$DONOTEVALUATE();\nconst = ;",
+  );
   expect(exclusion(text, metadata(text), "strict")).toBeUndefined();
   expect(exclusion(text, metadata(text), "sloppy")).toBeUndefined();
   const offset = prepare(text).indexOf("const = ;") + "const ".length;
-  const match = { status: "compile-refusal", diagnostics: [{
-    code: "SC0001", message: "Variable declaration expected.", loc: { file: "/tmp/main.js", start: offset },
-  }] };
+  const match = {
+    status: "compile-refusal",
+    diagnostics: [
+      {
+        code: "SC0001",
+        message: "Variable declaration expected.",
+        loc: { file: "/tmp/main.js", start: offset },
+      },
+    ],
+  };
   expect(matchesParseNegative(match, text)).toBe(true);
   expect(matchesParseNegative(match, text, "sloppy")).toBe(false);
-  const sloppyOffset = prepare(text, false, undefined, "sloppy").indexOf("const = ;") + "const ".length;
-  expect(matchesParseNegative({ status: "compile-refusal", diagnostics: [{
-    code: "SC0001", message: "Variable declaration expected.", loc: { file: "/tmp/main.cjs", start: sloppyOffset },
-  }] }, text, "sloppy")).toBe(true);
-  expect(matchesParseNegative({ status: "compile-refusal", diagnostics: [{
-    code: "SC0001", message: "Cannot find name '$DONOTEVALUATE'.", loc: { file: "/tmp/main.js", start: 0 },
-  }] }, text)).toBe(false);
-  expect(matchesParseNegative({ status: "compiler-error", diagnostics: match.diagnostics }, text)).toBe(false);
+  const sloppyOffset =
+    prepare(text, false, undefined, "sloppy").indexOf("const = ;") + "const ".length;
+  expect(
+    matchesParseNegative(
+      {
+        status: "compile-refusal",
+        diagnostics: [
+          {
+            code: "SC0001",
+            message: "Variable declaration expected.",
+            loc: { file: "/tmp/main.cjs", start: sloppyOffset },
+          },
+        ],
+      },
+      text,
+      "sloppy",
+    ),
+  ).toBe(true);
+  expect(
+    matchesParseNegative(
+      {
+        status: "compile-refusal",
+        diagnostics: [
+          {
+            code: "SC0001",
+            message: "Cannot find name '$DONOTEVALUATE'.",
+            loc: { file: "/tmp/main.js", start: 0 },
+          },
+        ],
+      },
+      text,
+    ),
+  ).toBe(false);
+  expect(
+    matchesParseNegative({ status: "compiler-error", diagnostics: match.diagnostics }, text),
+  ).toBe(false);
   const strictOnly = source("negative: {phase: parse, type: SyntaxError}", "with ({}) {}");
   expect(exclusion(strictOnly, metadata(strictOnly), "sloppy")).toBeUndefined();
   const generatedOnly = source("negative: {phase: parse, type: SyntaxError}", "function f() {");
   expect(exclusion(generatedOnly, metadata(generatedOnly), "strict")).toBeUndefined();
   const typeOnly = source("negative: {phase: parse, type: SyntaxError}", "const value = 'a' * 2;");
   const typeOffset = prepare(typeOnly).indexOf("'a' * 2");
-  expect(matchesParseNegative({ status: "compile-refusal", diagnostics: [{
-    code: "SC0001", message: "An arithmetic operand must be of type 'any', 'number', 'bigint' or an enum type.",
-    loc: { file: "/tmp/main.js", start: typeOffset },
-  }] }, typeOnly)).toBe(false);
+  expect(
+    matchesParseNegative(
+      {
+        status: "compile-refusal",
+        diagnostics: [
+          {
+            code: "SC0001",
+            message:
+              "An arithmetic operand must be of type 'any', 'number', 'bigint' or an enum type.",
+            loc: { file: "/tmp/main.js", start: typeOffset },
+          },
+        ],
+      },
+      typeOnly,
+    ),
+  ).toBe(false);
 });
 
 test("built-in error assertions are admitted without permitting constructor aliases", () => {
   for (const name of ["TypeError", "ReferenceError", "EvalError", "URIError"]) {
-    const accepted = source("description: exact error", `assert.throws(${name}, () => { throw new ${name}(); });`);
+    const accepted = source(
+      "description: exact error",
+      `assert.throws(${name}, () => { throw new ${name}(); });`,
+    );
     expect(exclusion(accepted, metadata(accepted), "strict")).toBeUndefined();
   }
-  const alias = source("description: custom error", "const Expected = TypeError; assert.throws(Expected, () => { throw new TypeError(); });");
+  const alias = source(
+    "description: custom error",
+    "const Expected = TypeError; assert.throws(Expected, () => { throw new TypeError(); });",
+  );
   expect(exclusion(alias, metadata(alias), "strict")).toBe("harness:assert-surface");
 });
 
 test("the compareArray include only admits the implemented assertion form", () => {
-  const accepted = source("includes: [compareArray.js]", "assert.compareArray([1, NaN], [1, NaN]);");
+  const accepted = source(
+    "includes: [compareArray.js]",
+    "assert.compareArray([1, NaN], [1, NaN]);",
+  );
   expect(exclusion(accepted, metadata(accepted), "strict")).toBeUndefined();
   const globalHelper = source("includes: [compareArray.js]", "compareArray([1], [1]);");
-  expect(exclusion(globalHelper, metadata(globalHelper), "strict")).toBe("harness:compareArray-surface");
+  expect(exclusion(globalHelper, metadata(globalHelper), "strict")).toBe(
+    "harness:compareArray-surface",
+  );
 });
 
 test("the adapter retains the test body without a function or try/catch wrapper", () => {
@@ -164,11 +274,15 @@ test("the adapter retains the test body without a function or try/catch wrapper"
 });
 
 test("reports keep exclusions, refusals, failures and passes separate", () => {
-  expect(summarize([
-    { status: "pass" }, { status: "compile-refusal" }, { status: "fail" },
-    { status: "excluded", reason: "execution:sloppy" },
-    { status: "excluded", reason: "execution:sloppy" },
-  ])).toEqual({
+  expect(
+    summarize([
+      { status: "pass" },
+      { status: "compile-refusal" },
+      { status: "fail" },
+      { status: "excluded", reason: "execution:sloppy" },
+      { status: "excluded", reason: "execution:sloppy" },
+    ]),
+  ).toEqual({
     counts: { pass: 1, "compile-refusal": 1, fail: 1, excluded: 2 },
     exclusions: { "execution:sloppy": 2 },
   });
@@ -176,11 +290,17 @@ test("reports keep exclusions, refusals, failures and passes separate", () => {
 
 test("internal compiler failures cannot be classified as intentional refusals", () => {
   for (const code of ["SC0004", "SC9001", "SC9002"]) {
-    expect(compileFailureStatus([{ code, loc: { file: "/tmp/harness.ts" } }])).toBe("compiler-error");
+    expect(compileFailureStatus([{ code, loc: { file: "/tmp/harness.ts" } }])).toBe(
+      "compiler-error",
+    );
   }
-  for (const code of ["SC3003", "SC3004"]) expect(compileFailureStatus([{ code }])).toBe("build-error");
-  for (const code of ["SC2020", "SC3001", "SC3002"]) expect(compileFailureStatus([{ code }])).toBe("compile-refusal");
-  expect(compileFailureStatus([{ code: "SC2020", loc: { file: "/tmp/harness.ts" } }])).toBe("harness-refusal");
+  for (const code of ["SC3003", "SC3004"])
+    expect(compileFailureStatus([{ code }])).toBe("build-error");
+  for (const code of ["SC2020", "SC3001", "SC3002"])
+    expect(compileFailureStatus([{ code }])).toBe("compile-refusal");
+  expect(compileFailureStatus([{ code: "SC2020", loc: { file: "/tmp/harness.ts" } }])).toBe(
+    "harness-refusal",
+  );
 });
 
 test("a stuck process is killed and reported as a timeout", async () => {

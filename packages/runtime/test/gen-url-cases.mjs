@@ -114,7 +114,7 @@ const paths = [
   "..",
   "\\rooted\\x",
   "/rooted/y",
-  "C:\\a?#[]^|`{}\"<>",
+  'C:\\a?#[]^|`{}"<>',
   "C:\\a\nb\tc\rd",
   "C:\\per%25cent",
   "\\\\server\\share",
@@ -163,7 +163,7 @@ for (const u of posixUrls) emit("u2p-posix", u, () => fileURLToPath(u, { windows
 const posixPaths = [
   "/tmp/a b/c%d",
   "/tmp/é🌍",
-  "/a[]^|`{}\"<>?#z",
+  '/a[]^|`{}"<>?#z',
   "/back\\slash",
   "/trailing/",
   "/trailing//",

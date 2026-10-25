@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2674-top-level-for-await-implicit-module.ts"
+ ],
+ "diags": []
+}

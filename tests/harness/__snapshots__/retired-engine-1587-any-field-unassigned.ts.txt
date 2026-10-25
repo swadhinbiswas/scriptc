@@ -1,0 +1,47 @@
+retired-engine-1587-any-field-unassigned.ts:5:3 - error SC1090: 'any'-typed class fields are not supported yet
+
+  4 | class Holder {
+  5 |   x: any;
+    |   ^
+  6 |   fill(): void {
+
+retired-engine-1587-any-field-unassigned.ts:11:11 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  10 | 
+  11 | const h = new Holder();
+     |           ^~~~~~~~~~~~
+  12 | console.log(String(h.x));
+
+retired-engine-1587-any-field-unassigned.ts:12:20 - error SC2004: uses of 'h' inherit the blocker on its declaration
+
+  11 | const h = new Holder();
+  12 | console.log(String(h.x));
+     |                    ^
+  13 | h.fill();
+
+  hint: the declaration of 'h' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-1587-any-field-unassigned.ts:13:1 - error SC2004: uses of 'h' inherit the blocker on its declaration
+
+  12 | console.log(String(h.x));
+  13 | h.fill();
+     | ^
+  14 | console.log(String(h.x));
+
+  hint: the declaration of 'h' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-1587-any-field-unassigned.ts:14:20 - error SC2004: uses of 'h' inherit the blocker on its declaration
+
+  13 | h.fill();
+  14 | console.log(String(h.x));
+     |                    ^
+  15 | console.log(new Holder().x === undefined);
+
+  hint: the declaration of 'h' did not compile — fix the diagnostic reported there and these sites clear with it
+
+retired-engine-1587-any-field-unassigned.ts:15:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  14 | console.log(String(h.x));
+  15 | console.log(new Holder().x === undefined);
+     |             ^~~~~~~~~~~~
+  16 | 

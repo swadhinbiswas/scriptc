@@ -1,4 +1,4 @@
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.22.0
 FROM ubuntu:24.04
 
 ARG NODE_VERSION
@@ -24,6 +24,7 @@ RUN apt-get update \
         curl \
         git \
         libclang-rt-22-dev \
+        libpolly-22-dev \
         libzstd-dev \
         llvm-22-dev \
         ninja-build \

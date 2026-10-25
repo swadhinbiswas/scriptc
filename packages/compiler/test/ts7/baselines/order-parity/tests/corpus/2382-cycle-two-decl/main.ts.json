@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2382-cycle-two-decl/b.ts",
+  "<repo>/tests/corpus/2382-cycle-two-decl/a.ts",
+  "<repo>/tests/corpus/2382-cycle-two-decl/main.ts"
+ ],
+ "diags": []
+}

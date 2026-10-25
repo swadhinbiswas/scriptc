@@ -15,16 +15,22 @@ const snapshot = JSON.parse(
 
 describe("Node compatibility generator", () => {
   test("does not attribute bare fs APIs to fs/promises lowering", () => {
-    const bareFsRows = snapshot.rows.filter((row) => row.chapter === "fs" && row.apiSymbol.startsWith("fs."));
+    const bareFsRows = snapshot.rows.filter(
+      (row) => row.chapter === "fs" && row.apiSymbol.startsWith("fs."),
+    );
 
     expect(bareFsRows.length).toBeGreaterThan(0);
     expect(bareFsRows.every((row) => !row.static?.evidence?.includes("fs.promises"))).toBe(true);
   });
 
   test("keeps fsPromises APIs attributed to fs/promises lowering", () => {
-    const promiseRows = snapshot.rows.filter((row) => row.chapter === "fs" && row.apiSymbol.startsWith("fsPromises."));
+    const promiseRows = snapshot.rows.filter(
+      (row) => row.chapter === "fs" && row.apiSymbol.startsWith("fsPromises."),
+    );
 
     expect(promiseRows.length).toBeGreaterThan(0);
-    expect(promiseRows.some((row) => row.static?.evidence?.includes("node-builtin.fs.promises"))).toBe(true);
+    expect(
+      promiseRows.some((row) => row.static?.evidence?.includes("node-builtin.fs.promises")),
+    ).toBe(true);
   });
 });

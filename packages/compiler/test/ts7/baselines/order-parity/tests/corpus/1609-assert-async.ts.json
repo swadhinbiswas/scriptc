@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1609-assert-async.ts"
+ ],
+ "diags": []
+}

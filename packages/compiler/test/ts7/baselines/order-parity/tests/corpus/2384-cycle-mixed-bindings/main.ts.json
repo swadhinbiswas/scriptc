@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2384-cycle-mixed-bindings/render.ts",
+  "<repo>/tests/corpus/2384-cycle-mixed-bindings/config.ts",
+  "<repo>/tests/corpus/2384-cycle-mixed-bindings/main.ts"
+ ],
+ "diags": []
+}

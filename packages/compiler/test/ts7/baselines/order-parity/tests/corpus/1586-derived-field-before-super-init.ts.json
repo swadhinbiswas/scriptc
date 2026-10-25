@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1586-derived-field-before-super-init.ts"
+ ],
+ "diags": []
+}

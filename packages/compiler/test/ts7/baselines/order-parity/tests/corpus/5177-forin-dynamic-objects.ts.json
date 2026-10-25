@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5177-forin-dynamic-objects.ts"
+ ],
+ "diags": []
+}

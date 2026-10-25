@@ -6,7 +6,10 @@ import type { Lowerer } from "./lowerer.js";
 import { isSafeToDiscard } from "./expressions/evaluation-safety.js";
 
 /** Lower an expression whose checker type is statically `undefined`/`void`. */
-export function lowerStaticallyUndefinedArgument(lowerer: Lowerer, node: ts.Expression): IrExpr | null {
+export function lowerStaticallyUndefinedArgument(
+  lowerer: Lowerer,
+  node: ts.Expression,
+): IrExpr | null {
   const peelErasableWrappers = (value: ts.Expression): ts.Expression => {
     let expr = value;
     while (
@@ -21,7 +24,8 @@ export function lowerStaticallyUndefinedArgument(lowerer: Lowerer, node: ts.Expr
   };
   let expr = node;
   while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
-  if ((lowerer.typeOf(expr).flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0) return null;
+  if ((lowerer.typeOf(expr).flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
+    return null;
   // A caller may already have evaluated the entire argument (including a
   // void operand) before receiver coercion. Do not evaluate it again.
   const stabilized = lowerer.chainRecvByNode.get(node);
@@ -48,7 +52,11 @@ export function defaultAfterUndefined(value: IrExpr, defaultValue: IrExpr): IrEx
 }
 
 /** Convert an omitted or supplied string-search value after preserving its effects. */
-export function lowerStringSearchArgument(lowerer: Lowerer, node: ts.Expression | undefined, loc: SrcLoc): IrExpr {
+export function lowerStringSearchArgument(
+  lowerer: Lowerer,
+  node: ts.Expression | undefined,
+  loc: SrcLoc,
+): IrExpr {
   const absent = strLit("undefined", loc);
   if (!node) return absent;
   const undefinedArg = lowerStaticallyUndefinedArgument(lowerer, node);
@@ -57,9 +65,17 @@ export function lowerStringSearchArgument(lowerer: Lowerer, node: ts.Expression 
 }
 
 /** Convert a lowered string-search value while preserving unit-value effects. */
-export function coerceStringSearchValue(lowerer: Lowerer, value: IrExpr, node: ts.Expression, loc: SrcLoc): IrExpr {
+export function coerceStringSearchValue(
+  lowerer: Lowerer,
+  value: IrExpr,
+  node: ts.Expression,
+  loc: SrcLoc,
+): IrExpr {
   if (isUnitType(value.type)) {
-    return defaultAfterUndefined(value, strLit(value.type.kind === "nullT" ? "null" : "undefined", loc));
+    return defaultAfterUndefined(
+      value,
+      strLit(value.type.kind === "nullT" ? "null" : "undefined", loc),
+    );
   }
   return lowerer.ensureString(value, node);
 }
@@ -88,13 +104,20 @@ export function lowerOptionalArgument(
 }
 
 /** Complete an omitted or statically undefined position without dropping argument effects. */
-export function lowerPositionArgument(lowerer: Lowerer, node: ts.Expression | undefined, defaultValue: IrExpr): IrExpr {
+export function lowerPositionArgument(
+  lowerer: Lowerer,
+  node: ts.Expression | undefined,
+  defaultValue: IrExpr,
+): IrExpr {
   if (!node) return defaultValue;
   const undefinedArg = lowerStaticallyUndefinedArgument(lowerer, node);
   if (undefinedArg) return defaultAfterUndefined(undefinedArg, defaultValue);
   const value = lowerer.lowerExpr(node);
   if (isUnitType(value.type) || value.type.kind === "void") {
-    return defaultAfterUndefined(value, value.type.kind === "nullT" ? numLit(0, value.loc) : defaultValue);
+    return defaultAfterUndefined(
+      value,
+      value.type.kind === "nullT" ? numLit(0, value.loc) : defaultValue,
+    );
   }
   return value;
 }
@@ -109,34 +132,61 @@ export function positionNumber(
 ): IrExpr {
   const loc = value.loc;
   switch (value.type.kind) {
-    case "f64": return value;
-    case "string": return { kind: "libCall", fn: "num.fromString", args: [value], type: F64, loc };
-    case "bool": return { kind: "ternary", cond: value, then: numLit(1, loc), else_: numLit(0, loc), type: F64, loc };
-    case "nullT": return numLit(0, loc);
-    case "undefinedT": return defaultValue;
-    case "jsval": return { kind: "jsExit", value, type: F64, loc };
+    case "f64":
+      return value;
+    case "string":
+      return { kind: "libCall", fn: "num.fromString", args: [value], type: F64, loc };
+    case "bool":
+      return {
+        kind: "ternary",
+        cond: value,
+        then: numLit(1, loc),
+        else_: numLit(0, loc),
+        type: F64,
+        loc,
+      };
+    case "nullT":
+      return numLit(0, loc);
+    case "undefinedT":
+      return defaultValue;
     case "union": {
       const unionId = value.type.unionId;
       const arms = lowerer.unions.get(unionId)!.arms;
       let result: IrExpr = defaultValue;
       for (let tag = arms.length - 1; tag >= 0; tag--) {
-        const narrowed: IrExpr = { kind: "unionNarrow", unionId, tag, value, type: arms[tag]!, loc };
-        const converted = positionNumber(lowerer, narrowed, defaultValue, node, subject);
-        result = tag === arms.length - 1 ? converted : {
-          kind: "ternary",
-          cond: { kind: "unionIsTag", unionId, tag, value, negated: false, type: BOOL, loc },
-          then: converted, else_: result, type: F64, loc,
+        const narrowed: IrExpr = {
+          kind: "unionNarrow",
+          unionId,
+          tag,
+          value,
+          type: arms[tag]!,
+          loc,
         };
+        const converted = positionNumber(lowerer, narrowed, defaultValue, node, subject);
+        result =
+          tag === arms.length - 1
+            ? converted
+            : {
+                kind: "ternary",
+                cond: { kind: "unionIsTag", unionId, tag, value, negated: false, type: BOOL, loc },
+                then: converted,
+                else_: result,
+                type: F64,
+                loc,
+              };
       }
       return result;
     }
-    case "dyn": return {
-      kind: "ternary",
-      cond: { kind: "dynTest", test: "undefined", value, type: BOOL, loc },
-      then: defaultValue,
-      else_: { kind: "libCall", fn: "dyn.toNumberCoerce", args: [value], type: F64, loc },
-      type: F64, loc,
-    };
-    default: lowerer.noLowering(`${subject} of '${lowerer.fmt(value.type)}' values`, node);
+    case "dyn":
+      return {
+        kind: "ternary",
+        cond: { kind: "dynTest", test: "undefined", value, type: BOOL, loc },
+        then: defaultValue,
+        else_: { kind: "libCall", fn: "dyn.toNumberCoerce", args: [value], type: F64, loc },
+        type: F64,
+        loc,
+      };
+    default:
+      lowerer.noLowering(`${subject} of '${lowerer.fmt(value.type)}' values`, node);
   }
 }

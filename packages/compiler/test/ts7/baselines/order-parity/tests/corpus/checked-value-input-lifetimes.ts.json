@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/checked-value-input-lifetimes.ts"
+ ],
+ "diags": []
+}

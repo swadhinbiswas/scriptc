@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3140-array-dense-access.ts"
+ ],
+ "diags": []
+}

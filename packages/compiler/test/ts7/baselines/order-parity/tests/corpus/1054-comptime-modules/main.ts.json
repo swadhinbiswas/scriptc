@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1054-comptime-modules/tables.ts",
+  "<repo>/tests/corpus/1054-comptime-modules/main.ts"
+ ],
+ "diags": []
+}

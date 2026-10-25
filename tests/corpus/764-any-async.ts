@@ -1,4 +1,3 @@
-// @dynamic
 // Island operations inside async functions run on ucontext fibers — every
 // entry re-anchors the engine's stack check (the fiber-safety contract).
 // The ops after `await` run on a RESUMED fiber, the strictest case.

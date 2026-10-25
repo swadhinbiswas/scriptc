@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/518-promise-void-union-callbacks.ts"
+ ],
+ "diags": []
+}

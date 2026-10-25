@@ -1,6 +1,16 @@
 #include "scr_runtime.h"
 #include <assert.h>
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+
+#ifdef SCR_RC_AUDIT
+long scr_str_live_count(void);
+long scr_dyn_key_live_count(void);
+#endif
 
 static void put(ScrDyn *map, ScrDyn *key, ScrDyn *value) {
   ScrDyn *args[] = {key, value};
@@ -20,8 +30,828 @@ static ScrDyn *nothing(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   return scr_dyn_retain(scr_dyn_undefined());
 }
 
+static void json_string_boundaries(void) {
+  /* Every escape/control at every word alignment, followed by raw UTF-8.
+   * ASan also checks short tails that cannot supply a complete word. */
+  const char suffix[] = "tail\xF0\x9F\x99\x82\xE9\x9B\xAA";
+  for (size_t prefix = 0; prefix < 64; prefix++) {
+    for (unsigned special = 0; special < 34; special++) {
+      char bytes[96];
+      memset(bytes, 'a', prefix);
+      bytes[prefix] = special < 32 ? (char)special : special == 32 ? '"' : '\\';
+      memcpy(bytes + prefix + 1, suffix, sizeof suffix - 1);
+      size_t length = prefix + sizeof suffix;
+      ScrStr *original = scr_str_new(bytes, length);
+      ScrJsonBuf buffer;
+      scr_jb_init(&buffer);
+      scr_jb_put_json_str(&buffer, original);
+      ScrStr *encoded = scr_jb_finish(&buffer);
+      ScrDyn *parsed = scr_json_parse(encoded);
+      assert(parsed && parsed->kind == SCR_DYN_STR && !scr_exc_pending());
+      assert(scr_str_eq(original, parsed->v.str));
+      scr_dyn_release(parsed);
+      scr_str_release(encoded);
+      scr_str_release(original);
+
+      if (special < 32) {
+        char invalid[68];
+        invalid[0] = '"';
+        memset(invalid + 1, 'a', prefix);
+        invalid[prefix + 1] = (char)special;
+        invalid[prefix + 2] = '"';
+        ScrStr *input = scr_str_new(invalid, prefix + 3);
+        assert(!scr_json_parse(input) && scr_exc_pending());
+        scr_exc_clear();
+        scr_str_release(input);
+      }
+    }
+    char plain[68];
+    plain[0] = '"';
+    memset(plain + 1, 'z', prefix);
+    plain[prefix + 1] = '"';
+    ScrStr *input = scr_str_new(plain, prefix + 2);
+    ScrDyn *parsed = scr_json_parse(input);
+    assert(parsed && parsed->v.str->len == prefix && !scr_exc_pending());
+    scr_dyn_release(parsed);
+    scr_str_release(input);
+    input = scr_str_new(plain, prefix + 1);
+    assert(!scr_json_parse(input) && scr_exc_pending());
+    scr_exc_clear();
+    scr_str_release(input);
+  }
+  /* Lone surrogates escape as \udXXX at every alignment and parse back
+   * lone; U+D7FF shares their lead byte and stays raw. */
+  scr_wtf8_note();
+  static const char *const units[] = {"\xED\xA0\xBD", "\xED\xB8\x80", "\xED\x9F\xBF"};
+  static const char *const escapes[] = {"\\ud83d", "\\ude00", "\xED\x9F\xBF"};
+  for (size_t prefix = 0; prefix < 24; prefix++) {
+    for (size_t u = 0; u < 3; u++) {
+      char bytes[64];
+      memset(bytes, 'b', prefix);
+      memcpy(bytes + prefix, units[u], 3);
+      memcpy(bytes + prefix + 3, "\xC3\xA9xyz", 5);
+      ScrStr *original = scr_str_new(bytes, prefix + 8);
+      ScrJsonBuf buffer;
+      scr_jb_init(&buffer);
+      scr_jb_put_json_str(&buffer, original);
+      ScrStr *encoded = scr_jb_finish(&buffer);
+      size_t escape_len = strlen(escapes[u]);
+      assert(encoded->len == prefix + 7 + escape_len);
+      assert(memcmp(encoded->data + 1 + prefix, escapes[u], escape_len) == 0);
+      ScrDyn *parsed = scr_json_parse(encoded);
+      assert(parsed && parsed->kind == SCR_DYN_STR && scr_str_eq(original, parsed->v.str));
+      scr_dyn_release(parsed);
+      scr_str_release(encoded);
+      scr_str_release(original);
+    }
+  }
+}
+
+static void json_indent_ownership(void) {
+  const char compact[] = "{\"a\":[],\"b\":[1,{}]}";
+  const char expected[] = "{\n  \"a\": [],\n  \"b\": [\n    1,\n    {}\n  ]\n}";
+  ScrStr *input = scr_str_new(compact, sizeof compact - 1);
+  ScrStr *same = scr_json_indent(input, "", 0);
+  assert(same == input && input->rc == 2);
+  scr_str_release(same);
+  ScrStr *pretty = scr_json_indent(input, "  ", 2);
+  assert(pretty->len == sizeof expected - 1);
+  assert(!memcmp(pretty->data, expected, sizeof expected - 1));
+  scr_str_release(input);
+  assert(!memcmp(pretty->data, expected, sizeof expected - 1));
+  scr_str_release(pretty);
+}
+
+static void checked_storage(void) {
+  /* Reuse after deletion, changing field order, embedded NUL and escaped
+   * duplicate names must leave independently owned keys and values. */
+  for (int round = 0; round < 100; round++) {
+    const char *text = round % 2 ? "{\"alpha\":1,\"beta\":2,\"gamma\":3}"
+      : "{\"gamma\":3,\"alpha\":0,\"\\u0061lpha\":1,\"beta\":2}";
+    ScrStr *input = scr_str_new(text, strlen(text));
+    ScrDyn *object = scr_json_parse(input);
+    scr_str_release(input);
+    assert(object && object->v.obj.len == 3);
+    assert(scr_dyn_obj_get(object, "alpha", 5)->v.num == 1);
+    ScrStr *key = scr_str_new("beta", 4);
+    scr_dyn_key_delete(object, key, true);
+    scr_str_release(key);
+    assert(!scr_dyn_obj_get(object, "beta", 4));
+    assert(scr_dyn_obj_get(object, "gamma", 5)->v.num == 3);
+    char mutable_key[] = "new\0key";
+    scr_dyn_obj_set(object, mutable_key, sizeof mutable_key - 1, scr_dyn_new_num(4));
+    mutable_key[0] = 'x';
+    assert(scr_dyn_obj_get(object, "new\0key", 7)->v.num == 4);
+    scr_dyn_release(object);
+  }
+  /* Larger objects and long names leave no stale pooled tail keys when a
+   * later small object grows through the same capacity. */
+  for (int round = 0; round < 4; round++) {
+    ScrDyn *object = scr_dyn_new_obj();
+    for (int i = 0; i < 80; i++) {
+      char key[160];
+      memset(key, 'a' + i % 20, sizeof key);
+      int prefix = snprintf(key, sizeof key, "%d:", i);
+      memset(key + prefix, 'a' + i % 20, sizeof key - (size_t)prefix);
+      scr_dyn_obj_set(object, key, sizeof key, scr_dyn_new_num(i));
+      assert(scr_dyn_obj_get(object, key, sizeof key)->v.num == i);
+    }
+    scr_dyn_release(object);
+  }
+  /* Cross index growth boundaries, invalidate moved entry positions, then
+   * recreate the index from survivors. Repeat after pool reuse. */
+  for (int round = 0; round < 4; round++) {
+    ScrDyn *object = scr_dyn_new_obj();
+    assert(!object->v.obj.index);
+    for (int i = 0; i < 129; i++) {
+      char key[16];
+      int length = snprintf(key, sizeof key, "key-%d", i);
+      scr_dyn_obj_set(object, key, (size_t)length, scr_dyn_new_num(i));
+      assert((object->v.obj.index != NULL) == (i >= 31));
+    }
+    for (int i = 0; i < 129; i++) {
+      char key[16];
+      int length = snprintf(key, sizeof key, "key-%d", i);
+      assert(scr_dyn_obj_get(object, key, (size_t)length)->v.num == i);
+      if (i % 3 == 0) {
+        ScrStr *name = scr_str_new(key, (size_t)length);
+        scr_dyn_key_delete(object, name, true);
+        scr_str_release(name);
+        assert(!scr_dyn_obj_get(object, key, (size_t)length));
+      }
+    }
+    scr_dyn_obj_set(object, "last", 4, scr_dyn_new_num(129));
+    assert(object->v.obj.index);
+    for (int i = 0; i < 129; i++) {
+      char key[16];
+      int length = snprintf(key, sizeof key, "key-%d", i);
+      ScrDyn *value = scr_dyn_obj_get(object, key, (size_t)length);
+      assert(i % 3 == 0 ? value == NULL : value && value->v.num == i);
+    }
+    scr_dyn_obj_set(object, "key-128", 7, scr_dyn_new_num(900));
+    assert(object->v.obj.len == 87);
+    assert(scr_dyn_obj_get(object, "key-128", 7)->v.num == 900);
+    scr_dyn_release(object);
+  }
+  /* A direct step is authorized only by the captured builtin method. */
+  ScrDyn *source = scr_dyn_new_arr();
+  scr_dyn_arr_push(source, scr_dyn_new_num(7));
+  scr_dyn_arr_push(source, scr_dyn_retain(scr_dyn_undefined()));
+  ScrStr *spell = scr_str_new("source", 6);
+  ScrDyn *iterator = scr_dyn_iterator(source, spell);
+  scr_str_release(spell);
+  ScrDyn *next = scr_dyn_handle_ops_of(iterator)->get(iterator->v.handle.ptr, "next", 4);
+  assert(scr_dyn_iterator_can_step(iterator, next));
+  assert(!scr_dyn_iterator_can_step(source, next));
+  assert(!scr_dyn_iterator_can_step(iterator, scr_dyn_undefined()));
+  ScrDyn *item = scr_dyn_iterator_step(iterator);
+  assert(item->v.num == 7 && !scr_dyn_iterator_step_done(iterator));
+  scr_dyn_release(item);
+  item = scr_dyn_iterator_step(iterator);
+  assert(item->kind == SCR_DYN_UNDEF && !scr_dyn_iterator_step_done(iterator));
+  scr_dyn_release(item);
+  scr_dyn_arr_push(source, scr_dyn_new_num(9));
+  item = scr_dyn_iterator_step(iterator);
+  assert(item->v.num == 9 && !scr_dyn_iterator_step_done(iterator));
+  scr_dyn_release(item);
+  item = scr_dyn_iterator_step(iterator);
+  assert(item->kind == SCR_DYN_UNDEF && scr_dyn_iterator_step_done(iterator));
+  scr_dyn_release(item);
+  scr_dyn_arr_push(source, scr_dyn_new_num(11));
+  item = scr_dyn_iterator_step(iterator);
+  assert(item->kind == SCR_DYN_UNDEF && scr_dyn_iterator_step_done(iterator));
+  scr_dyn_release(item);
+  scr_dyn_release(next);
+  scr_dyn_release(iterator);
+  scr_dyn_release(source);
+  assert(!scr_exc_pending());
+}
+
+static void shared_property_keys(void) {
+#ifdef SCR_RC_AUDIT
+  long before = scr_dyn_key_live_count();
+#endif
+  /* Distinct objects share bytes, not values or property attributes. Key
+   * deletion, a collected owner and a caller-owned input cannot invalidate
+   * the surviving entry. */
+  ScrDyn *first = scr_dyn_new_obj(), *second = scr_dyn_new_obj();
+  char key[] = "shared\0name";
+  scr_dyn_obj_set(first, key, sizeof key - 1, scr_dyn_new_num(1));
+  scr_dyn_obj_set(second, key, sizeof key - 1, scr_dyn_new_num(2));
+  assert(first->v.obj.entries[0].key == second->v.obj.entries[0].key);
+  key[0] = 'x';
+  ScrStr *name = scr_str_new("shared\0name", sizeof key - 1);
+  scr_dyn_key_delete(first, name, true);
+  scr_str_release(name);
+  assert(scr_dyn_obj_get(second, "shared\0name", sizeof key - 1)->v.num == 2);
+  scr_dyn_obj_set(first, "shared\0name", sizeof key - 1, scr_dyn_new_num(3));
+  scr_dyn_obj_set(first, "self", 4, scr_dyn_retain(first));
+  scr_dyn_release(first);
+  scr_collect_cycles();
+  assert(scr_dyn_obj_get(second, "shared\0name", sizeof key - 1)->v.num == 2);
+  scr_dyn_release(second);
+
+  /* More distinct live names than weak slots force collisions. Releasing
+   * an evicted owner must not clear or free the replacement's storage. */
+  ScrDyn *objects[600];
+  for (int round = 0; round < 2; round++) {
+    for (int i = 0; i < 600; i++) {
+      char bytes[32];
+      int length = snprintf(bytes, sizeof bytes, "field-%d", i);
+      objects[i] = scr_dyn_new_obj();
+      scr_dyn_obj_set(objects[i], bytes, (size_t)length, scr_dyn_new_num(i));
+    }
+    for (int i = 0; i < 600; i++) {
+      char bytes[32];
+      int length = snprintf(bytes, sizeof bytes, "field-%d", i);
+      assert(scr_dyn_obj_get(objects[i], bytes, (size_t)length)->v.num == i);
+      scr_dyn_release(objects[i]);
+    }
+  }
+#ifdef SCR_RC_AUDIT
+  assert(scr_dyn_key_live_count() == before);
+#endif
+}
+
+static void checked_leaf_cycles(void) {
+  /* Object properties omit primitives from trial deletion, while arrays and
+   * captured unknown values still trace them. Exercise shared leaves through
+   * both edge kinds, with and without an external owner, in every generation. */
+  for (uint16_t gen = SCR_CYC_NURSERY; gen < SCR_CYC_NGENS; gen++) {
+    for (int external = 0; external < 2; external++) {
+#ifdef SCR_RC_AUDIT
+      long before_dyns = scr_dyn_live_count();
+      long before_strings = scr_str_live_count();
+#endif
+      ScrStr *text = scr_str_new("survives either edge", 20);
+      ScrDyn *leaf = scr_dyn_new_str(text);
+      scr_str_release(text);
+      scr_cyc_set_gen(scr_cyc_hdr(leaf), gen);
+      ScrDyn *first = scr_dyn_new_obj(), *second = scr_dyn_new_obj();
+      ScrDyn *array = scr_dyn_new_arr();
+      ScrClosure *closure = scr_closure_new(NULL, 1);
+      closure->caps[0] = scr_box_new_obj(scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v);
+      scr_box_set_ref(closure->caps[0], scr_dyn_retain(leaf));
+      scr_dyn_obj_set(first, "callback", 8, scr_dyn_new_func(closure, nothing, 0, "func()=>dyn", "leaf"));
+      scr_dyn_obj_set(first, "leaf", 4, scr_dyn_retain(leaf));
+      scr_dyn_obj_set(second, "leaf", 4, scr_dyn_retain(leaf));
+      scr_dyn_obj_set(second, "number", 6, scr_dyn_new_num(42));
+      scr_dyn_obj_set(second, "empty", 5, scr_dyn_new_null());
+      scr_dyn_obj_set(second, "missing", 7, scr_dyn_retain(scr_dyn_undefined()));
+      scr_dyn_arr_push(array, scr_dyn_retain(leaf));
+      scr_dyn_arr_push(array, scr_dyn_retain(first));
+      scr_dyn_obj_set(first, "next", 4, scr_dyn_retain(second));
+      scr_dyn_obj_set(second, "back", 4, scr_dyn_retain(first));
+      scr_dyn_obj_set(second, "array", 5, array);
+      if (!external) scr_dyn_release(leaf);
+      scr_dyn_release(first);
+      scr_dyn_release(second);
+      scr_cyc_collect_scheduled();
+      scr_collect_cycles();
+      if (external) {
+        assert(leaf->rc == 1 && leaf->v.str->len == 20);
+        scr_dyn_release(leaf);
+      }
+#ifdef SCR_RC_AUDIT
+      assert(scr_dyn_live_count() == before_dyns);
+      assert(scr_str_live_count() == before_strings);
+#endif
+    }
+  }
+
+  /* A previous trace snapshot must not survive a property mutation: the
+   * next collection must trace a new object edge or release a new leaf. */
+  for (int leaf_after = 0; leaf_after < 2; leaf_after++) {
+#ifdef SCR_RC_AUDIT
+    long before = scr_dyn_live_count();
+#endif
+    ScrDyn *object = scr_dyn_new_obj(), *child = scr_dyn_new_obj();
+    scr_dyn_obj_set(object, "self", 4, scr_dyn_retain(object));
+    scr_dyn_obj_set(object, "value", 5, leaf_after ? scr_dyn_retain(child) : scr_dyn_new_num(1));
+    scr_dyn_release(scr_dyn_retain(object));
+    scr_collect_cycles();
+    scr_dyn_obj_set(object, "value", 5, leaf_after ? scr_dyn_new_num(2) : scr_dyn_retain(child));
+    scr_dyn_obj_set(child, "parent", 6, scr_dyn_retain(object));
+    scr_dyn_release(child);
+    scr_dyn_release(object);
+    scr_collect_cycles();
+#ifdef SCR_RC_AUDIT
+    assert(scr_dyn_live_count() == before);
+#endif
+  }
+}
+
+static void checked_number_storage(void) {
+#ifdef SCR_RC_AUDIT
+  long before = scr_dyn_live_count();
+#endif
+  for (int value = -130; value < 258; value++) {
+    ScrDyn *first = scr_dyn_new_num(value), *second = scr_dyn_new_num(value);
+    assert(first->kind == SCR_DYN_NUM && first->v.num == value);
+    assert(scr_dyn_strict_eq(first, second));
+    if (value >= -128 && value <= 255) assert(first == second && first->rc == SIZE_MAX);
+    ScrDyn *array = scr_dyn_new_arr();
+    scr_dyn_arr_push(array, first);
+    scr_dyn_arr_push(array, second);
+    scr_dyn_arr_push(array, scr_dyn_retain(array));
+    scr_dyn_release(array);
+    scr_collect_cycles();
+  }
+  const double special[] = {-0.0, 0.5, -0.5, NAN, INFINITY, -INFINITY, 9007199254740991.0};
+  for (size_t i = 0; i < sizeof special / sizeof special[0]; i++) {
+    ScrDyn *value = scr_dyn_new_num(special[i]);
+    assert(value->rc != SIZE_MAX);
+    assert(isnan(special[i]) ? isnan(value->v.num) : value->v.num == special[i]);
+    if (special[i] == 0) assert(signbit(value->v.num));
+    scr_dyn_release(value);
+  }
+  const char raw[] = "[-0,0,1.0,1e2,-128,255,256,1e400]";
+  ScrStr *input = scr_str_new(raw, sizeof raw - 1);
+  ScrDyn *parsed = scr_json_parse(input);
+  assert(parsed && parsed->v.arr.len == 8);
+  assert(signbit(parsed->v.arr.items[0]->v.num));
+  assert(!signbit(parsed->v.arr.items[1]->v.num));
+  assert(parsed->v.arr.items[2] == scr_dyn_new_num(1));
+  assert(parsed->v.arr.items[3] == scr_dyn_new_num(100));
+  assert(isinf(parsed->v.arr.items[7]->v.num));
+  scr_dyn_release(parsed);
+  scr_str_release(input);
+#ifdef SCR_RC_AUDIT
+  assert(scr_dyn_live_count() == before);
+#endif
+}
+
+/* ── intact parse regions ───────────────────────────────────────────── */
+
+static bool buffered(ScrDyn *d) { return scr_cyc_is_buffered(scr_cyc_hdr(d)); }
+
+/* Drop a temporary reference the way member reads do. */
+static bool buffered_after_read(ScrDyn *d) {
+  scr_dyn_release(scr_dyn_retain(d));
+  return buffered(d);
+}
+
+/* A collector pass can buffer a number or string box that it reached
+ * through an owner that traces it: scr_xg_release, settling an edge a
+ * restricted pass skipped, calls scr_cyc_on_release on the target. The
+ * box's last release must take it out of its candidate buffer before its
+ * block returns to the free list, which hands it to the next box. */
+static void buffered_leaf_release(void) {
+  for (uint16_t gen = SCR_CYC_NURSERY; gen < SCR_CYC_NGENS; gen++) {
+    ScrStr *text = scr_str_new("buffered", 8);
+    ScrDyn *leaves[2] = {scr_dyn_new_str(text), scr_dyn_new_num(0.5)};
+    scr_str_release(text);
+    for (int i = 0; i < 2; i++) {
+      scr_cyc_set_gen(scr_cyc_hdr(leaves[i]), gen);
+      scr_cyc_on_release(leaves[i]);
+      scr_dyn_release(leaves[i]);
+    }
+    ScrDyn *fresh[2] = {scr_dyn_new_num(1.5), scr_dyn_new_num(2.5)};
+    assert(!buffered(fresh[0]) && !buffered(fresh[1]));
+    scr_collect_cycles();
+    assert(fresh[0]->v.num == 1.5 && fresh[1]->v.num == 2.5);
+    scr_dyn_release(fresh[0]);
+    scr_dyn_release(fresh[1]);
+  }
+}
+
+static ScrDyn *parse_text(const char *text) {
+  ScrStr *input = scr_str_new(text, strlen(text));
+  ScrDyn *parsed = scr_json_parse(input);
+  scr_str_release(input);
+  assert(parsed && !scr_exc_pending());
+  return parsed;
+}
+
+static const char region_doc[] = "{\"a\":{\"b\":[1,{\"c\":2}],\"s\":\"text\"},\"n\":300}";
+
+/* Store a reference to `root` into a member of its own document through one
+ * of the barriered writers. */
+static void close_cycle(ScrDyn *root, int writer) {
+  ScrDyn *a = scr_dyn_obj_get(root, "a", 1);
+  ScrDyn *b = scr_dyn_obj_get(a, "b", 1);
+  switch (writer) {
+  case 0: scr_dyn_obj_set(a, "parent", 6, scr_dyn_retain(root)); break;
+  case 1: scr_dyn_arr_push(b, scr_dyn_retain(root)); break;
+  case 2: {
+    ScrStr *key = scr_str_new("0", 1);
+    scr_dyn_key_set(b, key, root);
+    scr_str_release(key);
+    break;
+  }
+  case 3: {
+    ScrStr *key = scr_str_new("extra", 5);
+    scr_dyn_key_set(b, key, root);
+    scr_str_release(key);
+    break;
+  }
+  case 4: scr_dyn_release(scr_dyn_set_prototype(a, root)); break;
+  case 5: {
+    ScrDyn *descriptor = scr_dyn_new_obj();
+    scr_dyn_obj_set(descriptor, "value", 5, scr_dyn_retain(root));
+    ScrStr *text = scr_str_new("p", 1);
+    ScrDyn *key = scr_dyn_new_str(text);
+    scr_str_release(text);
+    scr_dyn_release(scr_dyn_define_property(a, key, descriptor));
+    scr_dyn_release(key);
+    scr_dyn_release(descriptor);
+    break;
+  }
+  }
+  assert(!scr_exc_pending());
+}
+
+static void json_intact_regions(void) {
+#ifdef SCR_RC_AUDIT
+  long before = scr_dyn_live_count();
+#endif
+  /* Member reads of an intact document buffer nothing, and primitive
+   * stores keep it intact. */
+  ScrDyn *root = parse_text(region_doc);
+  ScrDyn *a = scr_dyn_obj_get(root, "a", 1);
+  ScrDyn *b = scr_dyn_obj_get(a, "b", 1);
+  assert(!buffered_after_read(root) && !buffered_after_read(a) && !buffered_after_read(b));
+  assert(!buffered_after_read(b->v.arr.items[1]));
+  scr_dyn_obj_set(a, "n", 1, scr_dyn_new_num(1000.5));
+  scr_dyn_arr_push(b, scr_dyn_new_null());
+  scr_dyn_obj_set(a, "u", 1, scr_dyn_retain(scr_dyn_undefined()));
+  assert(!buffered_after_read(a) && !buffered_after_read(b));
+
+  /* A store of another document's node invalidates only the written one. */
+  ScrDyn *other = parse_text(region_doc);
+  scr_dyn_obj_set(a, "other", 5, scr_dyn_retain(other));
+  assert(!buffered_after_read(scr_dyn_obj_get(other, "a", 1)));
+  assert(buffered_after_read(root));
+  scr_dyn_release(other);
+  scr_dyn_release(root);
+  scr_collect_cycles();
+#ifdef SCR_RC_AUDIT
+  assert(scr_dyn_live_count() == before);
+#endif
+
+  /* The cycle runs through the root, which was never written. A pass while
+   * the root is still referenced finds everything alive and drains the
+   * candidates; the later release of the root alone must buffer it again. */
+  for (int writer = 0; writer < 6; writer++) {
+    root = parse_text(region_doc);
+    close_cycle(root, writer);
+    assert(buffered_after_read(scr_dyn_obj_get(root, "a", 1)));
+    scr_collect_cycles();
+    assert(root->rc == 2);
+    scr_dyn_release(root);
+    assert(buffered(root));
+    scr_collect_cycles();
+#ifdef SCR_RC_AUDIT
+    assert(scr_dyn_live_count() == before);
+#endif
+  }
+}
+
+/* ── schema-directed parse ──────────────────────────────────────────── */
+
+typedef struct {
+  size_t rc;
+  double qty;
+  ScrStr *sku;
+  uint8_t ok;
+  ScrArr *tags;
+} TestItem;
+
+static long test_items_live;
+
+static void *test_item_new(void) {
+  TestItem *item = calloc(1, sizeof *item);
+  assert(item);
+  item->rc = 1;
+  test_items_live++;
+  return item;
+}
+
+static void *test_item_retain(void *ptr) {
+  ((TestItem *)ptr)->rc++;
+  return ptr;
+}
+
+static void test_item_release(void *ptr) {
+  TestItem *item = ptr;
+  if (!item || --item->rc) return;
+  scr_str_release(item->sku);
+  scr_arr_release(item->tags);
+  test_items_live--;
+  scr_weak_dispose(item); /* emitted record frees notify the dispose hook */
+  free(item);
+}
+
+static ScrArr *test_tags_new(size_t cap) { return scr_arr_new(SCR_ELEM_STR, cap); }
+static ScrArr *test_list_new(size_t cap) {
+  static ScrArrOps item_ops = { test_item_retain, test_item_release, NULL };
+  return scr_arr_new_ops(&item_ops, cap);
+}
+static void test_arr_release(void *ptr) { scr_arr_release(ptr); }
+
+static const ScrJsonSchema test_f64 = {SCR_JSCHEMA_F64, 0, NULL, NULL, NULL, NULL, NULL};
+static const ScrJsonSchema test_bool = {SCR_JSCHEMA_BOOL, 0, NULL, NULL, NULL, NULL, NULL};
+static const ScrJsonSchema test_str = {SCR_JSCHEMA_STR, 0, NULL, NULL, NULL, NULL, NULL};
+static const ScrJsonSchema test_tags = {SCR_JSCHEMA_ARR, 0, NULL, &test_str, NULL, test_tags_new, test_arr_release};
+static const ScrJsonSchemaField test_item_fields[] = {
+    {"sku", 3, offsetof(TestItem, sku), &test_str},
+    {"qty", 3, offsetof(TestItem, qty), &test_f64},
+    {"ok", 2, offsetof(TestItem, ok), &test_bool},
+    {"tags", 4, offsetof(TestItem, tags), &test_tags},
+};
+static const ScrJsonSchema test_item = {SCR_JSCHEMA_REC, 4, test_item_fields, NULL, test_item_new, NULL, test_item_release};
+static const ScrJsonSchema test_list = {SCR_JSCHEMA_ARR, 0, NULL, &test_item, NULL, test_list_new, test_arr_release};
+
+static bool str_is(const ScrStr *s, const char *text) {
+  return s->len == strlen(text) && memcmp(s->data, text, s->len) == 0;
+}
+
+static ScrArr *schema_parse(const char *text) {
+  ScrStr *input = scr_str_new(text, strlen(text));
+  ScrArr *list = scr_json_parse_schema(input, &test_list);
+  scr_str_release(input);
+  assert(!scr_exc_pending()); /* declining never throws */
+  return list;
+}
+
+/* Member names a direct text comparison must not match: a quote or a
+ * backslash in a name is written escaped in JSON text. */
+typedef struct {
+  size_t rc;
+  double quoted, slashed;
+} TestPair;
+static int test_pairs_live = 0;
+static void *test_pair_new(void) {
+  TestPair *pair = calloc(1, sizeof *pair);
+  assert(pair);
+  pair->rc = 1;
+  test_pairs_live++;
+  return pair;
+}
+static void test_pair_release(void *ptr) {
+  TestPair *pair = ptr;
+  if (!pair || --pair->rc) return;
+  test_pairs_live--;
+  scr_weak_dispose(pair); /* emitted record frees notify the dispose hook */
+  free(pair);
+}
+static const ScrJsonSchemaField test_pair_fields[] = {
+    {"a\"b", 3, offsetof(TestPair, quoted), &test_f64},
+    {"c\\d", 3, offsetof(TestPair, slashed), &test_f64},
+};
+static const ScrJsonSchema test_pair = {SCR_JSCHEMA_REC, 2, test_pair_fields, NULL, test_pair_new, NULL, test_pair_release};
+
+static TestPair *pair_parse(const char *text) {
+  ScrStr *input = scr_str_new(text, strlen(text));
+  TestPair *pair = scr_json_parse_schema(input, &test_pair);
+  scr_str_release(input);
+  assert(!scr_exc_pending());
+  return pair;
+}
+
+static void json_schema_special_names(void) {
+  TestPair *pair = pair_parse("{\"a\\\"b\":1,\"c\\\\d\":2}");
+  assert(pair && pair->quoted == 1 && pair->slashed == 2);
+  test_pair_release(pair);
+  pair = pair_parse("{\"c\\\\d\":4,\"a\\u0022b\":3}");
+  assert(pair && pair->quoted == 3 && pair->slashed == 4);
+  assert(scr_record_source_has(pair)); /* members out of declaration order */
+  test_pair_release(pair);
+  /* Raw bytes equal to a name are not that name: the key ends at the
+   * quote, and a lone backslash starts an escape. */
+  assert(pair_parse("{\"a\"b\":1,\"c\\\\d\":2}") == NULL);
+  assert(pair_parse("{\"a\\\"b\":1,\"c\\d\":2}") == NULL);
+  assert(test_pairs_live == 0);
+}
+
+static void json_schema_parse(void) {
+#ifdef SCR_RC_AUDIT
+  long strings = scr_str_live_count();
+#endif
+  ScrArr *list = schema_parse(
+      " [ {\"sku\":\"a\",\"qty\":1.5,\"ok\":true,\"tags\":[\"x\",\"y\\n\"]} ,"
+      "{\"tags\":[],\"ok\":false,\"extra\":{\"n\":[1,\"s\\u00e9\",null,true,-2e-3,{}]},"
+      "\"qty\":-0,\"\\u0073ku\":\"\\ud83d\\ude00\"} ] ");
+  assert(list && list->len == 2 && test_items_live == 2);
+  TestItem *first = scr_arr_get_ref(list, 0);
+  assert(first->qty == 1.5 && first->ok == 1 && str_is(first->sku, "a"));
+  assert(first->tags->len == 2);
+  ScrStr *tag = scr_arr_get_ref(first->tags, 1);
+  assert(str_is(tag, "y\n"));
+  scr_str_release(tag);
+  test_item_release(first);
+  TestItem *second = scr_arr_get_ref(list, 1);
+  assert(second->qty == 0 && signbit(second->qty) && second->ok == 0 && second->tags->len == 0);
+  assert(str_is(second->sku, "\xF0\x9F\x98\x80"));
+  /* The undeclared key and the reordered members stay beside the record in
+   * source order; the record in declaration order keeps nothing. */
+  assert(!scr_record_source_has(first));
+  assert(scr_record_source_has(second));
+  const ScrDyn *view = scr_record_source_view(second);
+  static const char *const order[] = {"tags", "ok", "extra", "qty", "sku"};
+  assert(view->kind == SCR_DYN_OBJ && view->v.obj.len == 5);
+  for (size_t i = 0; i < 5; i++) {
+    assert(view->v.obj.entries[i].key_len == strlen(order[i]));
+    assert(memcmp(view->v.obj.entries[i].key, order[i], strlen(order[i])) == 0);
+  }
+  assert(scr_dyn_obj_get(view, "extra", 5)->kind == SCR_DYN_OBJ);
+  test_item_release(second);
+  assert(scr_record_source_has(second)); /* the list still holds it */
+  scr_arr_release(list);
+  assert(test_items_live == 0);
+  assert(!scr_record_source_has(second)); /* released with the record */
+
+  list = schema_parse("[]");
+  assert(list && list->len == 0);
+  scr_arr_release(list);
+
+  /* Inputs the checked-dynamic route might reject or read differently
+   * decline without throwing and release every partial value. */
+  static const char *const declined[] = {
+      "",
+      "   ",
+      "{}",
+      "[null]",
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true}]",                         /* missing */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[],\"qty\":2}]",   /* duplicate */
+      "[{\"sku\":\"a\",\"qty\":\"1\",\"ok\":true,\"tags\":[]}]",         /* kind */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[\"t\",7]}]",      /* nested kind */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]},{\"sku\":\"b\"",  /* truncated */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]},]",            /* trailing comma */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]}] x",           /* trailing content */
+      "[{\"sku\":\"a\",\"qty\":01,\"ok\":true,\"tags\":[]}]",            /* number syntax */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":tru,\"tags\":[]}]",              /* literal */
+      "[{\"sku\":\"a\\q\",\"qty\":1,\"ok\":true,\"tags\":[]}]",          /* escape */
+      "[{\"sku\":\"a\",\"x\":\"\\u12\",\"qty\":1,\"ok\":true,\"tags\":[]}]", /* skipped escape */
+      "[{\"sku\":\"a\",\"x\":[1,],\"qty\":1,\"ok\":true,\"tags\":[]}]",  /* skipped syntax */
+      "[{\"sku\":\"a\",\"x\":{\"k\" 1},\"qty\":1,\"ok\":true,\"tags\":[]}]",
+      "[{\"sku\":\"a\nb\",\"qty\":1,\"ok\":true,\"tags\":[]}]",          /* control */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]} {}]",
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]},{\"sku\"",   /* key at the end */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]},{\"sk",       /* cut key */
+      "[{\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]},{\"sku",      /* unclosed key */
+  };
+  for (size_t i = 0; i < sizeof declined / sizeof *declined; i++) {
+    assert(!schema_parse(declined[i]));
+    assert(test_items_live == 0);
+  }
+
+  /* Nesting beyond the checked parser's limit declines (it reports the
+   * RangeError); nesting within it is kept beside the record. */
+  for (int depth = 999; depth <= 1001; depth++) {
+    char text[2200];
+    size_t n = 0;
+    n += (size_t)snprintf(text + n, sizeof text - n, "[{\"x\":");
+    for (int i = 0; i < depth - 2; i++) text[n++] = '[';
+    for (int i = 0; i < depth - 2; i++) text[n++] = ']';
+    n += (size_t)snprintf(text + n, sizeof text - n, ",\"sku\":\"a\",\"qty\":1,\"ok\":true,\"tags\":[]}]");
+    ScrArr *parsed = schema_parse(text);
+    assert((parsed != NULL) == (depth <= 1000));
+    scr_arr_release(parsed);
+  }
+  assert(test_items_live == 0);
+#ifdef SCR_RC_AUDIT
+  assert(scr_str_live_count() == strings);
+#endif
+}
+
+/* Union members: a nullable string with an undefined arm, an inline
+ * number | null | undefined pair, and a boxed number | string. */
+typedef struct {
+  uint32_t tag;
+  uint64_t bits;
+} TestInline;
+typedef struct {
+  size_t rc;
+  ScrStr *name;   /* string | undefined: the payload, NULL, or test_absent */
+  TestInline age; /* number (0) | null (1) | undefined (2) */
+  ScrUnion *key;  /* number (0) | string (1) */
+} TestOpt;
+static size_t test_absent[4] = {SIZE_MAX, 0, 0, 0};
+static int test_opts_live = 0;
+static void *test_opt_new(void) {
+  TestOpt *opt = calloc(1, sizeof *opt);
+  assert(opt);
+  opt->rc = 1;
+  test_opts_live++;
+  return opt;
+}
+static void test_opt_release(void *ptr) {
+  TestOpt *opt = ptr;
+  if (!opt || --opt->rc) return;
+  if (opt->name && opt->name != (ScrStr *)test_absent) scr_str_release(opt->name);
+  scr_union_release(opt->key);
+  test_opts_live--;
+  scr_weak_dispose(opt);
+  free(opt);
+}
+static void *test_key_box(uint32_t tag, uint64_t bits) {
+  if (tag == 0) {
+    double d;
+    memcpy(&d, &bits, sizeof d);
+    return scr_union_new_f64(0, d);
+  }
+  return scr_union_new_ref(1, (void *)(uintptr_t)bits, scr_str_retain_v, scr_str_release_v, NULL);
+}
+#define NO_ARM SCR_JSCHEMA_NO_ARM
+static const ScrJsonUnion test_name_union = {
+    SCR_JUNION_NULLABLE, {NO_ARM, NO_ARM, NO_ARM, 0, NO_ARM, NO_ARM, 1},
+    {NULL, NULL, NULL, &test_str, NULL, NULL, NULL}, NULL, test_absent, NULL};
+static const ScrJsonUnion test_age_union = {
+    SCR_JUNION_INLINE, {1, 0, NO_ARM, NO_ARM, NO_ARM, NO_ARM, 2},
+    {NULL, &test_f64, NULL, NULL, NULL, NULL, NULL}, NULL, NULL, NULL};
+static const ScrJsonUnion test_key_union = {
+    SCR_JUNION_BOXED, {NO_ARM, 0, NO_ARM, 1, NO_ARM, NO_ARM, NO_ARM},
+    {NULL, &test_f64, NULL, &test_str, NULL, NULL, NULL}, NULL, NULL, test_key_box};
+#undef NO_ARM
+static const ScrJsonSchema test_name = {SCR_JSCHEMA_UNION, 0, NULL, NULL, NULL, NULL, NULL, &test_name_union};
+static const ScrJsonSchema test_age = {SCR_JSCHEMA_UNION, 0, NULL, NULL, NULL, NULL, NULL, &test_age_union};
+static const ScrJsonSchema test_key = {SCR_JSCHEMA_UNION, 0, NULL, NULL, NULL, NULL, NULL, &test_key_union};
+static const ScrJsonSchemaField test_opt_fields[] = {
+    {"name", 4, offsetof(TestOpt, name), &test_name},
+    {"age", 3, offsetof(TestOpt, age), &test_age},
+    {"key", 3, offsetof(TestOpt, key), &test_key},
+};
+static const ScrJsonSchema test_opt = {SCR_JSCHEMA_REC, 3, test_opt_fields, NULL, test_opt_new, NULL, test_opt_release};
+
+static TestOpt *opt_parse(const char *text) {
+  ScrStr *input = scr_str_new(text, strlen(text));
+  TestOpt *opt = scr_json_parse_schema(input, &test_opt);
+  scr_str_release(input);
+  assert(!scr_exc_pending());
+  return opt;
+}
+
+static void json_schema_union_members(void) {
+  TestOpt *opt = opt_parse("{\"name\":\"n\",\"age\":2.5,\"key\":\"k\"}");
+  assert(opt && str_is(opt->name, "n") && opt->age.tag == 0);
+  double age;
+  memcpy(&age, &opt->age.bits, sizeof age);
+  assert(age == 2.5);
+  assert(opt->key->tag == 1 && str_is(scr_union_peek(opt->key), "k"));
+  assert(!scr_record_source_has(opt));
+  test_opt_release(opt);
+  /* Missing undefined-armed members take their ABSENT states; null lands
+   * in the null arm with zero bits. */
+  opt = opt_parse("{\"key\":-1}");
+  assert(opt && opt->name == (ScrStr *)test_absent);
+  assert(opt->age.tag == 2 && opt->age.bits == 1);
+  assert(opt->key->tag == 0 && scr_union_get_f64(opt->key) == -1);
+  test_opt_release(opt);
+  opt = opt_parse("{\"age\":null,\"key\":0}");
+  assert(opt && opt->name == (ScrStr *)test_absent && opt->age.tag == 1 && opt->age.bits == 0);
+  test_opt_release(opt);
+  /* A reordered member keeps the source beside the record, absent members
+   * included. */
+  opt = opt_parse("{\"key\":\"z\",\"name\":\"y\"}");
+  assert(opt && str_is(opt->name, "y") && opt->age.tag == 2 && opt->age.bits == 1);
+  assert(scr_record_source_has(opt));
+  test_opt_release(opt);
+  /* No arm of the value's kind, or a missing member without an undefined
+   * arm, declines. */
+  static const char *const declined[] = {
+      "{\"name\":null,\"key\":1}",
+      "{\"age\":\"1\",\"key\":1}",
+      "{\"key\":true}",
+      "{\"key\":null}",
+      "{\"name\":\"a\"}",
+      "{}",
+      "{\"key\":1,\"key\":2}",
+      "{\"age\":nul,\"key\":1}",
+  };
+  for (size_t i = 0; i < sizeof declined / sizeof *declined; i++) {
+    assert(!opt_parse(declined[i]));
+    assert(test_opts_live == 0);
+  }
+  assert(test_opts_live == 0);
+}
+
+/* Freezing a record sets the frozen bit beside its count; an immortal
+ * record keeps its word, which does not read as frozen. */
+static void record_frozen_bit(void) {
+  size_t record[2] = {3, 0};
+  assert(!scr_rc_frozen(record));
+  scr_record_freeze(record);
+  assert(scr_rc_frozen(record) && SCR_RC_REFS(record) == 3);
+  size_t immortal[2] = {SIZE_MAX, 0};
+  scr_record_freeze(immortal);
+  assert(immortal[0] == SIZE_MAX && !scr_rc_frozen(immortal));
+}
+
 int main(void) {
+  json_string_boundaries();
+  record_frozen_bit();
+  json_indent_ownership();
   scr_init();
+  checked_storage();
+  shared_property_keys();
+  checked_leaf_cycles();
+  checked_number_storage();
+  buffered_leaf_release();
+  json_intact_regions();
+  json_schema_parse();
+  json_schema_special_names();
+  json_schema_union_members();
   /* Native Set boxes may own headerless scalar/string maps. Collecting an
    * enclosing cycle must neither trace those leaves nor skip their release. */
   for (int i = 0; i < 2000; i++) {
@@ -29,8 +859,8 @@ int main(void) {
     long before_maps = scr_map_live_count();
     long before_dyns = scr_dyn_live_count();
 #endif
-    ScrMap *numbers = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
-    ScrMap *strings = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+    ScrMap *numbers = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
+    ScrMap *strings = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL);
     scr_map_set_f64_f64(numbers, 42, 1);
     ScrStr *text = scr_str_new("kept", 4);
     scr_map_set_str_f64(strings, text, 1);
@@ -177,6 +1007,6 @@ int main(void) {
   scr_dyn_release(key);
   scr_dyn_release(first);
   assert(!scr_exc_pending());
-  puts("weak metadata lifetime checks passed");
+  puts("checked storage and weak metadata lifetime checks passed");
   return 0;
 }

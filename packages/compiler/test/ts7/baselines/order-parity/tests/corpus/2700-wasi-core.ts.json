@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2700-wasi-core.ts"
+ ],
+ "diags": []
+}

@@ -11,20 +11,28 @@ const sanitize = process.env["SCRIPTC_SAN"] === "1";
 
 for (const backend of ["llvm"] as const) {
   test(`frontend builtin and package registries execute natively (${backend})`, async () => {
-    const directory = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-frontend-collections-"));
+    const directory = mkdtempSync(
+      join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-frontend-collections-"),
+    );
     try {
-      const { coverage } = analyze(entry, { dynamic: false });
+      const { coverage } = analyze(entry, {});
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       const built = await compile(entry, {
-        backend, dynamic: false, optimization: "dev", sanitize,
-        outDir: directory, outPath: join(directory, process.platform === "win32" ? "registry.exe" : "registry"),
+        backend,
+        optimization: "dev",
+        sanitize,
+        outDir: directory,
+        outPath: join(directory, process.platform === "win32" ? "registry.exe" : "registry"),
       });
-      if (!built.ok) throw new Error(built.diagnostics.map(d => `${d.code}: ${d.message}`).join("\n"));
-      const expected = spawnSync(process.execPath, ["--import", "tsx", entry], { encoding: "utf8", timeout: 30_000 });
+      if (!built.ok)
+        throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      const expected = spawnSync(process.execPath, ["--import", "tsx", entry], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
       expect(expected.error).toBeUndefined();
       expect(expected.status, expected.stderr).toBe(0);
       expect(expected.stderr).toBe("");

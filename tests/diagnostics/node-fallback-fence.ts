@@ -23,15 +23,16 @@ const tty = process.stdout.isTTY;
 const errTty = process.stderr.isTTY;
 
 import { accessSync, constants, mkdtempSync, readFileSync } from "node:fs";
-import { setInterval as promiseInterval } from "node:timers/promises";
+import { setInterval as promiseInterval, setTimeout as promiseSleep } from "node:timers/promises";
 accessSync("/bin/sh", constants.X_OK);
 const tmp = mkdtempSync("/tmp/scr-");
 const raw = readFileSync("/etc/hosts").toString(tty ? "hex" : "latin1"); // runtime BufferEncoding selection lowers too
 const intervalWithSignal = promiseInterval(1, "tick", {}); // AbortSignal options stay fenced
+const sleepWithSignal = promiseSleep(1, "tick", { signal: AbortSignal.timeout(5) }); // resolve values and AbortSignal options lower
 // The computed encoding is now part of the static Buffer surface. The
-// one-shot zlib/raw/gzip codecs also accept literal compression levels;
-// other options stay fenced, while Brotli remains an explicit member fence.
+// one-shot zlib/raw/gzip and Brotli codecs take Node's options, validated
+// at run time.
 import { brotliCompressSync, deflateSync } from "node:zlib";
-const packed = deflateSync("data", { level: 9, strategy: 1 }); // strategy remains fenced
-const brotli = brotliCompressSync(Buffer.from("data")); // outside the lowered family: fenced
+const packed = deflateSync("data", { level: 9, strategy: 1 }); // options lower
+const brotli = brotliCompressSync(Buffer.from("data")); // Brotli lowers too
 // The remaining imports continue the declared-but-not-lowered surface.

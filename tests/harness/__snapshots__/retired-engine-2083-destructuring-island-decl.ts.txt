@@ -1,0 +1,17 @@
+retired-engine-2083-destructuring-island-decl.ts:23:11 - error SC2011: destructuring on 'any'-typed values cannot compile statically
+
+  22 | try { var {} = u; } catch (e) { console.log("obj-undef throws"); }
+  23 | try { var [] = 0 as any; } catch (e) { console.log("arr-num throws"); }
+     |           ^~~~~~~~~~~~~
+  24 | const [d1 = 10, d2 = 20] = [] as any;
+
+  hint: use a supported typed operation, or 'unknown' with a checked cast ('x as T')
+
+retired-engine-2083-destructuring-island-decl.ts:24:8 - error SC2011: values of type 'any' have no native representation at this site
+
+  23 | try { var [] = 0 as any; } catch (e) { console.log("arr-num throws"); }
+  24 | const [d1 = 10, d2 = 20] = [] as any;
+     |        ^~
+  25 | console.log(`${d1} ${d2}`);
+
+  hint: use a supported typed value, or 'unknown' with a checked cast ('x as T')

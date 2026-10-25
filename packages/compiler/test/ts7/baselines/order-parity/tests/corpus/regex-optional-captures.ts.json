@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/regex-optional-captures.ts"
+ ],
+ "diags": []
+}

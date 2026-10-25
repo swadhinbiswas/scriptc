@@ -6,9 +6,7 @@ export class LlvmUnsupportedError extends Error {
     readonly kind: string,
     readonly loc?: SrcLoc,
   ) {
-    super(
-      `the LLVM backend does not support this construct yet (${kind})`,
-    );
+    super(`the LLVM backend does not support this construct yet (${kind})`);
     this.name = "LlvmUnsupportedError";
   }
 }

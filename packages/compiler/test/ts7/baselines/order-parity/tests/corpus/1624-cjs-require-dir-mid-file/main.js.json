@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1624-cjs-require-dir-mid-file/common/index.js",
+  "<repo>/tests/corpus/1624-cjs-require-dir-mid-file/main.js"
+ ],
+ "diags": []
+}

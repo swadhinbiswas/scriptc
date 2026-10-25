@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/captured-class-refinement.ts"
+ ],
+ "diags": []
+}

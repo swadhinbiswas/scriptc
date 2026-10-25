@@ -10,20 +10,27 @@ test("primitive indexed comparisons do not allocate optional-union boxes", async
   try {
     const entry = join(dir, "main.ts");
     const outPath = join(dir, "main.ir.json");
-    await writeFile(entry, [
-      "function strings(a: string[], b: string[], i: number): boolean { return a[i] === b[i]; }",
-      "function numbers(a: number[], b: number[], i: number): boolean { return a[i] !== b[i]; }",
-      "function bools(a: boolean[], b: boolean[], i: number): boolean { return a[i] === b[i]; }",
-      "console.log(strings(['a'], ['a'], 0), numbers([1], [2], 0), bools([false], [false], 0));",
-    ].join("\n"));
+    await writeFile(
+      entry,
+      [
+        "function strings(a: string[], b: string[], i: number): boolean { return a[i] === b[i]; }",
+        "function numbers(a: number[], b: number[], i: number): boolean { return a[i] !== b[i]; }",
+        "function bools(a: boolean[], b: boolean[], i: number): boolean { return a[i] === b[i]; }",
+        "console.log(strings(['a'], ['a'], 0), numbers([1], [2], 0), bools([false], [false], 0));",
+      ].join("\n"),
+    );
     const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
-    if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const mod = deserializeModule(await readFile(outPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);
     const visited = new Set<string>();
     function visit(value: unknown): void {
       if (!value || typeof value !== "object") return;
-      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
       const node = value as { kind?: string; callee?: string };
       expect(node.kind).not.toBe("unionWrap");
       expect(node.kind).not.toBe("unionEq");

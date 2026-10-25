@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5892-buffer-write-utf16le-runs.ts"
+ ],
+ "diags": []
+}

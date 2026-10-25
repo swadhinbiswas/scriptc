@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/140-bitwise-operators.ts"
+ ],
+ "diags": []
+}

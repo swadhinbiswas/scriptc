@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/narrowed-nullish-values.ts"
+ ],
+ "diags": []
+}

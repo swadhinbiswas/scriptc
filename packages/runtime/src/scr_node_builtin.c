@@ -86,6 +86,14 @@ ScrDyn *scr_util_system_error_entries(void) {
 
 static SCR_TL ScrDyn *scr_global_known;
 static SCR_TL ScrDyn *scr_global_own;
+/* The one box denoting this thread's global object. Symbol-keyed properties
+ * live on the box (string-keyed ones in scr_global_own), so every spelling
+ * of the global object answers this box. */
+static SCR_TL ScrDyn *scr_global_box;
+/* The compiler's immortal name table (one per program) whose names
+ * scr_global_known holds; cleared with the tables, so a library re-init
+ * registers the names again. */
+static SCR_TL const ScrArr *scr_global_registered;
 static SCR_TL bool scr_global_cleanup_registered;
 static SCR_TL ScrDyn *(*scr_global_console_get)(void);
 static SCR_TL ScrDyn *(*scr_global_fetch_get)(void);
@@ -180,10 +188,13 @@ ScrDyn *scr_process_hrtime_value(void) {
 }
 
 static void scr_global_cleanup(void) {
+  scr_dyn_release(scr_global_box);
+  scr_global_box = NULL;
   scr_dyn_release(scr_global_known);
   scr_dyn_release(scr_global_own);
   scr_global_known = NULL;
   scr_global_own = NULL;
+  scr_global_registered = NULL;
 }
 
 static void *scr_global_retain(void *handle) { return handle; }
@@ -195,7 +206,7 @@ static ScrDyn *scr_global_get(void *handle, const char *key, size_t length) {
   if (own) return scr_dyn_retain(own);
   if ((length == 10 && memcmp(key, "globalThis", length) == 0) ||
       (length == 6 && memcmp(key, "global", length) == 0))
-    return scr_dyn_new_handle(&scr_global_known, SCR_DYNH_GLOBAL);
+    return scr_dyn_retain(scr_global_box);
   if (length == 7 && memcmp(key, "console", length) == 0 && scr_global_console_get)
     return scr_global_console_get();
   if (length == 5 && memcmp(key, "fetch", length) == 0 && scr_global_fetch_get) return scr_global_fetch_get();
@@ -223,26 +234,36 @@ static bool scr_global_set(void *handle, const char *key, size_t length, const S
   return true;
 }
 
-ScrDyn *scr_global_native_init(ScrArr *known, ScrDyn *(*console_get)(void)) {
+ScrDyn *scr_global_object(void) {
   static const ScrDynHandleOps ops = {
     .cls = "Object", .retain = scr_global_retain, .release = scr_global_release,
     .get = scr_global_get, .set = scr_global_set,
   };
   scr_dyn_handle_install(SCR_DYNH_GLOBAL, &ops);
-  scr_global_console_get = console_get;
   if (!scr_global_known) scr_global_known = scr_dyn_new_obj();
   if (!scr_global_own) scr_global_own = scr_dyn_new_obj();
+  if (!scr_global_box) scr_global_box = scr_dyn_new_handle(&scr_global_known, SCR_DYNH_GLOBAL);
   if (!scr_global_cleanup_registered) {
     scr_atexit(scr_global_cleanup);
     scr_global_cleanup_registered = true;
   }
+  return scr_global_box;
+}
+
+ScrDyn *scr_global_native_init(ScrArr *known, ScrDyn *(*console_get)(void)) {
+  /* The compiler passes one immortal name table per program: once it is
+   * registered, later reads of the global object only take a reference. */
+  if (known == scr_global_registered && scr_global_box) return scr_dyn_retain(scr_global_box);
+  ScrDyn *global = scr_global_object();
+  scr_global_console_get = console_get;
+  if (known->rc == SIZE_MAX) scr_global_registered = known;
   for (size_t i = 0; i < known->len; i++) {
     ScrStr *key = (ScrStr *)scr_arr_get_ref(known, (double)i);
     if (!scr_dyn_obj_get(scr_global_known, key->data, key->len))
       scr_dyn_obj_set(scr_global_known, key->data, key->len, scr_dyn_new_bool(true));
     scr_str_release(key);
   }
-  return scr_dyn_new_handle(&scr_global_known, SCR_DYNH_GLOBAL);
+  return scr_dyn_retain(global);
 }
 
 typedef struct ScrBuiltinModule {
@@ -356,10 +377,10 @@ ScrDyn *scr_process_builtin_unsupported(ScrStr *id, ScrStr *member) {
   ScrJsonBuf text;
   scr_jb_init(&text);
   scr_jb_puts(&text, "native builtin '");
-  for (size_t i = 0; i < id->len; i++) scr_jb_putc(&text, id->data[i]);
+  scr_jb_write(&text, id->data, id->len);
   if (member->len) {
     scr_jb_putc(&text, '.');
-    for (size_t i = 0; i < member->len; i++) scr_jb_putc(&text, member->data[i]);
+    scr_jb_write(&text, member->data, member->len);
   }
   scr_jb_puts(&text, "' is not supported through process.getBuiltinModule yet [SC2020]");
   ScrStr *message = scr_jb_finish(&text);

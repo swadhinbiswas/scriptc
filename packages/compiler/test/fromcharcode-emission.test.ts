@@ -7,14 +7,32 @@ test("scalar fromCharCode avoids a heap argument pack in LLVM", () => {
   const loc = { file: "scalar-char.ts", start: 0, end: 0 };
   const value: IrExpr = { kind: "numLit", value: 65, type: F64, loc };
   const mod: IrModule = {
-    irVersion: 13, sourceFile: loc.file, entry: "__main", globals: [],
-    functions: [{
-      name: "__main", params: [], returnType: VOID, locals: [], loc,
-      body: [{ kind: "exprStmt", loc, expr: {
-        kind: "libCall", fn: "string.fromCharCode", type: STRING, loc,
-        args: [{ kind: "arrayLit", elems: [value], type: arrayOf(F64), loc }],
-      } }],
-    }],
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    globals: [],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: VOID,
+        locals: [],
+        loc,
+        body: [
+          {
+            kind: "exprStmt",
+            loc,
+            expr: {
+              kind: "libCall",
+              fn: "string.fromCharCode",
+              type: STRING,
+              loc,
+              args: [{ kind: "arrayLit", elems: [value], type: arrayOf(F64), loc }],
+            },
+          },
+        ],
+      },
+    ],
   };
   expect(validateModule(mod)).toEqual([]);
 

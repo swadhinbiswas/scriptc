@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/reflect-record-union-keys.mjs"
+ ],
+ "diags": []
+}

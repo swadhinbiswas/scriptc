@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2472-string-regexp-union.ts"
+ ],
+ "diags": []
+}

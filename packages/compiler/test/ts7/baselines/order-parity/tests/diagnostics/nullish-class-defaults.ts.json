@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/nullish-class-defaults.ts"
+ ],
+ "diags": []
+}

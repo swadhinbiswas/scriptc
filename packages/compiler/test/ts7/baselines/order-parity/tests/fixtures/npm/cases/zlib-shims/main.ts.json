@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/zlib-shims/main.ts"
+ ],
+ "diags": []
+}

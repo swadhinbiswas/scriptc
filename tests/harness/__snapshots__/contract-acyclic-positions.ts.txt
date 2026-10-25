@@ -1,0 +1,26 @@
+contract-acyclic-positions.ts:11:22 - error SC7006: the Acyclic contract is not checked in this position (Acyclic is checked on classes, interfaces and object type aliases)
+
+  10 | // A type argument would make the class implement its own type.
+  11 | class Box implements Acyclic<Item> {
+     |                      ^~~~~~~~~~~~~
+  12 |   name = "box";
+
+  hint: write `class C implements Acyclic` or `interface I extends Acyclic` (without a type argument), or `type T = Acyclic<{ ... }>`
+
+contract-acyclic-positions.ts:15:13 - error SC7006: the Acyclic contract is not checked in this position (Acyclic is checked on classes, interfaces and object type aliases)
+
+  14 | 
+  15 | const item: Acyclic<Item> = { name: "a" };
+     |             ^~~~~~~~~~~~~
+  16 | const items: Acyclic<Item>[] = [item];
+
+  hint: write `class C implements Acyclic` or `interface I extends Acyclic` (without a type argument), or `type T = Acyclic<{ ... }>`
+
+contract-acyclic-positions.ts:16:14 - error SC7006: the Acyclic contract is not checked in this position (Acyclic is checked on classes, interfaces and object type aliases)
+
+  15 | const item: Acyclic<Item> = { name: "a" };
+  16 | const items: Acyclic<Item>[] = [item];
+     |              ^~~~~~~~~~~~~
+  17 | 
+
+  hint: write `class C implements Acyclic` or `interface I extends Acyclic` (without a type argument), or `type T = Acyclic<{ ... }>`

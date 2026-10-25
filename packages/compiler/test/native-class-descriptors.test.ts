@@ -12,13 +12,55 @@ function fixture(source: string) {
 }
 
 test.each([
-  "Object.defineProperty(value, 'x', {value: 2, writable: false});",
+  "Object.defineProperty(value, 'x', {get() { return 2; }});",
   "Object.defineProperties(value, {x: {value: 2}});",
 ])("keeps unsafe native descriptor changes fenced: %s", (operation) => {
-  const { dir, entry } = fixture(`class Value { constructor() { this.x = 1; } } const value = new Value(); ${operation}`);
+  const { dir, entry } = fixture(
+    `class Value { constructor() { this.x = 1; } } const value = new Value(); ${operation}`,
+  );
   try {
-    const { coverage } = analyze(entry, { dynamic: false });
-    expect([...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some((d) => d.code === "SC2020" && d.message.includes("Object.define"))).toBe(true);
+    const { coverage } = analyze(entry, {});
+    expect(
+      [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some(
+        (d) => d.code === "SC2020" && d.message.includes("Object.define"),
+      ),
+    ).toBe(true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("data descriptor changes on native fields match Node", async () => {
+  const { dir, entry } = fixture(`
+class Value { constructor() { this.x = 1; } }
+const value = new Value();
+Object.defineProperty(value, 'x', { value: 2, writable: false });
+console.log(value.x, JSON.stringify(Object.getOwnPropertyDescriptor(value, 'x')));
+value.x = 3;
+console.log(value.x, Object.keys(value));
+`);
+  try {
+    const result = await compile(entry, {
+      outDir: dir,
+      outPath: join(dir, "program"),
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+    });
+    if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+    const run = spawnSync(result.binaryPath, { encoding: "utf8", timeout: 30_000 });
+    const oracle = spawnSync(process.execPath, [entry], { encoding: "utf8", timeout: 30_000 });
+    expect(run.error).toBeUndefined();
+    expect(oracle.status).toBe(0);
+    expect({
+      status: run.status,
+      signal: run.signal,
+      stdout: run.stdout,
+      stderr: run.stderr,
+    }).toEqual({
+      status: oracle.status,
+      signal: oracle.signal,
+      stdout: oracle.stdout,
+      stderr: oracle.stderr,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -37,13 +79,27 @@ console.log(child.copy(2), typeof child.copy(3));
 console.log(new Base().copy());
 `);
   try {
-    const result = await compile(entry, { dynamic: false, outDir: dir, outPath: join(dir, "program"), sanitize: process.env["SCRIPTC_SAN"] === "1" });
+    const result = await compile(entry, {
+      outDir: dir,
+      outPath: join(dir, "program"),
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+    });
     if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
     const run = spawnSync(result.binaryPath, { encoding: "utf8", timeout: 30_000 });
     const oracle = spawnSync(process.execPath, [entry], { encoding: "utf8", timeout: 30_000 });
     expect(run.error).toBeUndefined();
     expect(oracle.status).toBe(0);
-    expect({ status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr }).toEqual({ status: oracle.status, signal: oracle.signal, stdout: oracle.stdout, stderr: oracle.stderr });
+    expect({
+      status: run.status,
+      signal: run.signal,
+      stdout: run.stdout,
+      stderr: run.stderr,
+    }).toEqual({
+      status: oracle.status,
+      signal: oracle.signal,
+      stdout: oracle.stdout,
+      stderr: oracle.stderr,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -62,18 +118,31 @@ replace(value);
 console.log(value.clone().x);
 `);
   try {
-    const result = await compile(entry, { dynamic: false, outDir: dir, outPath: join(dir, "program"), sanitize: process.env["SCRIPTC_SAN"] === "1" });
+    const result = await compile(entry, {
+      outDir: dir,
+      outPath: join(dir, "program"),
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+    });
     if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
     const run = spawnSync(result.binaryPath, { encoding: "utf8", timeout: 30_000 });
     const oracle = spawnSync(process.execPath, [entry], { encoding: "utf8", timeout: 30_000 });
     expect(run.error).toBeUndefined();
     expect(oracle.status).toBe(0);
-    expect({ status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr }).toEqual({ status: oracle.status, signal: oracle.signal, stdout: oracle.stdout, stderr: oracle.stderr });
+    expect({
+      status: run.status,
+      signal: run.signal,
+      stdout: run.stdout,
+      stderr: run.stderr,
+    }).toEqual({
+      status: oracle.status,
+      signal: oracle.signal,
+      stdout: oracle.stdout,
+      stderr: oracle.stderr,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
 
 test("derived constructor boundaries preserve initialization and refuse repeated super", async () => {
   const { dir, entry } = fixture(`
@@ -88,11 +157,18 @@ try { new Missing(false); } catch (error) { console.log(error instanceof Referen
 try { new Repeated(); } catch (error) { console.log(error.code === 'SC2020'); }
 `);
   try {
-    const result = await compile(entry, { outDir: dir, outPath: join(dir, "program"), backend: "llvm", optimization: "dev" });
+    const result = await compile(entry, {
+      outDir: dir,
+      outPath: join(dir, "program"),
+      backend: "llvm",
+      optimization: "dev",
+    });
     if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
     const execution = spawnSync(result.binaryPath, [], { encoding: "utf8" });
     expect(execution.status).toBe(0);
     expect(execution.stdout).toBe("true\ntrue\ntrue\n");
     expect(execution.stderr).toBe("");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

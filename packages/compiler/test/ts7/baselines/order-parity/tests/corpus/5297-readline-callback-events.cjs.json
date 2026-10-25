@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5297-readline-callback-events.cjs"
+ ],
+ "diags": []
+}

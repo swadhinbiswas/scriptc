@@ -1,20 +1,50 @@
-/* The server-surface lowering (node:net + node:http — the spoke-module
- * pattern, like lower-island.ts): module-function calls (net
- * createServer/connect/createConnection, http createServer/request/get —
- * named AND namespace import forms, both dispatched here), method calls
- * on netServer/netSocket/httpReq/httpRes/httpClientReq receivers, the
- * composed `server.address().port` read, and the property surface
- * (req.url/method/statusCode/socket/headers, res.headersSent,
- * socket.remoteAddress, request.destroyed). Everything the lib declares
- * beyond these shapes fences member-qualified — never a generic
- * rejection, never silence. */
+import { keyedHelperName } from "./stable-names.js";
+import { lowerTlsCertificateCall } from "./builtins/x509.js";
+import {
+  dynUndefinedExpr,
+  nodeThrowExpr,
+  boolLit,
+  numLit,
+  strLit,
+  varRef,
+} from "../../ir/build.js";
+
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { ladderFenceExpr, nodeThrowExpr } from "./lowerer.js";
+import { ladderFenceExpr } from "./lowerer.js";
 import { isJsSourceFile, locOf } from "../program.js";
-import { arrayOf, BOOL, BYTES_U8, canBoxFuncIntoDyn, canConvertToDyn, DYN, DYN_HANDLE_KINDS, F64, funcOf, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, type IrExpr, type IrLibFn, type IrStmt, type IrType, NETSERVER_T, NETSOCKET_T, NULL_T, SECURECTX_T, STRING, UNDEFINED_T, type SrcLoc, typeKey, VOID } from "../../ir/ir.js";
+import {
+  arrayOf,
+  BOOL,
+  BYTES_U8,
+  canBoxFuncIntoDyn,
+  canConvertToDyn,
+  DYN,
+  DYN_HANDLE_KINDS,
+  F64,
+  funcOf,
+  HTTP2SESSION_T,
+  HTTP2STREAM_T,
+  HTTPCLIENTREQ_T,
+  HTTPREQ_T,
+  HTTPRES_T,
+  type IrExpr,
+  type IrLibFn,
+  type IrStmt,
+  type IrType,
+  NETSERVER_T,
+  NETSOCKET_T,
+  NULL_T,
+  SECURECTX_T,
+  STRING,
+  UNDEFINED_T,
+  type SrcLoc,
+  typeKey,
+  VOID,
+} from "../../ir/ir.js";
 import {
   AGENT_DOCUMENTED_OPTIONS,
+  HTTPS_AGENT_DOCUMENTED_OPTIONS,
   builtinFenceHintOf,
   builtinModuleFnOf,
   fenceOrDropOptionKey,
@@ -25,26 +55,31 @@ import {
   sideEffectFreeOptionValue,
   TLS_SERVER_DOCUMENTED_OPTIONS,
 } from "./surfaces.js";
-import { conditionalSpreadOf } from "./expressions/object-literals.js";
-import { boolLit, numLit, strLit, varRef } from "../../ir/build.js";
+import { conditionalSpreadOf, lowerDynObjectLiteral } from "./expressions/object-literals.js";
 import { resultIsDiscarded } from "./call-position.js";
 import { lowerCallbackArg as lowerCallbackArgShared } from "./callback-arg.js";
 import { pairsSnapshotHelper } from "./pairs-snapshot.js";
 
 const NARROW_DATA_HINT =
-  'write/end take one string or one Uint8Array/Buffer value (narrow unions first)';
+  "write/end take one string or one Uint8Array/Buffer value (narrow unions first)";
 
 /** The writable numeric http.Server timeout fields. The selector is an
  * internal runtime ABI shared by the get/set libCalls (kept here beside
  * the only two construction/lowering paths that can mint the accesses). */
 function httpServerTimeoutField(name: string): number | null {
   switch (name) {
-    case "timeout": return 0;
-    case "keepAliveTimeout": return 1;
-    case "headersTimeout": return 2;
-    case "requestTimeout": return 3;
-    case "keepAliveTimeoutBuffer": return 4;
-    default: return null;
+    case "timeout":
+      return 0;
+    case "keepAliveTimeout":
+      return 1;
+    case "headersTimeout":
+      return 2;
+    case "requestTimeout":
+      return 3;
+    case "keepAliveTimeoutBuffer":
+      return 4;
+    default:
+      return null;
   }
 }
 
@@ -61,17 +96,6 @@ function requireStatementPosition(lowerer: Lowerer, call: ts.CallExpression, wha
   );
 }
 
-/** Node enables net.Server's reusePort socket option only for the exact
- * boolean value true. This is intentionally different from the ordinary
- * condition lowering used by ipv6Only: JavaScript values such as 1 and
- * "true" are truthy, but Node leaves reusePort disabled for them.
- *
- * Typed boolean-or-undefined option bindings are represented by the normal
- * tagged union. Initializers narrow that union to its boolean arm; shorthand
- * properties are required to have the concrete BOOL shape below, matching
- * ipv6Only's static option-record fence. Other static values still evaluate
- * once, then produce false; checked-dynamic and island values use strict
- * equality against the boolean true. */
 function lowerExactReusePort(lowerer: Lowerer, value: IrExpr, node: ts.Node): IrExpr {
   const loc = locOf(node);
   const falseValue = (): IrExpr => boolLit(false, loc);
@@ -86,15 +110,7 @@ function lowerExactReusePort(lowerer: Lowerer, value: IrExpr, node: ts.Node): Ir
       loc,
     };
   }
-  if (value.type.kind === "jsval") {
-    return {
-      kind: "jsOp",
-      op: "eq",
-      args: [value, lowerer.jsvalIn(boolLit(true, loc), node)],
-      type: BOOL,
-      loc,
-    };
-  }
+
   if (value.type.kind === "union") {
     const def = lowerer.unions.get(value.type.unionId);
     const boolTag = def?.arms.findIndex((arm) => arm.kind === "bool") ?? -1;
@@ -169,7 +185,7 @@ export function voidizedCallback(lowerer: Lowerer, cb: IrExpr, loc: SrcLoc): IrE
   const toT = funcOf([...fromT.params], VOID);
   const key = `server.voidcb:${typeKey(fromT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%server.voidcb.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%server.voidcb", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const impl = `${name}.impl`;
@@ -189,7 +205,12 @@ export function voidizedCallback(lowerer: Lowerer, cb: IrExpr, loc: SrcLoc): IrE
           expr: {
             kind: "callValue",
             callee: { kind: "varRef", localId: "f.0", type: fromT, loc },
-            args: params.map((p): IrExpr => ({ kind: "varRef", localId: p.localId, type: p.type, loc })),
+            args: params.map((p): IrExpr => ({
+              kind: "varRef",
+              localId: p.localId,
+              type: p.type,
+              loc,
+            })),
             type: fromT.ret,
             loc,
           },
@@ -203,11 +224,41 @@ export function voidizedCallback(lowerer: Lowerer, cb: IrExpr, loc: SrcLoc): IrE
       params: [{ localId: "f.0", name: "f", type: fromT }],
       returnType: toT,
       locals: [{ id: "f.0", name: "f", type: fromT, mutable: false, boxed: true }],
-      body: [{ kind: "return", value: { kind: "closure", fnName: impl, captures: ["f.0"], type: toT, loc }, loc }],
+      body: [
+        {
+          kind: "return",
+          value: { kind: "closure", fnName: impl, captures: ["f.0"], type: toT, adapts: true, loc },
+          loc,
+        },
+      ],
       loc,
     });
   }
   return { kind: "call", callee: name, args: [cb], type: toT, loc };
+}
+
+/** A socket or server listener with parameters that the runtime calls
+ * through the checked-dynamic boundary (close(hadError), write's
+ * cb(err), 'drop', getConnections): a dyn function value as is, or a
+ * typed function boxed with per-argument checks. */
+function lowerSocketDynListener(lowerer: Lowerer, node: ts.Expression, what: string): IrExpr {
+  const cb = lowerer.lowerExpr(node);
+  if (cb.type.kind === "dyn") return cb;
+  if (
+    cb.type.kind === "func" &&
+    canBoxFuncIntoDyn(
+      cb.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
+    return { kind: "dynFrom", value: cb, type: DYN, loc: locOf(node) };
+  }
+  lowerer.noLowering(
+    `${what} that cannot cross the checked-dynamic boundary`,
+    node,
+    "the callback's parameters and return value must have checked-dynamic conversions",
+  );
 }
 
 /** A registration/side-effect libCall re-shaped to answer its RECEIVER —
@@ -230,7 +281,7 @@ function receiverReturningCall(
 ): IrExpr {
   const key = `server.recvret:${fn}:${opts?.prefix?.fn ?? ""}:${(opts?.mainArgIndices ?? []).join(".")}:${callArgs.map((a) => typeKey(a.type)).join(",")}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%server.recvret.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%server.recvret", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const params = callArgs.map((a, i) => ({ localId: `p${i}.0`, name: `p${i}`, type: a.type }));
@@ -309,7 +360,11 @@ function isAddressInfoRecord(lowerer: Lowerer, t: IrType): boolean {
   if (t.kind !== "record") return false;
   const shape = lowerer.shapes.get(t.shapeId);
   if (!shape || shape.tuple || shape.indexValue || shape.fields.length !== 3) return false;
-  const want: [string, string][] = [["address", "string"], ["family", "string"], ["port", "f64"]];
+  const want: [string, string][] = [
+    ["address", "string"],
+    ["family", "string"],
+    ["port", "f64"],
+  ];
   return shape.fields.every((f, i) => f.name === want[i]![0] && f.type.kind === want[i]![1]);
 }
 
@@ -330,8 +385,12 @@ function coerceToHandle(lowerer: Lowerer, node: ts.Expression, want: IrType): Ir
  * array instead of reqHeaderPairs. Null when the shape is not a
  * string-armed pure-index record. */
 function h2HeaderRecordStmts(
-  lowerer: Lowerer, shapeId: string, pairsLocal: string, outLocal: string,
-  statusLocal: string | null, loc: SrcLoc,
+  lowerer: Lowerer,
+  shapeId: string,
+  pairsLocal: string,
+  outLocal: string,
+  statusLocal: string | null,
+  loc: SrcLoc,
 ): IrStmt[] | null {
   const shape = lowerer.shapes.get(shapeId);
   if (!shape || shape.tuple || shape.fields.length > 0 || !shape.indexValue) return null;
@@ -345,25 +404,75 @@ function h2HeaderRecordStmts(
   const pairAt = (offset: number): IrExpr => ({
     kind: "arrayGet",
     arr: varRef(pairsLocal, pairsT, loc),
-    index: offset === 0 ? varRef("i.0", F64, loc) : { kind: "bin", op: "+", left: varRef("i.0", F64, loc), right: numLit(offset, loc), type: F64, loc },
+    index:
+      offset === 0
+        ? varRef("i.0", F64, loc)
+        : {
+            kind: "bin",
+            op: "+",
+            left: varRef("i.0", F64, loc),
+            right: numLit(offset, loc),
+            type: F64,
+            loc,
+          },
     type: STRING,
     loc,
   });
   const stmts: IrStmt[] = [
-    { kind: "varDecl", localId: outLocal, init: { kind: "recordLit", fields: [], type: recT, loc }, loc },
+    {
+      kind: "varDecl",
+      localId: outLocal,
+      init: { kind: "recordLit", fields: [], type: recT, loc },
+      loc,
+    },
     {
       kind: "for",
       init: { kind: "varDecl", localId: "i.0", init: numLit(0, loc), loc },
       cond: {
-        kind: "bin", op: "<", left: varRef("i.0", F64, loc),
-        right: { kind: "arrIntrinsic", method: "length", receiver: varRef(pairsLocal, pairsT, loc), args: [], type: F64, loc },
-        type: BOOL, loc,
+        kind: "bin",
+        op: "<",
+        left: varRef("i.0", F64, loc),
+        right: {
+          kind: "arrIntrinsic",
+          method: "length",
+          receiver: varRef(pairsLocal, pairsT, loc),
+          args: [],
+          type: F64,
+          loc,
+        },
+        type: BOOL,
+        loc,
       },
-      update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: varRef("i.0", F64, loc), right: numLit(2, loc), type: F64, loc }, loc },
-      body: [{
-        kind: "recordKeySet", obj: varRef(outLocal, recT, loc), shapeId, key: pairAt(0),
-        value: { kind: "unionWrap", unionId: iv.unionId, tag: strTag, value: pairAt(1), type: iv, loc }, loc,
-      }],
+      update: {
+        kind: "assign",
+        localId: "i.0",
+        value: {
+          kind: "bin",
+          op: "+",
+          left: varRef("i.0", F64, loc),
+          right: numLit(2, loc),
+          type: F64,
+          loc,
+        },
+        loc,
+      },
+      body: [
+        {
+          kind: "recordKeySet",
+          obj: varRef(outLocal, recT, loc),
+          shapeId,
+          key: pairAt(0),
+          value: {
+            kind: "unionWrap",
+            unionId: iv.unionId,
+            tag: strTag,
+            value: pairAt(1),
+            type: iv,
+            loc,
+          },
+          loc,
+        },
+      ],
       loc,
     },
   ];
@@ -371,9 +480,19 @@ function h2HeaderRecordStmts(
     const f64Tag = lowerer.armTag(iv.unionId, F64);
     if (f64Tag < 0) return null;
     stmts.push({
-      kind: "recordKeySet", obj: varRef(outLocal, recT, loc), shapeId,
+      kind: "recordKeySet",
+      obj: varRef(outLocal, recT, loc),
+      shapeId,
       key: { kind: "strLit", value: ":status", type: STRING, loc },
-      value: { kind: "unionWrap", unionId: iv.unionId, tag: f64Tag, value: varRef(statusLocal, F64, loc), type: iv, loc }, loc,
+      value: {
+        kind: "unionWrap",
+        unionId: iv.unionId,
+        tag: f64Tag,
+        value: varRef(statusLocal, F64, loc),
+        type: iv,
+        loc,
+      },
+      loc,
     });
   }
   return stmts;
@@ -408,11 +527,15 @@ function canonicalHeaderRecord(lowerer: Lowerer): { type: IrType; shapeId: strin
 }
 
 function h2HeadersCallbackAdapter(
-  lowerer: Lowerer, node: ts.Expression, what: string,
-  handleKind: "http2Stream" | null, withStatus: boolean, loc: SrcLoc,
+  lowerer: Lowerer,
+  node: ts.Expression,
+  what: string,
+  handleKind: "http2Stream" | null,
+  withStatus: boolean,
+  loc: SrcLoc,
 ): IrExpr {
   let cb = lowerer.lowerExpr(node);
-  const maxParams = (handleKind ? 1 : 0) + 1 /* headers */ + 1 /* flags */;
+  const maxParams = (handleKind ? 1 : 0) + 1 /* headers */ + 1; /* flags */
   // A checked-dynamic listener (test/common's mustCall wrapper — a dyn
   // value or an arguments-reading rest function of dyn params): wrap it
   // in a dynCheck to the CANONICAL event signature, then build the header
@@ -420,9 +543,15 @@ function h2HeadersCallbackAdapter(
   // reference, the record boxes to a dyn object — the net server-callbacks
   // precedent). The synthesized record IS the shape the adapter builds.
   const handleT = handleKind === "http2Stream" ? HTTP2STREAM_T : null;
-  const isDynCb = cb.type.kind === "dyn" ||
-    (cb.type.kind === "func" && (cb.type.rest === true || cb.type.params.every((p) => p.kind === "dyn")) &&
-      canBoxFuncIntoDyn(cb.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id)));
+  const isDynCb =
+    cb.type.kind === "dyn" ||
+    (cb.type.kind === "func" &&
+      (cb.type.rest === true || cb.type.params.every((p) => p.kind === "dyn")) &&
+      canBoxFuncIntoDyn(
+        cb.type,
+        (id) => lowerer.shapes.get(id),
+        (id) => lowerer.unions.get(id),
+      ));
   if (isDynCb) {
     const rec = canonicalHeaderRecord(lowerer);
     const tuple: IrType[] = [];
@@ -430,17 +559,26 @@ function h2HeadersCallbackAdapter(
     tuple.push(rec.type);
     tuple.push(F64);
     const toT = funcOf(tuple, VOID);
-    const boxed: IrExpr = cb.type.kind === "dyn" ? cb : { kind: "dynFrom", value: cb, type: DYN, loc };
+    const boxed: IrExpr =
+      cb.type.kind === "dyn" ? cb : { kind: "dynFrom", value: cb, type: DYN, loc };
     cb = { kind: "dynCheck", value: boxed, type: toT, loc };
   }
   if (cb.type.kind !== "func" || cb.type.ret.kind !== "void" || cb.type.params.length > maxParams) {
-    lowerer.unsupported("SC1090", node, `${what} with more than ${maxParams} parameters or returning a value`);
+    lowerer.unsupported(
+      "SC1090",
+      node,
+      `${what} with more than ${maxParams} parameters or returning a value`,
+    );
   }
   const fromT = cb.type;
   const headersIdx = handleT ? 1 : 0;
   const shapeId = fromT.params.length > headersIdx ? headerParamShapeId(fromT, headersIdx) : null;
   if (fromT.params.length > headersIdx && shapeId === null) {
-    lowerer.unsupported("SC1090", node, `${what} whose headers parameter is not a header record (type it IncomingHttpHeaders)`);
+    lowerer.unsupported(
+      "SC1090",
+      node,
+      `${what} whose headers parameter is not a header record (type it IncomingHttpHeaders)`,
+    );
   }
   // Runtime ABI params, in order.
   const abiParams: { localId: string; name: string; type: IrType }[] = [];
@@ -448,10 +586,13 @@ function h2HeadersCallbackAdapter(
   abiParams.push({ localId: "ps.0", name: "ps", type: arrayOf(STRING) });
   if (withStatus) abiParams.push({ localId: "st.0", name: "st", type: F64 });
   abiParams.push({ localId: "fl.0", name: "fl", type: F64 });
-  const toT = funcOf(abiParams.map((p) => p.type), VOID);
+  const toT = funcOf(
+    abiParams.map((p) => p.type),
+    VOID,
+  );
   const key = `h2.hdrcb:${handleKind}:${withStatus}:${typeKey(fromT)}:${shapeId ?? ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%h2.hdrcb.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%h2.hdrcb", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const impl = `${name}.impl`;
@@ -464,27 +605,65 @@ function h2HeadersCallbackAdapter(
     if (shapeId !== null) {
       locals.push({ id: "out.0", name: "out", type: { kind: "record", shapeId }, mutable: false });
       locals.push({ id: "i.0", name: "i", type: F64, mutable: true });
-      const stmts = h2HeaderRecordStmts(lowerer, shapeId, "ps.0", "out.0", withStatus ? "st.0" : null, loc);
-      if (stmts === null) lowerer.unsupported("SC1090", node, `${what} whose headers parameter is not a supported header record`);
+      const stmts = h2HeaderRecordStmts(
+        lowerer,
+        shapeId,
+        "ps.0",
+        "out.0",
+        withStatus ? "st.0" : null,
+        loc,
+      );
+      if (stmts === null)
+        lowerer.unsupported(
+          "SC1090",
+          node,
+          `${what} whose headers parameter is not a supported header record`,
+        );
       body.push(...stmts!);
       recordRef = varRef("out.0", { kind: "record", shapeId }, loc);
     }
     // Assemble the user-call arguments in the user's declared order.
     const callArgs: IrExpr[] = [];
-    const push = (e: IrExpr) => { if (callArgs.length < fromT.params.length) callArgs.push(e); };
+    const push = (e: IrExpr) => {
+      if (callArgs.length < fromT.params.length) callArgs.push(e);
+    };
     if (handleT) push(varRef("h.0", handleT, loc));
-    if (recordRef) push(recordRef); else if (fromT.params.length > headersIdx) push(varRef("ps.0", arrayOf(STRING), loc));
+    if (recordRef) push(recordRef);
+    else if (fromT.params.length > headersIdx) push(varRef("ps.0", arrayOf(STRING), loc));
     push(varRef("fl.0", F64, loc));
     body.push({
       kind: "exprStmt",
-      expr: { kind: "callValue", callee: varRef("f.0", fromT, loc), args: callArgs.slice(0, fromT.params.length), type: fromT.ret, loc },
+      expr: {
+        kind: "callValue",
+        callee: varRef("f.0", fromT, loc),
+        args: callArgs.slice(0, fromT.params.length),
+        type: fromT.ret,
+        loc,
+      },
       loc,
     });
-    lowerer.liftedFns.push({ name: impl, params: abiParams, returnType: VOID, captures: [{ localId: "f.0", name: "f", type: fromT }], locals, body, loc });
     lowerer.liftedFns.push({
-      name, params: [{ localId: "f.0", name: "f", type: fromT }], returnType: toT,
+      name: impl,
+      params: abiParams,
+      returnType: VOID,
+      captures: [{ localId: "f.0", name: "f", type: fromT }],
+      locals,
+      body,
+      loc,
+    });
+    lowerer.liftedFns.push({
+      name,
+      params: [{ localId: "f.0", name: "f", type: fromT }],
+      returnType: toT,
       locals: [{ id: "f.0", name: "f", type: fromT, mutable: false, boxed: true }],
-      body: [{ kind: "return", value: { kind: "closure", fnName: impl, captures: ["f.0"], type: toT, loc }, loc }], loc,
+      body: [
+        {
+          kind: "return",
+          value: { kind: "closure", fnName: impl, captures: ["f.0"], type: toT, loc },
+          loc,
+        },
+      ],
+      loc,
     });
   }
   return { kind: "call", callee: name, args: [cb], type: toT, loc };
@@ -517,9 +696,12 @@ function staticHeaderKeyOf(lowerer: Lowerer, prop: ts.PropertyAssignment): strin
  * (the caller falls through to the ordinary builtin tables); every net
  * member lands here — unlowered ones fence with their module-qualified
  * name. */
-export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+export function lowerNetModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr | null {
+  loc: SrcLoc,
+): IrExpr | null {
   if (bi.module === "http") return lowerHttpModuleCall(lowerer, expr, bi, loc);
   if (bi.module === "https") return lowerHttpsModuleCall(lowerer, expr, bi, loc);
   if (bi.module === "tls") return lowerTlsModuleCall(lowerer, expr, bi, loc);
@@ -528,7 +710,7 @@ export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
   // Members with ordinary surfaces.ts table entries (the autoselect
   // budget pair) ride the generic path — null hands the dispatch back.
   if (builtinModuleFnOf(lowerer, "net", bi.member)) return null;
-  const args = expr.arguments;
+  const args = expr.arguments.nodes;
   if (bi.member === "createServer") {
     if (args.length === 0) {
       return { kind: "libCall", fn: "net.createServer", args: [], type: NETSERVER_T, loc };
@@ -539,7 +721,7 @@ export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       // ERR_INVALID_ARG_TYPE on 'options' before any server exists. DYN
       // result — the checked-dynamic lane's concise arrows box it, and
       // the throw means it never materializes.
-      if (isJsSourceFile(expr.getSourceFile())) {
+      if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         const t = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
         if (t !== null && (t.kind === "string" || t.kind === "f64" || t.kind === "bool")) {
           const raw = lowerer.lowerExpr(args[0]!);
@@ -557,7 +739,10 @@ export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         }
       }
       const { cb } = lowerCallbackArg(
-        lowerer, args[0]!, "connection handlers", 1,
+        lowerer,
+        args[0]!,
+        "connection handlers",
+        1,
         (p) => p.kind === "netSocket",
         "use (socket) or ()",
         [NETSOCKET_T],
@@ -587,17 +772,25 @@ export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
     // invalid-input probes build theirs with computed keys): the
     // checked-dynamic walk validates Node-order and the compiler-rendered
     // fence is the post-validation tail.
-    if (args.length === 1 && isJsSourceFile(expr.getSourceFile())) {
+    if (args.length === 1 && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const t = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
       if (t !== null && (t.kind === "dyn" || t.kind === "record")) {
         const raw = lowerer.lowerExpr(args[0]!);
         if (raw.type.kind === "dyn" || lowerer.dynConvertible(raw.type)) {
-          const bag: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+          const bag: IrExpr =
+            raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
           return {
             kind: "libCall",
             fn: "net.connectOptsChk",
-            args: [bag, ladderFenceExpr(lowerer, `${bi.member} with a runtime options record`, expr,
-              "pass the options as an object literal — port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options")],
+            args: [
+              bag,
+              ladderFenceExpr(
+                lowerer,
+                `${bi.member} with a runtime options record`,
+                expr,
+                "pass the options as an object literal — port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options",
+              ),
+            ],
             type: NETSOCKET_T,
             loc,
           };
@@ -630,10 +823,13 @@ export function lowerNetModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       return { kind: "libCall", fn: "net.connect", args: [port, host], type: NETSOCKET_T, loc };
     }
     const { cb } = lowerCallbackArg(
-      lowerer, cbNode, "connect listeners", 0,
+      lowerer,
+      cbNode,
+      "connect listeners",
+      0,
       () => false,
       "use ()",
-        [],
+      [],
     );
     return { kind: "libCall", fn: "net.connectCb", args: [port, host, cb], type: NETSOCKET_T, loc };
   }
@@ -662,7 +858,11 @@ function lookupFnShapeOk(lowerer: Lowerer, t: IrType): boolean {
   if (!errDef || !errDef.arms.some((a) => a.kind === "nullT")) return false;
   // Every non-null arm must be the Error root: the emitted answer thunk
   // reads .message off a non-null payload.
-  if (!errDef.arms.every((a) => a.kind === "nullT" || (a.kind === "object" && a.className === "%Error"))) {
+  if (
+    !errDef.arms.every(
+      (a) => a.kind === "nullT" || (a.kind === "object" && a.className === "%Error"),
+    )
+  ) {
     return false;
   }
   const addrsT = cbT.params[1]!;
@@ -679,10 +879,15 @@ function lookupFnShapeOk(lowerer: Lowerer, t: IrType): boolean {
  * alongside, portless's createLoopbackConnection). Other keys fence by
  * name; a connect listener argument is supported on the no-lookup form
  * only. */
-function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, member: string, loc: SrcLoc): IrExpr {
-  const args = expr.arguments;
+function lowerNetConnectOptions(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  member: string,
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
   const optsNode = args[0] as ts.ObjectLiteralExpression;
-  const isJs = isJsSourceFile(expr.getSourceFile());
+  const isJs = isJsSourceFile(ts.getSourceFileOfNode(expr));
   // The checked-dynamic option-bag route (JS sources): a literal with
   // computed keys (the invalid-input probes' spelling) or an objectMode-
   // trio member rides WHOLE to the runtime walk — Node's Socket-ctor
@@ -690,23 +895,34 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
   // port/host/autoSelectFamily), with the compiler-rendered fence as the
   // post-validation tail.
   if (isJs) {
-    const needsBag = optsNode.properties.some((p) =>
-      (!ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p)) ||
-      (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) ||
-      ["objectMode", "readableObjectMode", "writableObjectMode"].includes(
-        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
-        (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : "",
-      ),
+    const needsBag = optsNode.properties.nodes.some(
+      (p) =>
+        (!ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p)) ||
+        (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) ||
+        ["objectMode", "readableObjectMode", "writableObjectMode"].includes(
+          (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+            (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))
+            ? p.name.text
+            : "",
+        ),
     );
     if (needsBag) {
       const raw = lowerer.lowerExpr(optsNode);
       if (raw.type.kind === "dyn" || lowerer.dynConvertible(raw.type)) {
-        const bag: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+        const bag: IrExpr =
+          raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
         return {
           kind: "libCall",
           fn: "net.connectOptsChk",
-          args: [bag, ladderFenceExpr(lowerer, `${member} with these options`, optsNode,
-            "port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options")],
+          args: [
+            bag,
+            ladderFenceExpr(
+              lowerer,
+              `${member} with these options`,
+              optsNode,
+              "port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options",
+            ),
+          ],
           type: NETSOCKET_T,
           loc,
         };
@@ -716,6 +932,7 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
   let port: IrExpr | null = null;
   let host: IrExpr | null = null;
   let lookup: IrExpr | null = null;
+  let dynLookup: IrExpr | null = null;
   let autoSelect = false;
   let attempt: IrExpr | null = null;
   let optionThrow: IrExpr | null = null;
@@ -730,10 +947,12 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
     type: NETSOCKET_T,
     loc,
   });
-  for (const prop of optsNode.properties) {
+  for (const prop of optsNode.properties.nodes) {
     let initializer: ts.Expression | null;
-    if (ts.isPropertyAssignment(prop) &&
-        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+    ) {
       initializer = prop.initializer;
     } else if (ts.isShorthandPropertyAssignment(prop)) {
       initializer = null;
@@ -752,7 +971,11 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
     if (key === "port") {
       port = lowerVal();
       if (port.type.kind !== "f64") {
-        lowerer.noLowering(`a ${member} 'port' option of '${lowerer.fmt(port.type)}' values`, prop, "the port is a number here");
+        lowerer.noLowering(
+          `a ${member} 'port' option of '${lowerer.fmt(port.type)}' values`,
+          prop,
+          "the port is a number here",
+        );
       }
     } else if (key === "host") {
       host = lowerVal();
@@ -764,7 +987,11 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
           host = null;
           continue;
         }
-        lowerer.noLowering(`a ${member} 'host' option of '${lowerer.fmt(host.type)}' values`, prop, "the host is a string here");
+        lowerer.noLowering(
+          `a ${member} 'host' option of '${lowerer.fmt(host.type)}' values`,
+          prop,
+          "the host is a string here",
+        );
       }
     } else if (key === "autoSelectFamily") {
       // The literal `true` only: it is what licenses the try-each-address
@@ -774,8 +1001,11 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
         // A provably-non-boolean value throws Node's validateBoolean
         // ladder instead of fencing.
         const raw = initializer !== null && isJs ? lowerer.lowerExpr(initializer) : null;
-        if (raw !== null && raw.type.kind !== "bool" &&
-            (raw.type.kind === "dyn" || lowerer.dynConvertible(raw.type))) {
+        if (
+          raw !== null &&
+          raw.type.kind !== "bool" &&
+          (raw.type.kind === "dyn" || lowerer.dynConvertible(raw.type))
+        ) {
           optionThrow ??= propThrow("options.autoSelectFamily", "of type boolean", raw);
           continue;
         }
@@ -791,7 +1021,9 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
       // from-1 ladder) and is then inert — the single dial has nothing
       // to time, the autoSelectFamily simplification's sibling.
       const raw = lowerVal();
-      if (!(raw.type.kind === "dyn" || raw.kind === "unitLit" || lowerer.dynConvertible(raw.type))) {
+      if (
+        !(raw.type.kind === "dyn" || raw.kind === "unitLit" || lowerer.dynConvertible(raw.type))
+      ) {
         lowerer.noLowering(
           `a ${member} 'autoSelectFamilyAttemptTimeout' option of '${lowerer.fmt(raw.type)}' values`,
           prop,
@@ -801,10 +1033,30 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
       attempt = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
     } else if (key === "lookup") {
       if (initializer === null) {
-        lowerer.noLowering(`${member} with a shorthand lookup option`, prop, "spell it out: lookup: theResolver");
+        lowerer.noLowering(
+          `${member} with a shorthand lookup option`,
+          prop,
+          "spell it out: lookup: theResolver",
+        );
       }
       lookup = lowerer.lowerExpr(initializer);
-      if (!lookupFnShapeOk(lowerer, lookup.type)) {
+      // A lookup of Node's own type (net.LookupFunction: options and a
+      // callback taking an address string or list) crosses as a checked-
+      // dynamic function the runtime calls the way Node's dial does.
+      if (
+        !lookupFnShapeOk(lowerer, lookup.type) &&
+        lookup.type.kind === "func" &&
+        lookup.type.params.length === 3 &&
+        canBoxFuncIntoDyn(
+          lookup.type,
+          (id) => lowerer.shapes.get(id),
+          (id) => lowerer.unions.get(id),
+        )
+      ) {
+        dynLookup = { kind: "dynFrom", value: lookup, type: DYN, loc: locOf(initializer) };
+      } else if (lookup.type.kind === "dyn") {
+        dynLookup = lookup;
+      } else if (!lookupFnShapeOk(lowerer, lookup.type)) {
         lowerer.noLowering(
           `a ${member} 'lookup' option of '${lowerer.fmt(lookup.type)}' values`,
           prop,
@@ -839,7 +1091,29 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
         "the validated-budget form is the bare options call — register listeners separately",
       );
     }
-    return { kind: "libCall", fn: "net.connectAttempt", args: [port, host, attempt], type: NETSOCKET_T, loc };
+    return {
+      kind: "libCall",
+      fn: "net.connectAttempt",
+      args: [port, host, attempt],
+      type: NETSOCKET_T,
+      loc,
+    };
+  }
+  if (dynLookup !== null) {
+    if (args.length !== 1) {
+      lowerer.noLowering(
+        `${member} with a lookup and a connect listener`,
+        expr,
+        "register the listener separately: socket.once('connect', ...)",
+      );
+    }
+    return {
+      kind: "libCall",
+      fn: "net.connectLookupDyn",
+      args: [port, host, dynLookup],
+      type: NETSOCKET_T,
+      loc,
+    };
   }
   if (lookup !== null) {
     if (!autoSelect) {
@@ -856,7 +1130,13 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
         "register the listener separately: socket.once('connect', ...)",
       );
     }
-    return { kind: "libCall", fn: "net.connectLookup", args: [port, host, lookup], type: NETSOCKET_T, loc };
+    return {
+      kind: "libCall",
+      fn: "net.connectLookup",
+      args: [port, host, lookup],
+      type: NETSOCKET_T,
+      loc,
+    };
   }
   if (args.length === 1) {
     return { kind: "libCall", fn: "net.connect", args: [port, host], type: NETSOCKET_T, loc };
@@ -869,10 +1149,13 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
     );
   }
   const { cb } = lowerCallbackArg(
-    lowerer, args[1]!, "connect listeners", 0,
+    lowerer,
+    args[1]!,
+    "connect listeners",
+    0,
     () => false,
     "use ()",
-        [],
+    [],
   );
   return { kind: "libCall", fn: "net.connectCb", args: [port, host, cb], type: NETSOCKET_T, loc };
 }
@@ -886,8 +1169,11 @@ function lowerNetConnectOptions(lowerer: Lowerer, expr: ts.CallExpression, membe
  * binding as the method receiver — any other `this` would be a
  * different close. Null when the shape doesn't match (generic fences
  * name `.bind` otherwise). */
-function lowerServerCloseBind(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerServerCloseBind(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (call.questionDotToken || access.questionDotToken) return null;
   if (access.name.text !== "bind") return null;
   const closeAccess = access.expression;
@@ -896,9 +1182,9 @@ function lowerServerCloseBind(lowerer: Lowerer, call: ts.CallExpression,
   if (!lowerer.isStdlibMember(closeAccess)) return null;
   const loc = locOf(call);
   const recvNode = closeAccess.expression;
-  const thisArg = call.arguments[0];
+  const thisArg = call.arguments.nodes[0];
   if (
-    call.arguments.length !== 1 ||
+    call.arguments.nodes.length !== 1 ||
     !thisArg ||
     !ts.isIdentifier(recvNode) ||
     !ts.isIdentifier(thisArg) ||
@@ -942,8 +1228,12 @@ function lowerServerCloseBind(lowerer: Lowerer, call: ts.CallExpression,
  * emitted zero-arg wrapper; server.close() runs it instead of closing,
  * and the override reaches the real close through its bound origClose.
  * Null when the target isn't a net.Server close member. */
-export function lowerServerCloseOverrideAssignment(lowerer: Lowerer, left: ts.Expression,
-  right: ts.Expression, loc: SrcLoc,): IrStmt | null {
+export function lowerServerCloseOverrideAssignment(
+  lowerer: Lowerer,
+  left: ts.Expression,
+  right: ts.Expression,
+  loc: SrcLoc,
+): IrStmt | null {
   if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
   if (left.name.text !== "close") return null;
   if (lowerer.mapTypeOf(lowerer.typeOf(left.expression))?.kind !== "netServer") return null;
@@ -953,7 +1243,8 @@ export function lowerServerCloseOverrideAssignment(lowerer: Lowerer, left: ts.Ex
   const cbUnion = t.kind === "func" && t.params.length === 1 ? t.params[0]! : null;
   const shapeOk =
     cbUnion?.kind === "union" &&
-    (t.kind === "func" && (t.ret.kind === "netServer" || t.ret.kind === "void")) &&
+    t.kind === "func" &&
+    (t.ret.kind === "netServer" || t.ret.kind === "void") &&
     (() => {
       const def = lowerer.unions.get(cbUnion.unionId);
       return (
@@ -971,28 +1262,49 @@ export function lowerServerCloseOverrideAssignment(lowerer: Lowerer, left: ts.Ex
   }
   return {
     kind: "exprStmt",
-    expr: { kind: "libCall", fn: "net.serverSetCloseOverride", args: [server, value], type: VOID, loc },
+    expr: {
+      kind: "libCall",
+      fn: "net.serverSetCloseOverride",
+      args: [server, value],
+      type: VOID,
+      loc,
+    },
     loc,
   };
 }
 
 /** Writable ServerResponse properties consulted by the implicit head and
  * the strict body-length check. Null when the target isn't one of them. */
-export function lowerHttpResPropertyAssignment(lowerer: Lowerer, left: ts.Expression,
-  right: ts.Expression, loc: SrcLoc,): IrStmt | null {
+export function lowerHttpResPropertyAssignment(
+  lowerer: Lowerer,
+  left: ts.Expression,
+  right: ts.Expression,
+  loc: SrcLoc,
+): IrStmt | null {
   if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
   const name = left.name.text;
-  if (name !== "statusCode" && name !== "statusMessage" &&
-      name !== "sendDate" && name !== "strictContentLength") return null;
+  if (
+    name !== "statusCode" &&
+    name !== "statusMessage" &&
+    name !== "sendDate" &&
+    name !== "strictContentLength"
+  )
+    return null;
   if (lowerer.mapTypeOf(lowerer.typeOf(left.expression))?.kind !== "httpRes") return null;
   if (!lowerer.isStdlibMember(left)) return null;
   const receiver = coerceToHandle(lowerer, left.expression, HTTPRES_T);
-  const value = name === "statusCode"
-    ? lowerer.lowerExprExpecting(right, F64)
-    : lowerer.lowerExprExpecting(right, name === "statusMessage" ? STRING : BOOL);
-  const fn: IrLibFn = name === "statusCode" ? "http.resStatusSet"
-    : name === "statusMessage" ? "http.resStatusMsgSet"
-    : name === "sendDate" ? "http.resSendDateSet" : "http.resStrictContentLengthSet";
+  const value =
+    name === "statusCode"
+      ? lowerer.lowerExprExpecting(right, F64)
+      : lowerer.lowerExprExpecting(right, name === "statusMessage" ? STRING : BOOL);
+  const fn: IrLibFn =
+    name === "statusCode"
+      ? "http.resStatusSet"
+      : name === "statusMessage"
+        ? "http.resStatusMsgSet"
+        : name === "sendDate"
+          ? "http.resSendDateSet"
+          : "http.resStrictContentLengthSet";
   return {
     kind: "exprStmt",
     expr: { kind: "libCall", fn, args: [receiver, value], type: VOID, loc },
@@ -1004,8 +1316,12 @@ export function lowerHttpResPropertyAssignment(lowerer: Lowerer, left: ts.Expres
  * siblings. These are ordinary writable number properties in Node: the
  * runtime stores their exact value per server; active timeout behavior is
  * a separate protocol concern. */
-export function lowerHttpServerTimeoutAssignment(lowerer: Lowerer, left: ts.Expression,
-  right: ts.Expression, loc: SrcLoc,): IrStmt | null {
+export function lowerHttpServerTimeoutAssignment(
+  lowerer: Lowerer,
+  left: ts.Expression,
+  right: ts.Expression,
+  loc: SrcLoc,
+): IrStmt | null {
   if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
   const field = httpServerTimeoutField(left.name.text);
   if (field === null) return null;
@@ -1016,7 +1332,45 @@ export function lowerHttpServerTimeoutAssignment(lowerer: Lowerer, left: ts.Expr
   const value = lowerer.lowerExprExpecting(right, F64);
   return {
     kind: "exprStmt",
-    expr: { kind: "libCall", fn: "http.serverTimeoutSet", args: [receiver, selector, value], type: VOID, loc },
+    expr: {
+      kind: "libCall",
+      fn: "http.serverTimeoutSet",
+      args: [receiver, selector, value],
+      type: VOID,
+      loc,
+    },
+    loc,
+  };
+}
+
+/** `server.maxConnections = n`: the value crosses as a dyn (undefined
+ * and null unset the cap). `server.dropMaxConnection = v` stores the
+ * value as is (Node reads it only in cluster mode). */
+export function lowerNetServerMaxConnectionsAssignment(
+  lowerer: Lowerer,
+  left: ts.Expression,
+  right: ts.Expression,
+  loc: SrcLoc,
+): IrStmt | null {
+  if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
+  const name = left.name.text;
+  if (name !== "maxConnections" && name !== "dropMaxConnection") return null;
+  if (lowerer.mapTypeOf(lowerer.typeOf(left.expression))?.kind !== "netServer") return null;
+  if (!lowerer.isStdlibMember(left)) return null;
+  const receiver = coerceToHandle(lowerer, left.expression, NETSERVER_T);
+  const value = lowerer.coerceToExpected(lowerer.lowerExpr(right), DYN);
+  return {
+    kind: "exprStmt",
+    expr: {
+      kind: "libCall",
+      fn:
+        name === "maxConnections"
+          ? "net.serverMaxConnectionsSet"
+          : "net.serverDropMaxConnectionSet",
+      args: [receiver, value],
+      type: VOID,
+      loc,
+    },
     loc,
   };
 }
@@ -1024,21 +1378,65 @@ export function lowerHttpServerTimeoutAssignment(lowerer: Lowerer, left: ts.Expr
 /** Method calls on net.Server receivers: listen(port[, cb]), close([cb]),
  * on/once("connection" | "error" | "close", cb). address() alone fences
  * toward the composed address().port read. Null for other receivers. */
-function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerNetServerMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "netServer") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
+  if (name === "getConnections") {
+    // cb(null, count) on the next tick; answers the server.
+    if (args.length !== 1) {
+      lowerer.noLowering(
+        `getConnections with ${args.length} arguments`,
+        call,
+        "the form is getConnections(callback)",
+      );
+    }
+    const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+    const cb = lowerSocketDynListener(lowerer, args[0]!, "getConnections callbacks");
+    if (resultIsDiscarded(call)) {
+      return {
+        kind: "libCall",
+        fn: "net.serverGetConnections",
+        args: [receiver, cb],
+        type: VOID,
+        loc,
+      };
+    }
+    return receiverReturningCall(
+      lowerer,
+      "net.serverGetConnections",
+      [receiver, cb],
+      NETSERVER_T,
+      loc,
+    );
+  }
   if (name === "setTimeout") {
-    if (args.length < 1 || args.length > 2) lowerer.noLowering("server.setTimeout arguments", call, "pass milliseconds and an optional socket callback");
+    if (args.length < 1 || args.length > 2)
+      lowerer.noLowering(
+        "server.setTimeout arguments",
+        call,
+        "pass milliseconds and an optional socket callback",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
     const ms = lowerer.lowerExprExpecting(args[0]!, F64);
-    const cb = args.length === 2
-      ? lowerCallbackArg(lowerer, args[1]!, "server timeout callbacks", 1,
-          (p) => p.kind === "netSocket", "use (socket) or ()", [NETSOCKET_T]).cb
-      : null;
+    const cb =
+      args.length === 2
+        ? lowerCallbackArg(
+            lowerer,
+            args[1]!,
+            "server timeout callbacks",
+            1,
+            (p) => p.kind === "netSocket",
+            "use (socket) or ()",
+            [NETSOCKET_T],
+          ).cb
+        : null;
     const fn: IrLibFn = cb === null ? "http.serverSetTimeout" : "http.serverSetTimeoutCb";
     const callArgs = cb === null ? [receiver, ms] : [receiver, ms, cb];
     if (resultIsDiscarded(call)) return { kind: "libCall", fn, args: callArgs, type: VOID, loc };
@@ -1046,9 +1444,13 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "closeAllConnections" || name === "closeIdleConnections") {
     requireStatementPosition(lowerer, call, `server.${name}()`);
-    if (args.length !== 0) lowerer.noLowering(`server.${name} arguments`, call, `${name}() takes no arguments`);
+    if (args.length !== 0)
+      lowerer.noLowering(`server.${name} arguments`, call, `${name}() takes no arguments`);
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
-    const fn: IrLibFn = name === "closeAllConnections" ? "http.serverCloseAllConnections" : "http.serverCloseIdleConnections";
+    const fn: IrLibFn =
+      name === "closeAllConnections"
+        ? "http.serverCloseAllConnections"
+        : "http.serverCloseIdleConnections";
     return { kind: "libCall", fn, args: [receiver], type: VOID, loc };
   }
   if (name === "listen") {
@@ -1084,10 +1486,12 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       let host: IrExpr | null = null;
       let v6only: IrExpr | null = null;
       let reusePort: IrExpr | null = null;
-      for (const prop of (args[0] as ts.ObjectLiteralExpression).properties) {
+      for (const prop of (args[0] as ts.ObjectLiteralExpression).properties.nodes) {
         let initializer: ts.Expression | null;
-        if (ts.isPropertyAssignment(prop) &&
-            (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+        if (
+          ts.isPropertyAssignment(prop) &&
+          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+        ) {
           initializer = prop.initializer;
         } else if (ts.isShorthandPropertyAssignment(prop)) {
           initializer = null;
@@ -1100,22 +1504,33 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
         }
         const key = (prop.name as ts.Identifier | ts.StringLiteral).text;
         if (key === "port") {
-          port = initializer !== null
-            ? lowerer.lowerExpr(initializer)
-            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+          port =
+            initializer !== null
+              ? lowerer.lowerExpr(initializer)
+              : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
           if (port.type.kind !== "f64") {
-            lowerer.noLowering(`a listen 'port' option of '${lowerer.fmt(port.type)}' values`, prop, "the port is a number here");
+            lowerer.noLowering(
+              `a listen 'port' option of '${lowerer.fmt(port.type)}' values`,
+              prop,
+              "the port is a number here",
+            );
           }
         } else if (key === "host") {
-          host = initializer !== null
-            ? lowerer.lowerExpr(initializer)
-            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+          host =
+            initializer !== null
+              ? lowerer.lowerExpr(initializer)
+              : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
           if (host.type.kind !== "string") {
-            lowerer.noLowering(`a listen 'host' option of '${lowerer.fmt(host.type)}' values`, prop, "the host is an IP string here");
+            lowerer.noLowering(
+              `a listen 'host' option of '${lowerer.fmt(host.type)}' values`,
+              prop,
+              "the host is an IP string here",
+            );
           }
         } else if (key === "ipv6Only") {
           if (initializer !== null) {
-            v6only = lowerer.lowerCondition(initializer); /* truthiness: `boolean | undefined` flows */
+            v6only =
+              lowerer.lowerCondition(initializer); /* truthiness: `boolean | undefined` flows */
           } else {
             const v = lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
             if (v.type.kind !== "bool") {
@@ -1141,15 +1556,22 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
             }
             reusePort = v;
           }
-        } else if (key === "signal" && ts.isPropertyAssignment(prop) &&
-                   isJsSourceFile(call.getSourceFile())) {
+        } else if (
+          key === "signal" &&
+          ts.isPropertyAssignment(prop) &&
+          isJsSourceFile(ts.getSourceFileOfNode(call))
+        ) {
           // A provably-non-AbortSignal signal (the invalid-input probes:
           // strings, numbers, plain records) throws Node's
           // validateAbortSignal ladder; plausible signal values keep the
           // fence — abort-driven close has no lowering yet.
           const raw = lowerer.lowerExpr(prop.initializer);
-          const provablyNot = raw.type.kind === "string" || raw.type.kind === "f64" ||
-            raw.type.kind === "bool" || raw.type.kind === "record" || raw.type.kind === "array";
+          const provablyNot =
+            raw.type.kind === "string" ||
+            raw.type.kind === "f64" ||
+            raw.type.kind === "bool" ||
+            raw.type.kind === "record" ||
+            raw.type.kind === "array";
           if (provablyNot && lowerer.dynConvertible(raw.type)) {
             return {
               kind: "libCall",
@@ -1183,14 +1605,24 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           "the supported options object is { port, host?, ipv6Only?, reusePort? } — port 0 binds an ephemeral port",
         );
       }
-      host ??= { kind: "strLit", value: "", type: STRING, loc }; /* "" = the dual-stack any default */
+      host ??= {
+        kind: "strLit",
+        value: "",
+        type: STRING,
+        loc,
+      }; /* "" = the dual-stack any default */
       v6only ??= boolLit(false, loc);
-      const listenOptsFn: IrLibFn = reusePort === null ? "net.listenOpts" : "net.listenOptsReusePort";
-      const listenOptsCbFn: IrLibFn = reusePort === null ? "net.listenOptsCb" : "net.listenOptsReusePortCb";
+      const listenOptsFn: IrLibFn =
+        reusePort === null ? "net.listenOpts" : "net.listenOptsReusePort";
+      const listenOptsCbFn: IrLibFn =
+        reusePort === null ? "net.listenOptsCb" : "net.listenOptsReusePortCb";
       if (args.length === 1) {
-        return listenResult(listenOptsFn, reusePort === null
-          ? [receiver, port, host, v6only]
-          : [receiver, port, host, v6only, reusePort]);
+        return listenResult(
+          listenOptsFn,
+          reusePort === null
+            ? [receiver, port, host, v6only]
+            : [receiver, port, host, v6only, reusePort],
+        );
       }
       // The callback may be an OPTIONAL binding — `(() => void) |
       // undefined`, portless's listenOnProxyInterface pass-through: the
@@ -1223,9 +1655,35 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           `listen callbacks of type '${lowerer.fmt(cbV.type)}' (use () — an optional \`(() => void) | undefined\` binding also flows)`,
         );
       }
-      return listenResult(listenOptsCbFn, reusePort === null
-        ? [receiver, port, host, v6only, cbV]
-        : [receiver, port, host, v6only, reusePort, cbV]);
+      return listenResult(
+        listenOptsCbFn,
+        reusePort === null
+          ? [receiver, port, host, v6only, cbV]
+          : [receiver, port, host, v6only, reusePort, cbV],
+      );
+    }
+    // listen(path[, cb]): a string first argument names a Unix socket
+    // (the runtime takes a numeric string as a port, Node's isPipeName).
+    if (lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind === "string") {
+      if (args.length > 2) {
+        lowerer.noLowering(
+          `listen(path) with ${args.length} arguments`,
+          call,
+          "the supported form is listen(path[, callback])",
+        );
+      }
+      const path = lowerer.lowerExprExpecting(args[0]!, STRING);
+      if (args.length === 1) return listenResult("net.listenPath", [receiver, path]);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "listen callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return listenResult("net.listenPathCb", [receiver, path, cb]);
     }
     const port = lowerer.lowerExprExpecting(args[0]!, F64);
     // The optional middle host — listen(port, '127.0.0.1'[, cb]): a
@@ -1244,26 +1702,114 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const host = lowerer.lowerExprExpecting(hostNode, STRING);
       const v6only = boolLit(false, loc);
       if (!cbNode) return listenResult("net.listenOpts", [receiver, port, host, v6only]);
-      const { cb } = lowerCallbackArg(lowerer, cbNode, "listen callbacks", 0, () => false, "use ()", []);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        cbNode,
+        "listen callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       return listenResult("net.listenOptsCb", [receiver, port, host, v6only, cb]);
     }
     if (!cbNode) {
       return listenResult("net.listen", [receiver, port]);
     }
-    const { cb } = lowerCallbackArg(lowerer, cbNode, "listen callbacks", 0, () => false, "use ()", []);
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      cbNode,
+      "listen callbacks",
+      0,
+      () => false,
+      "use ()",
+      [],
+    );
     return listenResult("net.listenCb", [receiver, port, cb]);
   }
   if (name === "close") {
     requireStatementPosition(lowerer, call, "server.close(...)");
     if (args.length > 1) {
-      lowerer.noLowering(`close with ${args.length} arguments`, call, "the supported form is close([callback])");
+      lowerer.noLowering(
+        `close with ${args.length} arguments`,
+        call,
+        "the supported form is close([callback])",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
     if (args.length === 0) {
       return { kind: "libCall", fn: "net.serverClose", args: [receiver], type: VOID, loc };
     }
-    const { cb } = lowerCallbackArg(lowerer, args[0]!, "close callbacks", 0, () => false, "use ()", []);
+    if (
+      lowerer.checker
+        .getCallSignatures(lowerer.typeOf(args[0]!))
+        .some((sig) => sig.getParameters().length > 0)
+    ) {
+      // close((err) => ...): undefined once the server closes, or Node's
+      // ERR_SERVER_NOT_RUNNING when it was not listening.
+      return {
+        kind: "libCall",
+        fn: "net.serverCloseDyn",
+        args: [receiver, lowerSocketDynListener(lowerer, args[0]!, "close callbacks")],
+        type: VOID,
+        loc,
+      };
+    }
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      args[0]!,
+      "close callbacks",
+      0,
+      () => false,
+      "use ()",
+      [],
+    );
     return { kind: "libCall", fn: "net.serverCloseCb", args: [receiver, cb], type: VOID, loc };
+  }
+  if (name === "addContext" || name === "setSecureContext") {
+    // tls.Server's SNI table and default context (scr_tls.c): addContext
+    // takes a SecureContext or createSecureContext's options; the runtime
+    // throws Node's errors and the fence on a non-TLS server.
+    requireStatementPosition(lowerer, call, `server.${name}(...)`);
+    const want = name === "addContext" ? 2 : 1;
+    if (args.length !== want || args.some(ts.isSpreadElement)) {
+      lowerer.noLowering(
+        `${name} with ${args.length} arguments`,
+        call,
+        name === "addContext"
+          ? "the form is addContext(servername, context)"
+          : "the form is setSecureContext(options)",
+      );
+    }
+    const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+    if (name === "setSecureContext") {
+      const options = lowerer.lowerExprExpecting(args[0]!, DYN);
+      return {
+        kind: "libCall",
+        fn: "tls.serverSetSecureContext",
+        args: [receiver, options],
+        type: VOID,
+        loc,
+      };
+    }
+    const servername = lowerer.lowerExprExpecting(args[0]!, DYN);
+    const context = lowerer.lowerExpr(args[1]!);
+    if (context.type.kind === "secureCtx") {
+      return {
+        kind: "libCall",
+        fn: "tls.serverAddContextCtx",
+        args: [receiver, servername, context],
+        type: VOID,
+        loc,
+      };
+    }
+    return {
+      kind: "libCall",
+      fn: "tls.serverAddContext",
+      args: [receiver, servername, lowerer.coerceInto(args[1]!, context, DYN)],
+      type: VOID,
+      loc,
+    };
   }
   if ((name === "on" || name === "once" || name === "addListener") && args.length === 2) {
     requireStatementPosition(lowerer, call, `server.${name}(...)`);
@@ -1271,6 +1817,31 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const evT = lowerer.typeOf(args[0]!);
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+    if (event === "tlsClientError") {
+      // A failed handshake on a tls or https server: (err, tlsSocket).
+      const listener = args[1]!;
+      const { cb } = lowerCallbackArgShared(
+        lowerer,
+        listener,
+        "tlsClientError listeners",
+        2,
+        (p, i) =>
+          i === 0 ? p.kind === "object" && p.className === "%Error" : p.kind === "netSocket",
+        "use (err, tlsSocket), (err) or ()",
+        {
+          dynTuple: [ERROR_T, NETSOCKET_T],
+          checkAllParams: true,
+          adapt: (c) => voidizedCallback(lowerer, c, locOf(listener)),
+        },
+      );
+      return {
+        kind: "libCall",
+        fn: "tls.serverOnClientError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
+    }
     if (event === "connection" || event === "secureConnection") {
       // 'secureConnection' rides the same list: a TLS server's
       // 'connection' listeners are DEFERRED to handshake completion
@@ -1279,38 +1850,104 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       // never fire in Node either — the runtime entry gates on the
       // deferral flag so the split stays exact.
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, `${event} listeners`, 1,
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        1,
         (p) => p.kind === "netSocket",
         "use (socket) or ()",
         [NETSOCKET_T],
       );
-      const fn: IrLibFn = event === "connection" ? "net.serverOnConnection" : "net.serverOnSecureConnection";
+      const fn: IrLibFn =
+        event === "connection" ? "net.serverOnConnection" : "net.serverOnSecureConnection";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "error") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "error listeners", 1,
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
         (p) => p.kind === "object" && p.className === "%Error",
         "use (err) or ()",
         [ERROR_T],
       );
-      return { kind: "libCall", fn: "net.serverOnError", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "net.serverOnError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "close") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "close listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "net.serverOnClose", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "close listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "net.serverOnClose",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "timeout") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "timeout listeners", 1,
-        (p) => p.kind === "netSocket", "use (socket) or ()", [NETSOCKET_T]);
-      return { kind: "libCall", fn: "http.serverOnTimeout", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "timeout listeners",
+        1,
+        (p) => p.kind === "netSocket",
+        "use (socket) or ()",
+        [NETSOCKET_T],
+      );
+      return {
+        kind: "libCall",
+        fn: "http.serverOnTimeout",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "listening") {
       // The deferred bind emit — listen(port, cb)'s event twin: fires
       // once after a successful listen; late registrations on an
       // already-listening server never fire (Node's once-per-listen).
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "listening listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "net.serverOnListening", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "listening listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "net.serverOnListening",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
+    }
+    if (event === "checkContinue" || event === "checkExpectation") {
+      // Expect handling: these listeners take the request instead of
+      // 'request' (checkContinue answers with res.writeContinue()).
+      const cb = lowerRequestHandlerArg(lowerer, args[1]!);
+      return {
+        kind: "libCall",
+        fn: "http.serverOnCheck",
+        args: [receiver, cb, once, boolLit(event === "checkExpectation", loc)],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "request") {
       // The 'request' event — http.createServer(handler)'s event twin, and
@@ -1319,25 +1956,64 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       // server with no HTTP parser (net.createServer) the registration is
       // Node-honest dead weight: the event never fires there either.
       const cb = lowerRequestHandlerArg(lowerer, args[1]!);
-      return { kind: "libCall", fn: "http.serverOnRequest", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.serverOnRequest",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "stream") {
       // The h2c server's request event: (stream, headers, flags). The
       // adapter builds the headers record from the pairs the runtime
       // hands over. Dead weight on a non-h2 server (never fires).
-      const cb = h2HeadersCallbackAdapter(lowerer, args[1]!, "stream listeners", "http2Stream", false, loc);
-      return { kind: "libCall", fn: "http2.serverOnStream", args: [receiver, cb, once], type: VOID, loc };
+      const cb = h2HeadersCallbackAdapter(
+        lowerer,
+        args[1]!,
+        "stream listeners",
+        "http2Stream",
+        false,
+        loc,
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.serverOnStream",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
+    }
+    if (event === "drop") {
+      // A connection past maxConnections, with its local and remote
+      // addresses.
+      return {
+        kind: "libCall",
+        fn: "net.serverOnDrop",
+        args: [receiver, lowerSocketDynListener(lowerer, args[1]!, "drop listeners"), once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "session") {
       // The h2c server's per-connection session event: (session). The
       // result is voidized; the handle passes by reference.
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "session listeners", 1,
+        lowerer,
+        args[1]!,
+        "session listeners",
+        1,
         (p) => p.kind === "http2Session",
         "use (session) or ()",
         [HTTP2SESSION_T],
       );
-      return { kind: "libCall", fn: "http2.serverOnSession", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.serverOnSession",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "connect") {
       // HTTP CONNECT — the tunneling handover: (req, socket, head), fired
@@ -1380,7 +2056,13 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           "connect listeners whose parameters are not (req: IncomingMessage, socket: Socket — or a union carrying the Socket arm, the h2 compat shape, head: Buffer)",
         );
       }
-      return { kind: "libCall", fn: "http.serverOnConnect", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.serverOnConnect",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "upgrade") {
       // The WebSocket handover: (req, socket, head) — Node fires it
@@ -1415,7 +2097,13 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           "upgrade listeners whose parameters are not (req: IncomingMessage, socket: Socket, head: Buffer)",
         );
       }
-      return { kind: "libCall", fn: "http.serverOnUpgrade", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.serverOnUpgrade",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "sessionError") {
       const cb = lowerer.lowerExpr(args[1]!);
@@ -1427,20 +2115,28 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
         );
       }
       const [err, session] = cb.type.params;
-      if ((err !== undefined && !(err.kind === "object" && err.className === "%Error")) ||
-          (session !== undefined && session.kind !== "http2Session")) {
+      if (
+        (err !== undefined && !(err.kind === "object" && err.className === "%Error")) ||
+        (session !== undefined && session.kind !== "http2Session")
+      ) {
         lowerer.unsupported(
           "SC1090",
           args[1]!,
           "sessionError listeners whose parameters are not (error: Error, session: ServerHttp2Session)",
         );
       }
-      return { kind: "libCall", fn: "http2.serverOnSessionError", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.serverOnSessionError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     lowerer.noLowering(
       `server.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
       args[0]!,
-      '"connection", "request", "stream", "session", "upgrade", "connect", "error", "close", "listening", and "sessionError" are the supported server events (as literals)',
+      '"connection", "request", "checkContinue", "checkExpectation", "drop", "stream", "session", "upgrade", "connect", "error", "close", "listening", and "sessionError" are the supported server events (as literals)',
     );
   }
   if (name === "emit") {
@@ -1467,7 +2163,25 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
         "the second argument must be a net socket",
       );
     }
-    return { kind: "libCall", fn: "net.serverEmitConnection", args: [receiver, sock], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "net.serverEmitConnection",
+      args: [receiver, sock],
+      type: VOID,
+      loc,
+    };
+  }
+  if ((name === "ref" || name === "unref") && args.length === 0) {
+    // Whether the server keeps the event loop alive.
+    requireStatementPosition(lowerer, call, `server.${name}()`);
+    const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+    return {
+      kind: "libCall",
+      fn: "net.serverSetRef",
+      args: [receiver, boolLit(name === "ref", loc)],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "address") {
     // The full AddressInfo record (the dgram.address materialization).
@@ -1475,53 +2189,260 @@ function lowerNetServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // the property path; this is the record-valued remainder (`const a =
     // server.address()` — the listen-callback shape).
     if (args.length !== 0) {
-      lowerer.noLowering(`address with ${args.length} arguments`, call, "address() takes no arguments");
+      lowerer.noLowering(
+        `address with ${args.length} arguments`,
+        call,
+        "address() takes no arguments",
+      );
     }
     const result = lowerer.mapTypeOf(lowerer.typeOf(call));
-    if (!result || !isAddressInfoRecord(lowerer, result)) {
+    if (result && isAddressInfoRecord(lowerer, result)) {
+      const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+      if (unixListenReachable(lowerer)) {
+        // A Unix-socket server's address() is its path, which this record
+        // cannot hold: the check throws for one before the record reads.
+        const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
+        const server = (): IrExpr => varRef(local.id, NETSERVER_T, loc);
+        return {
+          kind: "seqExpr",
+          stmts: [
+            { kind: "varDecl", localId: local.id, init: receiver, loc },
+            {
+              kind: "exprStmt",
+              expr: {
+                kind: "libCall",
+                fn: "net.serverAddressCheck",
+                args: [server()],
+                type: VOID,
+                loc,
+              },
+              loc,
+            },
+          ],
+          result: { kind: "libCall", fn: "net.serverAddress", args: [server()], type: result, loc },
+          type: result,
+          loc,
+        };
+      }
+      return { kind: "libCall", fn: "net.serverAddress", args: [receiver], type: result, loc };
+    }
+    // @types/node's `string | AddressInfo | null`: the record while the
+    // server listens (a TCP server never answers the pipe-path string),
+    // null otherwise, like Node.
+    const arms = result?.kind === "union" ? (lowerer.unions.get(result.unionId)?.arms ?? []) : [];
+    const record = arms.find((arm) => isAddressInfoRecord(lowerer, arm));
+    const nullTag = result?.kind === "union" ? lowerer.armTag(result.unionId, NULL_T) : -1;
+    if (!result || result.kind !== "union" || record === undefined || nullTag < 0) {
       lowerer.noLowering(
         "address() where the result is not the {address, family, port} record",
         call,
         "the AddressInfo shape is the supported result",
       );
     }
+    const unionId = result.unionId;
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
-    return { kind: "libCall", fn: "net.serverAddress", args: [receiver], type: result, loc };
+    const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
+    const server = varRef(local.id, NETSERVER_T, loc);
+    const recordArm: IrExpr = {
+      kind: "unionWrap",
+      unionId,
+      tag: lowerer.armTag(unionId, record),
+      value: { kind: "libCall", fn: "net.serverAddress", args: [server], type: record, loc },
+      type: result,
+      loc,
+    };
+    const stringTag = lowerer.armTag(unionId, STRING);
+    let listeningArm: IrExpr = recordArm;
+    const stmts: IrStmt[] = [{ kind: "varDecl", localId: local.id, init: receiver, loc }];
+    if (stringTag >= 0 && unixListenReachable(lowerer)) {
+      // Node answers a Unix-socket server's address() with its path.
+      const pathLocal = lowerer.declareHiddenLocal("%addressPath", STRING);
+      const path = (): IrExpr => varRef(pathLocal.id, STRING, loc);
+      stmts.push({
+        kind: "varDecl",
+        localId: pathLocal.id,
+        init: { kind: "libCall", fn: "net.serverUnixPath", args: [server], type: STRING, loc },
+        loc,
+      });
+      listeningArm = {
+        kind: "ternary",
+        cond: {
+          kind: "strEq",
+          negated: true,
+          left: path(),
+          right: strLit("", loc),
+          type: BOOL,
+          loc,
+        },
+        then: { kind: "unionWrap", unionId, tag: stringTag, value: path(), type: result, loc },
+        else_: recordArm,
+        type: result,
+        loc,
+      };
+    }
+    return {
+      kind: "seqExpr",
+      stmts,
+      result: {
+        kind: "ternary",
+        cond: { kind: "libCall", fn: "net.serverListening", args: [server], type: BOOL, loc },
+        then: listeningArm,
+        else_: {
+          kind: "unionWrap",
+          unionId,
+          tag: nullTag,
+          value: { kind: "unitLit", unit: "null", type: NULL_T, loc },
+          type: result,
+          loc,
+        },
+        type: result,
+        loc,
+      },
+      type: result,
+      loc,
+    };
   }
   lowerer.noLowering(
     `Server.${name}`,
     call,
-    "listen, close, address().port, emit(\"connection\", socket), and on/once of connection/request/upgrade/error/close/listening/sessionError are the supported Server members",
+    'listen, close, address().port, emit("connection", socket), and on/once of connection/request/upgrade/error/close/listening/sessionError are the supported Server members',
     lowerer.checker.getSymbolAtLocation(access.name),
   );
+}
+
+/** Whether a setEncoding call can reach some net.Socket in this program:
+ * `x.setEncoding(...)` or `x["setEncoding"](...)` where `x` is a socket
+ * or an untyped value. Sockets that never get an encoding keep the Buffer
+ * chunk path; with one, Node's 'data' chunks are strings. */
+function socketEncodingReachable(lowerer: Lowerer): boolean {
+  if (lowerer.socketEncodingReachable !== null) return lowerer.socketEncodingReachable;
+  let reachable = false;
+  for (const file of lowerer.program.getImplementationSourceFiles()) {
+    if (!file.text.includes("setEncoding")) continue;
+    ts.walkPreorder(file, (node) => {
+      if (reachable) return "skip";
+      if (!ts.isCallExpression(node)) return undefined;
+      const callee = node.expression;
+      const receiver =
+        ts.isPropertyAccessExpression(callee) && callee.name.text === "setEncoding"
+          ? callee.expression
+          : ts.isElementAccessExpression(callee) &&
+              ts.isStringLiteralLike(callee.argumentExpression) &&
+              callee.argumentExpression.text === "setEncoding"
+            ? callee.expression
+            : null;
+      if (receiver === null) return undefined;
+      const kind = lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(receiver))?.kind;
+      if (kind === undefined || kind === "netSocket" || kind === "dyn") reachable = true;
+      return undefined;
+    });
+    if (reachable) break;
+  }
+  lowerer.socketEncodingReachable = reachable;
+  return reachable;
+}
+
+/** Whether some server in the program may listen on a Unix socket: a
+ * `.listen(x, ...)` call on a server (or an untyped value) whose first
+ * argument is string-typed. Only then does address() check for the socket
+ * path, so other programs keep the record-only lowering. */
+function unixListenReachable(lowerer: Lowerer): boolean {
+  if (lowerer.unixListenReachable !== null) return lowerer.unixListenReachable;
+  let reachable = false;
+  for (const file of lowerer.program.getImplementationSourceFiles()) {
+    if (!file.text.includes("listen")) continue;
+    ts.walkPreorder(file, (node) => {
+      if (reachable) return "skip";
+      if (!ts.isCallExpression(node) || node.arguments.nodes.length === 0) return undefined;
+      const callee = node.expression;
+      if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "listen") return undefined;
+      const kind = lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(callee.expression))?.kind;
+      if (kind !== undefined && kind !== "netServer" && kind !== "dyn") return undefined;
+      const arg = lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(node.arguments.nodes[0]!));
+      // Only a string-typed argument lowers to listen(path) (an untyped
+      // one checks into a port).
+      if (arg?.kind === "string") reachable = true;
+      return undefined;
+    });
+    if (reachable) break;
+  }
+  lowerer.unixListenReachable = reachable;
+  return reachable;
+}
+
+/** An inline 'data' listener whose chunk parameter is typed Buffer, for a
+ * socket that may have an encoding set: the chunk binds as a checked
+ * dynamic value, so the body sees what Node passes (a string after
+ * setEncoding, a Buffer otherwise) whatever the annotation says. Null
+ * for other listener shapes. */
+function lowerEncodedDataListener(lowerer: Lowerer, node: ts.Expression): IrExpr | null {
+  let fn = node;
+  while (ts.isParenthesizedExpression(fn)) fn = fn.expression;
+  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return null;
+  if (fn.parameters.nodes.length !== 1) return null;
+  const param = fn.parameters.nodes[0]!;
+  if (!ts.isIdentifier(param.name) || param.initializer || param.dotDotDotToken) return null;
+  const symbol = lowerer.checker.getSymbolAtLocation(param.name);
+  if (symbol === undefined) return null;
+  const previousBinding = lowerer.runtimeOptionalBindingTypes.get(symbol);
+  const previousImplicit = lowerer.implicitParamTypes;
+  const implicit = new Map(previousImplicit ?? []);
+  implicit.set(symbol, lowerer.checker.getUnknownType());
+  lowerer.runtimeOptionalBindingTypes.set(symbol, DYN);
+  lowerer.implicitParamTypes = implicit;
+  try {
+    return lowerer.lowerExpr(fn);
+  } finally {
+    if (previousBinding === undefined) lowerer.runtimeOptionalBindingTypes.delete(symbol);
+    else lowerer.runtimeOptionalBindingTypes.set(symbol, previousBinding);
+    lowerer.implicitParamTypes = previousImplicit;
+  }
 }
 
 /** Method calls on net.Socket receivers: write/end/destroy/pipe and
  * on/once("data" | "end" | "close" | "error" | "connect"). Null for
  * other receivers. */
-function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerNetSocketMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "netSocket") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
+  if ((name === "ref" || name === "unref") && args.length === 0) {
+    // Whether the socket keeps the event loop alive.
+    requireStatementPosition(lowerer, call, `socket.${name}()`);
+    const receiver = lowerer.lowerExpr(access.expression);
+    return {
+      kind: "libCall",
+      fn: "net.sockSetRef",
+      args: [receiver, boolLit(name === "ref", loc)],
+      type: VOID,
+      loc,
+    };
+  }
   if (name === "write" || name === "end") {
     requireStatementPosition(lowerer, call, `socket.${name}(...)`);
     // write(chunk, encoding) — the two-argument encoding form: 'buffer'
-    // beside a string chunk is Node's stream_base typecheck ("Second
-    // argument must be a buffer", thrown synchronously on an established
-    // socket — the invalid-input probes' shape); utf8 spellings are the
-    // plain write (that IS the encoding written); a Buffer chunk ignores
-    // the encoding like Node does. Other encodings keep the fence.
+    // beside a string chunk is Writable's encoding check (a synchronous
+    // ERR_UNKNOWN_ENCODING TypeError, "Unknown encoding: buffer" — the
+    // invalid-input probes' shape); utf8 spellings are the plain write
+    // (that IS the encoding written); a Buffer chunk ignores the encoding
+    // like Node does. Other encodings keep the fence.
     if (name === "write" && args.length === 2) {
       const encT = lowerer.typeOf(args[1]!);
       const chunkT = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
       if (encT.isStringLiteralType() && chunkT !== null) {
-        if (encT.value === "buffer" && chunkT.kind === "string" &&
-            isJsSourceFile(call.getSourceFile())) {
+        if (
+          encT.value === "buffer" &&
+          chunkT.kind === "string" &&
+          isJsSourceFile(ts.getSourceFileOfNode(call))
+        ) {
           lowerer.lowerExpr(args[0]!); // evaluation order (effect-free in practice)
-          return nodeThrowExpr(1, "ERR_INVALID_ARG_TYPE", "Second argument must be a buffer", VOID, loc);
+          return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", "Unknown encoding: buffer", VOID, loc);
         }
         const passthrough =
           (chunkT.kind === "string" && (encT.value === "utf8" || encT.value === "utf-8")) ||
@@ -1533,6 +2454,85 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           return { kind: "libCall", fn, args: [socket, chunk], type: VOID, loc };
         }
       }
+    }
+    // A trailing callback: write's runs once the data is flushed (with
+    // null for the error), end's once the socket finishes ('finish').
+    const last = args.length > 0 ? args[args.length - 1]! : null;
+    if (
+      last !== null &&
+      args.length <= 2 &&
+      (name === "end" || args.length === 2) &&
+      lowerer.checker.getCallSignatures(lowerer.typeOf(last)).length > 0
+    ) {
+      const sockLocal = lowerer.declareHiddenLocal("%sockCb", NETSOCKET_T);
+      const stmts: IrStmt[] = [
+        {
+          kind: "varDecl",
+          localId: sockLocal.id,
+          init: coerceToHandle(lowerer, access.expression, NETSOCKET_T),
+          loc,
+        },
+      ];
+      const receiver = (): IrExpr => ({
+        kind: "varRef",
+        localId: sockLocal.id,
+        type: NETSOCKET_T,
+        loc,
+      });
+      const dataNode = args.length === 2 ? args[0]! : null;
+      let main: IrExpr = {
+        kind: "libCall",
+        fn: "net.sockEnd",
+        args: [receiver()],
+        type: VOID,
+        loc,
+      };
+      if (dataNode !== null) {
+        const data = lowerer.lowerExpr(dataNode);
+        const fn: IrLibFn | null =
+          data.type.kind === "string"
+            ? name === "write"
+              ? "net.sockWrite"
+              : "net.sockEndStr"
+            : data.type.kind === "bytes" && data.type.elem === "u8"
+              ? name === "write"
+                ? "net.sockWriteBytes"
+                : "net.sockEndBytes"
+              : data.type.kind === "dyn"
+                ? name === "write"
+                  ? "net.sockWriteDyn"
+                  : "net.sockEndDyn"
+                : null;
+        if (fn === null) {
+          lowerer.noLowering(
+            `${name} of '${lowerer.fmt(data.type)}' data`,
+            dataNode,
+            NARROW_DATA_HINT,
+          );
+        }
+        main = { kind: "libCall", fn, args: [receiver(), data], type: VOID, loc };
+      }
+      const cb = lowerer.lowerExpr(last);
+      let register: IrExpr;
+      if (cb.type.kind === "func" && cb.type.params.length === 0 && cb.type.ret.kind === "void") {
+        register = {
+          kind: "libCall",
+          fn: name === "write" ? "net.sockOnWriteFlush" : "net.sockOnFinish",
+          args: [receiver(), cb],
+          type: VOID,
+          loc,
+        };
+      } else {
+        register = {
+          kind: "libCall",
+          fn: name === "write" ? "net.sockOnWriteFlushDyn" : "net.sockOnFinishDyn",
+          args: [receiver(), lowerSocketDynListener(lowerer, last, `${name} callbacks`)],
+          type: VOID,
+          loc,
+        };
+      }
+      stmts.push({ kind: "exprStmt", expr: main, loc });
+      return { kind: "seqExpr", stmts, result: register, type: VOID, loc };
     }
     const maxArgs = name === "write" ? 1 : 1;
     const minArgs = name === "write" ? 1 : 0;
@@ -1564,12 +2564,20 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const fn: IrLibFn = name === "write" ? "net.sockWriteDyn" : "net.sockEndDyn";
       return { kind: "libCall", fn, args: [receiver, data], type: VOID, loc };
     }
-    lowerer.noLowering(`${name} of '${lowerer.fmt(data.type)}' data`, args[0] ?? call, NARROW_DATA_HINT);
+    lowerer.noLowering(
+      `${name} of '${lowerer.fmt(data.type)}' data`,
+      args[0] ?? call,
+      NARROW_DATA_HINT,
+    );
   }
   if (name === "destroy") {
     requireStatementPosition(lowerer, call, "socket.destroy()");
     if (args.length !== 0) {
-      lowerer.noLowering(`destroy with ${args.length} arguments`, call, "destroy() takes no arguments here");
+      lowerer.noLowering(
+        `destroy with ${args.length} arguments`,
+        call,
+        "destroy() takes no arguments here",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockDestroy", args: [receiver], type: VOID, loc };
@@ -1578,7 +2586,11 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // The req twin: utf8 flips 'data' delivery to strings.
     requireStatementPosition(lowerer, call, "socket.setEncoding(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`setEncoding with ${args.length} arguments`, call, "the supported form is setEncoding(encoding)");
+      lowerer.noLowering(
+        `setEncoding with ${args.length} arguments`,
+        call,
+        "the supported form is setEncoding(encoding)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     const enc = lowerer.lowerExprExpecting(args[0]!, STRING);
@@ -1586,16 +2598,61 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "setTimeout") {
     requireStatementPosition(lowerer, call, "socket.setTimeout(...)");
-    if (args.length !== 1) {
+    if (args.length !== 1 && args.length !== 2) {
       lowerer.noLowering(
         `setTimeout with ${args.length} arguments`,
         call,
-        "the supported form is setTimeout(ms) — register the callback separately: socket.once('timeout', ...)",
+        "the supported forms are setTimeout(ms) and setTimeout(ms, callback)",
       );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     const ms = lowerer.lowerExprExpecting(args[0]!, F64);
+    if (args.length === 2) {
+      // Node adds the callback as a once('timeout') listener (removes it
+      // for 0); msecs is checked first either way.
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "setTimeout callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "net.sockSetTimeoutCb",
+        args: [receiver, ms, cb],
+        type: VOID,
+        loc,
+      };
+    }
     return { kind: "libCall", fn: "net.sockSetTimeout", args: [receiver, ms], type: VOID, loc };
+  }
+  if (name === "setKeepAlive") {
+    // SO_KEEPALIVE plus the initial delay (whole seconds, at least 1);
+    // Node's defaults are false and 0. Answers the socket.
+    if (args.length > 2) {
+      lowerer.noLowering(
+        `setKeepAlive with ${args.length} arguments`,
+        call,
+        "the form is setKeepAlive(enable?, initialDelay?)",
+      );
+    }
+    const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
+    const enable: IrExpr =
+      args.length >= 1 ? lowerer.lowerExprExpecting(args[0]!, BOOL) : boolLit(false, loc);
+    const delay: IrExpr =
+      args.length === 2
+        ? lowerer.lowerExprExpecting(args[1]!, F64)
+        : { kind: "numLit", value: 0, type: F64, loc };
+    return {
+      kind: "libCall",
+      fn: "net.sockSetKeepAlive",
+      args: [receiver, enable, delay],
+      type: NETSOCKET_T,
+      loc,
+    };
   }
   if (name === "pause" || name === "resume") {
     // Flow control (the struct's flag comments in scr_net.c): pause holds
@@ -1613,20 +2670,109 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // TCP_NODELAY on the live fd; missing/undefined means true (Node).
     // Answers the socket, Node's chaining.
     if (args.length > 1) {
-      lowerer.noLowering(`setNoDelay with ${args.length} arguments`, call, "the form is setNoDelay(noDelay?)");
+      lowerer.noLowering(
+        `setNoDelay with ${args.length} arguments`,
+        call,
+        "the form is setNoDelay(noDelay?)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
-    const enable: IrExpr = args.length === 1
-      ? lowerer.lowerExprExpecting(args[0]!, BOOL)
-      : boolLit(true, loc);
-    return { kind: "libCall", fn: "net.sockSetNoDelay", args: [receiver, enable], type: NETSOCKET_T, loc };
+    const enable: IrExpr =
+      args.length === 1 ? lowerer.lowerExprExpecting(args[0]!, BOOL) : boolLit(true, loc);
+    return {
+      kind: "libCall",
+      fn: "net.sockSetNoDelay",
+      args: [receiver, enable],
+      type: NETSOCKET_T,
+      loc,
+    };
+  }
+  if ((name === "getProtocol" || name === "getCipher") && args.length === 0) {
+    // TLSSocket.getProtocol(): "TLSv1.2"/"TLSv1.3" or null;
+    // getCipher(): { name, standardName, version }.
+    const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
+    const value: IrExpr = {
+      kind: "libCall",
+      fn: name === "getProtocol" ? "tls.sockGetProtocol" : "tls.sockGetCipher",
+      args: [receiver],
+      type: DYN,
+      loc,
+    };
+    const declared = lowerer.mapTypeOf(lowerer.typeOf(call));
+    return declared === null || declared.kind === "dyn"
+      ? value
+      : lowerer.coerceInto(call, value, declared);
+  }
+  {
+    const certificate = lowerTlsCertificateCall(lowerer, call, name, () =>
+      coerceToHandle(lowerer, access.expression, NETSOCKET_T),
+    );
+    if (certificate) return certificate;
+  }
+  if (name === "isSessionReused" && args.length === 0) {
+    // TLSSocket.isSessionReused(): the client never offers a cached
+    // session (no session resumption, a documented TLS divergence), so
+    // no handshake resumes one. A plain socket asserted to be a
+    // TLSSocket answers false too, where Node has no such method.
+    const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "exprStmt", expr: receiver, loc }],
+      result: boolLit(false, loc),
+      type: BOOL,
+      loc,
+    };
+  }
+  if (name === "resetAndDestroy") {
+    // An RST close; a connecting socket resets once it connects. Answers
+    // the socket, Node's chaining.
+    if (args.length !== 0) {
+      lowerer.noLowering(
+        `resetAndDestroy with ${args.length} arguments`,
+        call,
+        "the form is resetAndDestroy()",
+      );
+    }
+    const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
+    return {
+      kind: "libCall",
+      fn: "net.sockResetAndDestroy",
+      args: [receiver],
+      type: NETSOCKET_T,
+      loc,
+    };
+  }
+  if (name === "address") {
+    // { address, family, port } or {} (connecting or destroyed): the
+    // declared AddressInfo | {} maps to a dyn value.
+    if (args.length !== 0) {
+      lowerer.noLowering(
+        `address with ${args.length} arguments`,
+        call,
+        "address() takes no arguments",
+      );
+    }
+    const result = lowerer.mapTypeOf(lowerer.typeOf(call));
+    if (result?.kind !== "dyn") {
+      lowerer.noLowering(
+        "socket.address() where the result is not AddressInfo | {}",
+        call,
+        "use the declared AddressInfo | {} result, and narrow it with a type assertion",
+      );
+    }
+    const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockAddress", args: [receiver], type: DYN, loc };
   }
   if (name === "destroySoon") {
     // end() now, destroy once the FIN actually flushed — Node's
     // 'finish'-then-destroy.
     requireStatementPosition(lowerer, call, "socket.destroySoon()");
     if (args.length !== 0) {
-      lowerer.noLowering(`destroySoon with ${args.length} arguments`, call, "the form is destroySoon()");
+      lowerer.noLowering(
+        `destroySoon with ${args.length} arguments`,
+        call,
+        "the form is destroySoon()",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockDestroySoon", args: [receiver], type: VOID, loc };
@@ -1636,19 +2782,28 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // `Buffer | null` union: exactly n buffered bytes, or null (Node's
     // less-than-n answer); read() drains the whole buffer.
     if (args.length > 1) {
-      lowerer.noLowering(`read with ${args.length} arguments`, call, "the supported forms are read() and read(n)");
+      lowerer.noLowering(
+        `read with ${args.length} arguments`,
+        call,
+        "the supported forms are read() and read(n)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
-    const n: IrExpr = args.length === 1
-      ? lowerer.lowerExprExpecting(args[0]!, F64)
-      : { kind: "numLit", value: 0, type: F64, loc };
+    const n: IrExpr =
+      args.length === 1
+        ? lowerer.lowerExprExpecting(args[0]!, F64)
+        : { kind: "numLit", value: 0, type: F64, loc };
     const type: IrType = { kind: "union", unionId: lowerer.unions.intern([BYTES_U8, NULL_T]) };
     return { kind: "libCall", fn: "net.sockRead", args: [receiver, n], type, loc };
   }
   if (name === "unshift") {
     requireStatementPosition(lowerer, call, "socket.unshift(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`unshift with ${args.length} arguments`, call, "the supported form is unshift(buffer)");
+      lowerer.noLowering(
+        `unshift with ${args.length} arguments`,
+        call,
+        "the supported form is unshift(buffer)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     const data = lowerer.lowerExpr(args[0]!);
@@ -1664,7 +2819,11 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   if (name === "pipe") {
     requireStatementPosition(lowerer, call, "socket.pipe(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`pipe with ${args.length} arguments`, call, "the supported form is pipe(destination)");
+      lowerer.noLowering(
+        `pipe with ${args.length} arguments`,
+        call,
+        "the supported form is pipe(destination)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     const dst = lowerer.lowerExpr(args[0]!);
@@ -1689,8 +2848,57 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = coerceToHandle(lowerer, access.expression, NETSOCKET_T);
     if (event === "data") {
+      const sigs = lowerer.checker.getCallSignatures(lowerer.typeOf(args[1]!));
+      const firstParam = sigs.length === 1 ? sigs[0]!.getParameters()[0] : undefined;
+      const param =
+        firstParam !== undefined
+          ? lowerer.mapTypeOf(lowerer.checker.getTypeOfSymbol(firstParam))
+          : null;
+      if (
+        param !== null &&
+        param.kind !== "dyn" &&
+        !(param.kind === "bytes" && param.elem === "u8")
+      ) {
+        // A chunk typed string (or string | Buffer): the listener takes
+        // the chunk through a checked boundary, so a string arrives after
+        // setEncoding and a Buffer without it fails the check instead of
+        // being decoded.
+        const boxed = lowerSocketDynListener(lowerer, args[1]!, "data listeners");
+        const cb: IrExpr = { kind: "dynCheck", value: boxed, type: funcOf([DYN], VOID), loc };
+        return {
+          kind: "libCall",
+          fn: "net.sockOnData",
+          args: [receiver, cb, once],
+          type: VOID,
+          loc,
+        };
+      }
+      if (param !== null && param.kind === "bytes" && socketEncodingReachable(lowerer)) {
+        const encoded = lowerEncodedDataListener(lowerer, args[1]!);
+        // A listener defined elsewhere keeps its Buffer parameter; it takes
+        // the chunk through the checked boundary, so a string chunk fails
+        // the check instead of arriving as a Buffer.
+        const cb: IrExpr =
+          encoded ??
+          ({
+            kind: "dynCheck",
+            value: lowerSocketDynListener(lowerer, args[1]!, "data listeners"),
+            type: funcOf([DYN], VOID),
+            loc,
+          } as IrExpr);
+        return {
+          kind: "libCall",
+          fn: "net.sockOnData",
+          args: [receiver, cb, once],
+          type: VOID,
+          loc,
+        };
+      }
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "data listeners", 1,
+        lowerer,
+        args[1]!,
+        "data listeners",
+        1,
         (p) => p.kind === "bytes" && p.elem === "u8",
         "use (chunk: Buffer) or ()",
         [DYN],
@@ -1699,28 +2907,91 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     }
     if (event === "error") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "error listeners", 1,
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
         (p) => p.kind === "object" && p.className === "%Error",
         "use (err) or ()",
         [ERROR_T],
       );
-      return { kind: "libCall", fn: "net.sockOnError", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "net.sockOnError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
-    if (event === "end" || event === "close" || event === "connect" || event === "timeout" ||
-        event === "readable") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, `${event} listeners`, 0, () => false, "use ()", []);
+    if (
+      event === "close" &&
+      lowerer.checker
+        .getCallSignatures(lowerer.typeOf(args[1]!))
+        .some((sig) => sig.getParameters().length > 0)
+    ) {
+      // close(hadError): true when the socket closed because of an error.
+      return {
+        kind: "libCall",
+        fn: "net.sockOnCloseDyn",
+        args: [receiver, lowerSocketDynListener(lowerer, args[1]!, "close listeners"), once],
+        type: VOID,
+        loc,
+      };
+    }
+    if (
+      event === "end" ||
+      event === "close" ||
+      event === "connect" ||
+      event === "ready" ||
+      event === "timeout" ||
+      event === "readable"
+    ) {
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       const fn: IrLibFn =
-        event === "end" ? "net.sockOnEnd"
-        : event === "close" ? "net.sockOnClose"
-        : event === "timeout" ? "net.sockOnTimeout"
-        : event === "readable" ? "net.sockOnReadable"
-        : "net.sockOnConnect";
+        event === "end"
+          ? "net.sockOnEnd"
+          : event === "close"
+            ? "net.sockOnClose"
+            : event === "timeout"
+              ? "net.sockOnTimeout"
+              : event === "readable"
+                ? "net.sockOnReadable"
+                : event === "ready"
+                  ? "net.sockOnReady"
+                  : "net.sockOnConnect";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
+    }
+    if (event === "lookup") {
+      // (err, address, family, host) after the host name resolves, before
+      // the connect: once per resolved address, or once with the error.
+      return {
+        kind: "libCall",
+        fn: "net.sockOnLookup",
+        args: [receiver, lowerSocketDynListener(lowerer, args[1]!, "lookup listeners"), once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "finish") {
       // Fires once when the FIN goes out — once either way (the event
       // happens at most once per socket).
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "finish listeners", 0, () => false, "use ()", []);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "finish listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       return { kind: "libCall", fn: "net.sockOnFinish", args: [receiver, cb], type: VOID, loc };
     }
     if (event === "secureConnect") {
@@ -1728,30 +2999,73 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       // 'connect' list already fires at establishment (scr_net.c's
       // transport pump); the runtime gates on the transport so a plain
       // socket's registration never fires — Node's exact split.
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "secureConnect listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "tls.sockOnSecureConnect", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "secureConnect listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "tls.sockOnSecureConnect",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
+    }
+    if (event === "secure") {
+      // The handshake's completion on a TLS socket (after secureConnect on
+      // a client); plain sockets never fire it.
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "secure listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "tls.sockOnSecure",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "session") {
       // The received-ticket event: fires once per TLS client socket with
       // the serialized session (a Buffer); plain sockets never fire it.
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "session listeners", 1,
+        lowerer,
+        args[1]!,
+        "session listeners",
+        1,
         (p) => p.kind === "bytes" && p.elem === "u8",
         "use (session: Buffer) or ()",
         [DYN],
       );
-      return { kind: "libCall", fn: "tls.sockOnSession", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "tls.sockOnSession",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     lowerer.noLowering(
       `socket.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
       args[0]!,
-      '"data", "end", "close", "error", "connect", "timeout", "readable", "secureConnect", and "session" are the supported socket events (as literals)',
+      '"data", "end", "close", "error", "connect", "lookup", "ready", "timeout", "readable", "secureConnect", "secure", and "session" are the supported socket events (as literals)',
     );
   }
   lowerer.noLowering(
     `Socket.${name}`,
     call,
-    "write, end, destroy, pipe, setTimeout, remoteAddress, read, unshift, and on/once of data/end/close/error/connect/timeout/readable are the supported Socket members",
+    "write, end, destroy, pipe, setTimeout, setKeepAlive, setNoDelay, the address fields, read, unshift, and on/once of data/end/close/error/connect/ready/timeout/readable are the supported Socket members",
     lowerer.checker.getSymbolAtLocation(access.name),
   );
 }
@@ -1759,9 +3073,13 @@ function lowerNetSocketMethodCall(lowerer: Lowerer, call: ts.CallExpression,
 /** The method-call dispatch for both server-surface receiver kinds — one
  * entry in lower-calls.ts's intrinsic chain (the lowerChildMethodCall
  * slot). Null when the receiver is neither. */
-export function lowerServerMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
-  if (call.questionDotToken || (access.questionDotToken && !lowerer.chainHandled.has(access))) return null;
+export function lowerServerMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
+  if (call.questionDotToken || (access.questionDotToken && !lowerer.chainHandled.has(access)))
+    return null;
   return (
     lowerServerCloseBind(lowerer, call, access) ??
     lowerNetServerMethodCall(lowerer, call, access) ??
@@ -1786,6 +3104,7 @@ function headersSnapshotHelper(lowerer: Lowerer, shapeId: string, loc: SrcLoc): 
     libCall: "http.reqHeaderPairs",
     params: [{ localId: "r.0", name: "r", type: HTTPREQ_T }],
     callArgs: [varRef("r.0", HTTPREQ_T, loc)],
+    listKey: { name: "set-cookie", libCall: "http.reqHeaderList" },
   });
 }
 
@@ -1798,12 +3117,17 @@ function trailersSnapshotHelper(lowerer: Lowerer, shapeId: string, loc: SrcLoc):
   });
 }
 
-function distinctSnapshotHelper(lowerer: Lowerer, shapeId: string, loc: SrcLoc,
-  collection: "headersDistinct" | "trailersDistinct",): string | null {
+function distinctSnapshotHelper(
+  lowerer: Lowerer,
+  shapeId: string,
+  loc: SrcLoc,
+  collection: "headersDistinct" | "trailersDistinct",
+): string | null {
   return pairsSnapshotHelper(lowerer, shapeId, loc, {
     keyPrefix: collection,
     libCall: collection === "headersDistinct" ? "http.reqHeaderPairs" : "http.reqTrailerPairs",
-    lookupValue: collection === "headersDistinct" ? "http.reqHeaderValues" : "http.reqTrailerValues",
+    lookupValue:
+      collection === "headersDistinct" ? "http.reqHeaderValues" : "http.reqTrailerValues",
     params: [{ localId: "r.0", name: "r", type: HTTPREQ_T }],
     callArgs: [varRef("r.0", HTTPREQ_T, loc)],
   });
@@ -1815,18 +3139,33 @@ function distinctSnapshotHelper(lowerer: Lowerer, shapeId: string, loc: SrcLoc,
 function h2EndStreamOption(lowerer: Lowerer, node: ts.Expression | undefined): boolean | undefined {
   if (node === undefined) return undefined;
   if (!ts.isObjectLiteralExpression(node)) {
-    lowerer.noLowering("h2 options argument", node, "pass the options as an object literal ({ endStream: true })");
+    lowerer.noLowering(
+      "h2 options argument",
+      node,
+      "pass the options as an object literal ({ endStream: true })",
+    );
   }
   let end: boolean | undefined;
-  for (const prop of (node as ts.ObjectLiteralExpression).properties) {
+  for (const prop of (node as ts.ObjectLiteralExpression).properties.nodes) {
     if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) {
-      lowerer.noLowering("h2 options with spreads or computed keys", prop, "use plain `name: value` entries");
+      lowerer.noLowering(
+        "h2 options with spreads or computed keys",
+        prop,
+        "use plain `name: value` entries",
+      );
     }
     const key = (prop.name as ts.Identifier).text;
     if (key === "endStream") {
-      if ((prop as ts.PropertyAssignment).initializer.kind === ts.SyntaxKind.TrueKeyword) end = true;
-      else if ((prop as ts.PropertyAssignment).initializer.kind === ts.SyntaxKind.FalseKeyword) end = false;
-      else lowerer.noLowering("a non-literal endStream option", (prop as ts.PropertyAssignment).initializer, "spell it true or false");
+      if ((prop as ts.PropertyAssignment).initializer.kind === ts.SyntaxKind.TrueKeyword)
+        end = true;
+      else if ((prop as ts.PropertyAssignment).initializer.kind === ts.SyntaxKind.FalseKeyword)
+        end = false;
+      else
+        lowerer.noLowering(
+          "a non-literal endStream option",
+          (prop as ts.PropertyAssignment).initializer,
+          "spell it true or false",
+        );
     }
     // Other keys (waitForTrailers, exclusive, parent, weight) are accepted
     // and ignored — the honest-defaults stance (they tune framing this
@@ -1837,30 +3176,57 @@ function h2EndStreamOption(lowerer: Lowerer, node: ts.Expression | undefined): b
 
 /** Method calls on ClientHttp2Session / ServerHttp2Session receivers.
  * Null for other receivers (the chain keeps trying). */
-function lowerH2SessionMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerH2SessionMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "http2Session") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
   const receiver = () => coerceToHandle(lowerer, access.expression, HTTP2SESSION_T);
   if (name === "request") {
-    const pairs = args.length >= 1 && !ts.isObjectLiteralExpression(args[0]!) === false && args.length >= 1
-      ? null : null;
+    const pairs =
+      args.length >= 1 && !ts.isObjectLiteralExpression(args[0]!) === false && args.length >= 1
+        ? null
+        : null;
     void pairs;
     // arg0: headers (optional), arg1: options (optional).
-    const headersArg = args.length >= 1 ? lowerH2HeadersArg(lowerer, args[0]!) : { kind: "arrayLit", elems: [], type: arrayOf(STRING), loc } as IrExpr;
+    const headersArg =
+      args.length >= 1
+        ? lowerH2HeadersArg(lowerer, args[0]!)
+        : ({ kind: "arrayLit", elems: [], type: arrayOf(STRING), loc } as IrExpr);
     const end = h2EndStreamOption(lowerer, args[1]);
-    const endF64: IrExpr = { kind: "numLit", value: end === undefined ? -1 : end ? 1 : 0, type: F64, loc };
-    return { kind: "libCall", fn: "http2.sessionRequest", args: [receiver(), headersArg, endF64], type: HTTP2STREAM_T, loc };
+    const endF64: IrExpr = {
+      kind: "numLit",
+      value: end === undefined ? -1 : end ? 1 : 0,
+      type: F64,
+      loc,
+    };
+    return {
+      kind: "libCall",
+      fn: "http2.sessionRequest",
+      args: [receiver(), headersArg, endF64],
+      type: HTTP2STREAM_T,
+      loc,
+    };
   }
   if (name === "close") {
     requireStatementPosition(lowerer, call, "session.close(...)");
     if (args.length === 0) {
       return { kind: "libCall", fn: "http2.sessionClose", args: [receiver()], type: VOID, loc };
     }
-    const { cb } = lowerCallbackArg(lowerer, args[0]!, "close callbacks", 0, () => false, "use ()", []);
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      args[0]!,
+      "close callbacks",
+      0,
+      () => false,
+      "use ()",
+      [],
+    );
     return { kind: "libCall", fn: "http2.sessionCloseCb", args: [receiver(), cb], type: VOID, loc };
   }
   if (name === "destroy") {
@@ -1877,18 +3243,45 @@ function lowerH2SessionMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       return { kind: "libCall", fn: "http2.sessionSettings0", args: [receiver()], type: VOID, loc };
     }
     const v = lowerer.lowerExpr(args[0]!);
-    const settingsArg: IrExpr = v.type.kind === "dyn" ? v : { kind: "dynFrom", value: v, type: DYN, loc };
+    const settingsArg: IrExpr =
+      v.type.kind === "dyn" ? v : { kind: "dynFrom", value: v, type: DYN, loc };
     if (args.length >= 2) {
       const cbV = lowerer.lowerExpr(args[1]!);
       if (cbV.type.kind === "dyn") {
         // The dyn callback keeps Node's exact (err, settings, duration)
         // shape — the runtime fires it through the checked-dynamic tree.
-        return { kind: "libCall", fn: "http2.sessionSettingsDynCb", args: [receiver(), settingsArg, cbV], type: VOID, loc };
+        return {
+          kind: "libCall",
+          fn: "http2.sessionSettingsDynCb",
+          args: [receiver(), settingsArg, cbV],
+          type: VOID,
+          loc,
+        };
       }
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "settings callbacks", 0, () => false, "use () — or a dynamic (mustCall-wrapped) callback for the (err, settings, duration) shape", []);
-      return { kind: "libCall", fn: "http2.sessionSettingsCb0", args: [receiver(), settingsArg, cb], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "settings callbacks",
+        0,
+        () => false,
+        "use () — or a dynamic (mustCall-wrapped) callback for the (err, settings, duration) shape",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionSettingsCb0",
+        args: [receiver(), settingsArg, cb],
+        type: VOID,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "http2.sessionSettings", args: [receiver(), settingsArg], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http2.sessionSettings",
+      args: [receiver(), settingsArg],
+      type: VOID,
+      loc,
+    };
   }
   if ((name === "on" || name === "once" || name === "addListener") && args.length === 2) {
     requireStatementPosition(lowerer, call, `session.${name}(...)`);
@@ -1902,68 +3295,175 @@ function lowerH2SessionMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const local = boolLit(event === "localSettings", loc);
       const cbV = lowerer.lowerExpr(args[1]!);
       if (cbV.type.kind === "dyn") {
-        return { kind: "libCall", fn: "http2.sessionOnSettingsDyn", args: [receiver(), cbV, once, local], type: VOID, loc };
+        return {
+          kind: "libCall",
+          fn: "http2.sessionOnSettingsDyn",
+          args: [receiver(), cbV, once, local],
+          type: VOID,
+          loc,
+        };
       }
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, `${event} listeners`, 0,
-        () => false, "use () — or a dynamic (mustCall-wrapped) listener for the (settings) payload", []);
-      return { kind: "libCall", fn: "http2.sessionOnSettings0", args: [receiver(), cb, once, local], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        0,
+        () => false,
+        "use () — or a dynamic (mustCall-wrapped) listener for the (settings) payload",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnSettings0",
+        args: [receiver(), cb, once, local],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "close") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "close listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "http2.sessionOnClose", args: [receiver(), cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "close listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnClose",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "error") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "error listeners", 1,
-        (p) => p.kind === "object" && p.className === "%Error", "use (err) or ()", [ERROR_T]);
-      return { kind: "libCall", fn: "http2.sessionOnError", args: [receiver(), cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
+        (p) => p.kind === "object" && p.className === "%Error",
+        "use (err) or ()",
+        [ERROR_T],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnError",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "connect") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "connect listeners", 2,
-        (p) => p.kind === "http2Session" || p.kind === "netSocket", "use (session, socket) or ()",
-        [HTTP2SESSION_T, NETSOCKET_T]);
-      return { kind: "libCall", fn: "http2.sessionOnConnect", args: [receiver(), cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "connect listeners",
+        2,
+        (p) => p.kind === "http2Session" || p.kind === "netSocket",
+        "use (session, socket) or ()",
+        [HTTP2SESSION_T, NETSOCKET_T],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnConnect",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "stream") {
-      const cb = h2HeadersCallbackAdapter(lowerer, args[1]!, "stream listeners", "http2Stream", false, loc);
-      return { kind: "libCall", fn: "http2.sessionOnStream", args: [receiver(), cb, once], type: VOID, loc };
+      const cb = h2HeadersCallbackAdapter(
+        lowerer,
+        args[1]!,
+        "stream listeners",
+        "http2Stream",
+        false,
+        loc,
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnStream",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "goaway") {
       const cb = lowerer.lowerExpr(args[1]!);
       if (cb.type.kind !== "func" || cb.type.ret.kind !== "void" || cb.type.params.length > 3) {
-        lowerer.unsupported("SC1090", args[1]!, "goaway listeners with more than three parameters or returning a value");
+        lowerer.unsupported(
+          "SC1090",
+          args[1]!,
+          "goaway listeners with more than three parameters or returning a value",
+        );
       }
       if (cb.type.params.some((p) => p.kind !== "f64" && p.kind !== "bytes")) {
-        lowerer.unsupported("SC1090", args[1]!, "goaway listeners whose parameters are not (errorCode, lastStreamID, opaqueData?)");
+        lowerer.unsupported(
+          "SC1090",
+          args[1]!,
+          "goaway listeners whose parameters are not (errorCode, lastStreamID, opaqueData?)",
+        );
       }
-      return { kind: "libCall", fn: "http2.sessionOnGoaway", args: [receiver(), voidizedCallback(lowerer, cb, loc), once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.sessionOnGoaway",
+        args: [receiver(), voidizedCallback(lowerer, cb, loc), once],
+        type: VOID,
+        loc,
+      };
     }
-    lowerer.noLowering(`session.${name}("${event ?? "?"}", ...)`, args[0]!,
-      '"close", "error", "connect", "stream", and "goaway" are the supported session events');
+    lowerer.noLowering(
+      `session.${name}("${event ?? "?"}", ...)`,
+      args[0]!,
+      '"close", "error", "connect", "stream", and "goaway" are the supported session events',
+    );
   }
-  lowerer.noLowering(`session.${name}`, call,
-    "close/destroy/request and on(\"close\"|\"error\"|\"connect\"|\"stream\"|\"goaway\") are the lowered session members");
+  lowerer.noLowering(
+    `session.${name}`,
+    call,
+    'close/destroy/request and on("close"|"error"|"connect"|"stream"|"goaway") are the lowered session members',
+  );
 }
 
 /** Method calls on ClientHttp2Stream / ServerHttp2Stream receivers. */
-function lowerH2StreamMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression, receiverOverride?: IrExpr,): IrExpr | null {
+function lowerH2StreamMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+  receiverOverride?: IrExpr,
+): IrExpr | null {
   const compatReqStream =
     ts.isPropertyAccessExpression(access.expression) &&
     access.expression.name.text === "stream" &&
     lowerer.mapTypeOf(lowerer.typeOf(access.expression.expression))?.kind === "httpReq";
-  if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "http2Stream" && !compatReqStream) return null;
+  if (
+    lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "http2Stream" &&
+    !compatReqStream
+  )
+    return null;
   if (!lowerer.isStdlibMember(access) && !compatReqStream) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
-  const receiver = () => receiverOverride ?? coerceToHandle(lowerer, access.expression, HTTP2STREAM_T);
+  const args = call.arguments.nodes;
+  const receiver = () =>
+    receiverOverride ?? coerceToHandle(lowerer, access.expression, HTTP2STREAM_T);
   if (name === "respond") {
     requireStatementPosition(lowerer, call, "stream.respond(...)");
-    const headersArg = args.length >= 1
-      ? lowerH2HeadersArg(lowerer, args[0]!)
-      : { kind: "arrayLit", elems: [], type: arrayOf(STRING), loc } as IrExpr;
+    const headersArg =
+      args.length >= 1
+        ? lowerH2HeadersArg(lowerer, args[0]!)
+        : ({ kind: "arrayLit", elems: [], type: arrayOf(STRING), loc } as IrExpr);
     const end = h2EndStreamOption(lowerer, args[1]);
-    return { kind: "libCall", fn: "http2.streamRespond", args: [receiver(), headersArg, boolLit(end ?? false, loc)], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http2.streamRespond",
+      args: [receiver(), headersArg, boolLit(end ?? false, loc)],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "write" || name === "end") {
     requireStatementPosition(lowerer, call, `stream.${name}(...)`);
@@ -1973,7 +3473,11 @@ function lowerH2StreamMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       // dropping a trailing closure arg (fire-and-forget — the finish
       // callback is not modeled here).
       if (!(name === "end" && args.length === 2)) {
-        lowerer.noLowering(`${name} with ${args.length} arguments`, call, `use ${name}(data${name === "write" ? "" : "?"})`);
+        lowerer.noLowering(
+          `${name} with ${args.length} arguments`,
+          call,
+          `use ${name}(data${name === "write" ? "" : "?"})`,
+        );
       }
     }
     if (args.length === 0) {
@@ -1982,22 +3486,50 @@ function lowerH2StreamMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const data = lowerer.lowerExpr(args[0]!);
     const isBytes = data.type.kind === "bytes";
     if (data.type.kind !== "string" && !isBytes) {
-      lowerer.noLowering(`${name} with '${lowerer.fmt(data.type)}' data`, args[0]!, "the chunk is a string or a Uint8Array here");
+      lowerer.noLowering(
+        `${name} with '${lowerer.fmt(data.type)}' data`,
+        args[0]!,
+        "the chunk is a string or a Uint8Array here",
+      );
     }
-    const fn: IrLibFn = name === "write"
-      ? (isBytes ? "http2.streamWriteBytes" : "http2.streamWrite")
-      : (isBytes ? "http2.streamEndBytes" : "http2.streamEndStr");
+    const fn: IrLibFn =
+      name === "write"
+        ? isBytes
+          ? "http2.streamWriteBytes"
+          : "http2.streamWrite"
+        : isBytes
+          ? "http2.streamEndBytes"
+          : "http2.streamEndStr";
     return { kind: "libCall", fn, args: [receiver(), data], type: VOID, loc };
   }
   if (name === "close") {
     requireStatementPosition(lowerer, call, "stream.close(...)");
-    const code: IrExpr = args.length >= 1 ? lowerer.lowerExpr(args[0]!) : { kind: "numLit", value: 0, type: F64, loc };
+    const code: IrExpr =
+      args.length >= 1 ? lowerer.lowerExpr(args[0]!) : { kind: "numLit", value: 0, type: F64, loc };
     if (code.type.kind !== "f64") {
-      lowerer.noLowering("stream.close with a non-numeric code", args[0]!, "the code is a number (http2.constants.NGHTTP2_*)");
+      lowerer.noLowering(
+        "stream.close with a non-numeric code",
+        args[0]!,
+        "the code is a number (http2.constants.NGHTTP2_*)",
+      );
     }
     if (args.length >= 2) {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "close callbacks", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "http2.streamCloseCb", args: [receiver(), code, cb], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "close callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.streamCloseCb",
+        args: [receiver(), code, cb],
+        type: VOID,
+        loc,
+      };
     }
     return { kind: "libCall", fn: "http2.streamClose", args: [receiver(), code], type: VOID, loc };
   }
@@ -2007,17 +3539,36 @@ function lowerH2StreamMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "setEncoding") {
     const enc = lowerer.lowerExpr(args[0]!);
-    if (enc.type.kind !== "string") lowerer.noLowering("setEncoding with a non-string encoding", args[0]!, "pass \"utf8\"");
+    if (enc.type.kind !== "string")
+      lowerer.noLowering("setEncoding with a non-string encoding", args[0]!, 'pass "utf8"');
     if (ts.isExpressionStatement(call.parent) || ts.isArrowFunction(call.parent)) {
-      return { kind: "libCall", fn: "http2.streamSetEncoding", args: [receiver(), enc], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.streamSetEncoding",
+        args: [receiver(), enc],
+        type: VOID,
+        loc,
+      };
     }
     // The chaining spelling (`client.request(h).setEncoding("utf8")`):
     // same write, the result is the receiver — Node's return-this.
-    return { kind: "libCall", fn: "http2.streamSetEncodingRet", args: [receiver(), enc], type: HTTP2STREAM_T, loc };
+    return {
+      kind: "libCall",
+      fn: "http2.streamSetEncodingRet",
+      args: [receiver(), enc],
+      type: HTTP2STREAM_T,
+      loc,
+    };
   }
   if (name === "resume" || name === "pause") {
     requireStatementPosition(lowerer, call, `stream.${name}(...)`);
-    return { kind: "libCall", fn: name === "resume" ? "http2.streamResume" : "http2.streamPause", args: [receiver()], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: name === "resume" ? "http2.streamResume" : "http2.streamPause",
+      args: [receiver()],
+      type: VOID,
+      loc,
+    };
   }
   if ((name === "on" || name === "once" || name === "addListener") && args.length === 2) {
     requireStatementPosition(lowerer, call, `stream.${name}(...)`);
@@ -2025,30 +3576,80 @@ function lowerH2StreamMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const evT = lowerer.typeOf(args[0]!);
     const event = evT.isStringLiteralType() ? evT.value : null;
     if (event === "data") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "data listeners", 1,
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "data listeners",
+        1,
         (p) => (p.kind === "bytes" && p.elem === "u8") || p.kind === "string" || p.kind === "dyn",
-        "use (chunk) or ()", [BYTES_U8]);
-      return { kind: "libCall", fn: "http2.streamOnData", args: [receiver(), cb, once], type: VOID, loc };
+        "use (chunk) or ()",
+        [BYTES_U8],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.streamOnData",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "end" || event === "close" || event === "aborted") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, `${event} listeners`, 0, () => false, "use ()", []);
-      const fn: IrLibFn = event === "end" ? "http2.streamOnEnd" : event === "close" ? "http2.streamOnClose" : "http2.streamOnAborted";
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      const fn: IrLibFn =
+        event === "end"
+          ? "http2.streamOnEnd"
+          : event === "close"
+            ? "http2.streamOnClose"
+            : "http2.streamOnAborted";
       return { kind: "libCall", fn, args: [receiver(), cb, once], type: VOID, loc };
     }
     if (event === "error") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "error listeners", 1,
-        (p) => p.kind === "object" && p.className === "%Error", "use (err) or ()", [ERROR_T]);
-      return { kind: "libCall", fn: "http2.streamOnError", args: [receiver(), cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
+        (p) => p.kind === "object" && p.className === "%Error",
+        "use (err) or ()",
+        [ERROR_T],
+      );
+      return {
+        kind: "libCall",
+        fn: "http2.streamOnError",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "response") {
       const cb = h2HeadersCallbackAdapter(lowerer, args[1]!, "response listeners", null, true, loc);
-      return { kind: "libCall", fn: "http2.streamOnResponse", args: [receiver(), cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.streamOnResponse",
+        args: [receiver(), cb, once],
+        type: VOID,
+        loc,
+      };
     }
-    lowerer.noLowering(`stream.${name}("${event ?? "?"}", ...)`, args[0]!,
-      '"data", "end", "close", "aborted", "error", and "response" are the supported stream events');
+    lowerer.noLowering(
+      `stream.${name}("${event ?? "?"}", ...)`,
+      args[0]!,
+      '"data", "end", "close", "aborted", "error", and "response" are the supported stream events',
+    );
   }
-  lowerer.noLowering(`stream.${name}`, call,
-    "respond/write/end/close/destroy/setEncoding/resume/pause and on(...) are the lowered stream members");
+  lowerer.noLowering(
+    `stream.${name}`,
+    call,
+    "respond/write/end/close/destroy/setEncoding/resume/pause and on(...) are the lowered stream members",
+  );
 }
 
 /** A compatibility request's `req.stream?.method(...)`: the static Node
@@ -2059,12 +3660,20 @@ export function lowerCompatReqStreamOptionalCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
 ): IrExpr | null {
-  if (!ts.isPropertyAccessExpression(call.expression) || !call.expression.questionDotToken) return null;
+  if (!ts.isPropertyAccessExpression(call.expression) || !call.expression.questionDotToken)
+    return null;
   const stream = call.expression.expression;
-  if (!ts.isPropertyAccessExpression(stream) || stream.name.text !== "stream" ||
-      lowerer.mapTypeOf(lowerer.typeOf(stream.expression))?.kind !== "httpReq") return null;
+  if (
+    !ts.isPropertyAccessExpression(stream) ||
+    stream.name.text !== "stream" ||
+    lowerer.mapTypeOf(lowerer.typeOf(stream.expression))?.kind !== "httpReq"
+  )
+    return null;
   const loc = locOf(call);
-  const unionT: IrType = { kind: "union", unionId: lowerer.unions.intern([HTTP2STREAM_T, UNDEFINED_T]) };
+  const unionT: IrType = {
+    kind: "union",
+    unionId: lowerer.unions.intern([HTTP2STREAM_T, UNDEFINED_T]),
+  };
   const guarded: IrExpr = {
     kind: "libCall",
     fn: "http.reqH2Stream",
@@ -2072,13 +3681,13 @@ export function lowerCompatReqStreamOptionalCall(
     type: unionT,
     loc,
   };
-  const id = `chain.${lowerer.chainCounter++}`;
-  const body = lowerH2StreamMethodCall(
-    lowerer,
-    call,
-    call.expression,
-    { kind: "chainRecv", id, type: HTTP2STREAM_T, loc },
-  );
+  const id = lowerer.closureName(loc, "", "chain");
+  const body = lowerH2StreamMethodCall(lowerer, call, call.expression, {
+    kind: "chainRecv",
+    id,
+    type: HTTP2STREAM_T,
+    loc,
+  });
   if (body === null) return null;
   return { kind: "optChain", id, receiver: guarded, body, type: VOID, loc };
 }
@@ -2087,7 +3696,10 @@ export function lowerCompatReqStreamOptionalCall(
  * randomBytes(n).toString(enc) precedent: the AddressInfo record between
  * the two reads never materializes; the runtime answers the bound port
  * directly. Null for every other property shape. */
-export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
+export function lowerServerProperty(
+  lowerer: Lowerer,
+  expr: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (expr.questionDotToken && !lowerer.chainHandled.has(expr)) return null;
   const loc = locOf(expr);
   // req.url / req.method — always-present strings on server requests;
@@ -2098,11 +3710,39 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
       const receiver = coerceToHandle(lowerer, expr.expression, NETSERVER_T);
       return { kind: "libCall", fn: "net.serverListening", args: [receiver], type: BOOL, loc };
     }
+    if (expr.name.text === "maxConnections" || expr.name.text === "dropMaxConnection") {
+      const receiver = coerceToHandle(lowerer, expr.expression, NETSERVER_T);
+      const value: IrExpr = {
+        kind: "libCall",
+        fn:
+          expr.name.text === "maxConnections"
+            ? "net.serverMaxConnectionsGet"
+            : "net.serverDropMaxConnectionGet",
+        args: [receiver],
+        type: DYN,
+        loc,
+      };
+      // The property's declared type: an earlier `= undefined` narrows
+      // the read's own type to undefined.
+      const sym = lowerer.checker.getSymbolAtLocation(expr.name);
+      const declared = lowerer.mapTypeOf(
+        sym ? lowerer.checker.getTypeOfSymbol(sym) : lowerer.typeOf(expr),
+      );
+      return declared === null || declared.kind === "dyn"
+        ? value
+        : lowerer.coerceInto(expr, value, declared);
+    }
     const field = httpServerTimeoutField(expr.name.text);
     if (field !== null) {
       const receiver = coerceToHandle(lowerer, expr.expression, NETSERVER_T);
       const selector: IrExpr = { kind: "numLit", value: field, type: F64, loc };
-      return { kind: "libCall", fn: "http.serverTimeoutGet", args: [receiver, selector], type: F64, loc };
+      return {
+        kind: "libCall",
+        fn: "http.serverTimeoutGet",
+        args: [receiver, selector],
+        type: F64,
+        loc,
+      };
     }
   }
   if (recvKind === "httpReq" && lowerer.isStdlibMember(expr)) {
@@ -2116,7 +3756,13 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
       // `number | undefined` — a real status on client responses, the
       // undefined arm on server requests (Node's IncomingMessage split).
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
-      return { kind: "libCall", fn: "http.reqStatusCode", args: [receiver], type: lowerer.withUndefinedArm(F64), loc };
+      return {
+        kind: "libCall",
+        fn: "http.reqStatusCode",
+        args: [receiver],
+        type: lowerer.withUndefinedArm(F64),
+        loc,
+      };
     }
     if (name === "socket" || name === "connection") {
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
@@ -2128,7 +3774,8 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     }
     if (name === "httpVersionMajor" || name === "httpVersionMinor") {
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
-      const fn: IrLibFn = name === "httpVersionMajor" ? "http.reqHttpVersionMajor" : "http.reqHttpVersionMinor";
+      const fn: IrLibFn =
+        name === "httpVersionMajor" ? "http.reqHttpVersionMajor" : "http.reqHttpVersionMinor";
       return { kind: "libCall", fn, args: [receiver], type: F64, loc };
     }
     if (name === "aborted" || name === "complete") {
@@ -2150,12 +3797,22 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
       // when the status line carried none), undefined on server requests
       // (the statusCode split).
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
-      return { kind: "libCall", fn: "http.reqStatusMessage", args: [receiver], type: lowerer.envValueType(), loc };
+      return {
+        kind: "libCall",
+        fn: "http.reqStatusMessage",
+        args: [receiver],
+        type: lowerer.envValueType(),
+        loc,
+      };
     }
     if (name === "stream") {
       const parent = expr.parent;
-      if (ts.isPropertyAccessExpression(parent) && parent.expression === expr &&
-          ts.isCallExpression(parent.parent) && parent.parent.expression === parent) {
+      if (
+        ts.isPropertyAccessExpression(parent) &&
+        parent.expression === expr &&
+        ts.isCallExpression(parent.parent) &&
+        parent.parent.expression === parent
+      ) {
         const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
         if (parent.questionDotToken) {
           const type: IrType = {
@@ -2188,15 +3845,22 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
         "compatibility requests do not expose their backing h2 stream/session yet; guarded method calls no-op and other reads have no lowering",
       );
     }
-    if (name === "headers" || name === "trailers" || name === "headersDistinct" || name === "trailersDistinct") {
+    if (
+      name === "headers" ||
+      name === "trailers" ||
+      name === "headersDistinct" ||
+      name === "trailersDistinct"
+    ) {
       // Whole-object reads materialize a typed snapshot record. Per-name
       // reads retain their direct lowerings.
       const mapped = lowerer.mapTypeOf(lowerer.typeOf(expr));
       if (mapped?.kind === "record") {
-        const helper = name === "headers"
-          ? headersSnapshotHelper(lowerer, mapped.shapeId, loc)
-          : name === "trailers" ? trailersSnapshotHelper(lowerer, mapped.shapeId, loc)
-          : distinctSnapshotHelper(lowerer, mapped.shapeId, loc, name);
+        const helper =
+          name === "headers"
+            ? headersSnapshotHelper(lowerer, mapped.shapeId, loc)
+            : name === "trailers"
+              ? trailersSnapshotHelper(lowerer, mapped.shapeId, loc)
+              : distinctSnapshotHelper(lowerer, mapped.shapeId, loc, name);
         if (helper !== null) {
           const receiver = coerceToHandle(lowerer, expr.expression, HTTPREQ_T);
           return { kind: "call", callee: helper, args: [receiver], type: mapped, loc };
@@ -2226,7 +3890,13 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     // KIND is a real socket either way, and `encrypted` on a socket has
     // exactly one meaning.
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
-    return { kind: "libCall", fn: "net.sockEncrypted", args: [receiver], type: lowerer.withUndefinedArm(BOOL), loc };
+    return {
+      kind: "libCall",
+      fn: "net.sockEncrypted",
+      args: [receiver],
+      type: lowerer.withUndefinedArm(BOOL),
+      loc,
+    };
   }
   if (recvKind === "netSocket" && expr.name.text === "authorized") {
     // TLSSocket.authorized — Node's verify verdict (false on plain
@@ -2235,6 +3905,26 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     // one meaning on a socket-kind receiver.
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "tls.sockAuthorized", args: [receiver], type: BOOL, loc };
+  }
+  if (
+    recvKind === "netSocket" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "alpnProtocol"
+  ) {
+    // TLSSocket.alpnProtocol: null before the handshake, then the
+    // negotiated protocol or false.
+    const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
+    const value: IrExpr = {
+      kind: "libCall",
+      fn: "tls.sockAlpnProtocol",
+      args: [receiver],
+      type: DYN,
+      loc,
+    };
+    const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+    return declared === null || declared.kind === "dyn"
+      ? value
+      : lowerer.coerceInto(expr, value, declared);
   }
   if (recvKind === "netSocket" && expr.name.text === "authorizationError") {
     // TLSSocket.authorizationError — the verify-failure CODE STRING
@@ -2257,7 +3947,11 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockWritable", args: [receiver], type: BOOL, loc };
   }
-  if (recvKind === "netSocket" && lowerer.isStdlibMember(expr) && expr.name.text === "bytesWritten") {
+  if (
+    recvKind === "netSocket" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "bytesWritten"
+  ) {
     // Every byte the write paths accepted (buffered included — Node
     // counts those too; plaintext on TLS sockets).
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
@@ -2268,41 +3962,115 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockReadable", args: [receiver], type: BOOL, loc };
   }
-  if (recvKind === "netSocket" && lowerer.isStdlibMember(expr) && expr.name.text === "remoteAddress") {
+  if (
+    recvKind === "netSocket" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "remoteAddress"
+  ) {
     // `string | undefined` — Node's read-time caching: a value read while
     // connected survives destroy; never-read sockets answer undefined
     // after close.
     const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
-    return { kind: "libCall", fn: "net.sockRemoteAddress", args: [receiver], type: lowerer.envValueType(), loc };
+    return {
+      kind: "libCall",
+      fn: "net.sockRemoteAddress",
+      args: [receiver],
+      type: lowerer.envValueType(),
+      loc,
+    };
   }
-  if (recvKind === "httpClientReq" && lowerer.isStdlibMember(expr) && expr.name.text === "destroyed") {
+  if (recvKind === "netSocket" && lowerer.isStdlibMember(expr)) {
+    const name = expr.name.text;
+    // The other address fields: the peer's cached like remoteAddress, the
+    // local ones read live (undefined while connecting and after close).
+    const field = [
+      "remotePort",
+      "remoteFamily",
+      "localAddress",
+      "localPort",
+      "localFamily",
+    ].indexOf(name);
+    if (field >= 0) {
+      const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
+      const value: IrExpr = {
+        kind: "libCall",
+        fn: "net.sockAddrField",
+        args: [receiver, { kind: "numLit", value: field, type: F64, loc }],
+        type: DYN,
+        loc,
+      };
+      const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+      return declared === null || declared.kind === "dyn"
+        ? value
+        : lowerer.coerceInto(expr, value, declared);
+    }
+    const scalar: { fn: IrLibFn; type: IrType } | null =
+      name === "bytesRead"
+        ? { fn: "net.sockBytesRead", type: F64 }
+        : name === "connecting"
+          ? { fn: "net.sockConnecting", type: BOOL }
+          : name === "pending"
+            ? { fn: "net.sockPending", type: BOOL }
+            : name === "readyState"
+              ? { fn: "net.sockReadyState", type: STRING }
+              : null;
+    if (scalar !== null) {
+      const receiver = coerceToHandle(lowerer, expr.expression, NETSOCKET_T);
+      return { kind: "libCall", fn: scalar.fn, args: [receiver], type: scalar.type, loc };
+    }
+  }
+  if (
+    recvKind === "httpClientReq" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "destroyed"
+  ) {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPCLIENTREQ_T);
     return { kind: "libCall", fn: "http.clientDestroyed", args: [receiver], type: BOOL, loc };
   }
-  if (recvKind === "httpClientReq" && lowerer.isStdlibMember(expr) &&
-      (expr.name.text === "socket" || expr.name.text === "connection")) {
+  if (
+    recvKind === "httpClientReq" &&
+    lowerer.isStdlibMember(expr) &&
+    (expr.name.text === "socket" || expr.name.text === "connection")
+  ) {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPCLIENTREQ_T);
     return { kind: "libCall", fn: "http.clientSocket", args: [receiver], type: NETSOCKET_T, loc };
   }
-  if (recvKind === "httpClientReq" && lowerer.isStdlibMember(expr) && expr.name.text === "writableCorked") {
+  if (
+    recvKind === "httpClientReq" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "writableCorked"
+  ) {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPCLIENTREQ_T);
     return { kind: "libCall", fn: "http.clientWritableCorked", args: [receiver], type: F64, loc };
   }
   if (recvKind === "httpClientReq" && lowerer.isStdlibMember(expr)) {
     const name = expr.name.text;
-    const strFn: IrLibFn | null = name === "method" ? "http.clientMethod"
-      : name === "path" ? "http.clientPath"
-      : name === "host" ? "http.clientHost"
-      : name === "protocol" ? "http.clientProtocol" : null;
+    const strFn: IrLibFn | null =
+      name === "method"
+        ? "http.clientMethod"
+        : name === "path"
+          ? "http.clientPath"
+          : name === "host"
+            ? "http.clientHost"
+            : name === "protocol"
+              ? "http.clientProtocol"
+              : null;
     if (strFn !== null) {
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPCLIENTREQ_T);
       return { kind: "libCall", fn: strFn, args: [receiver], type: STRING, loc };
     }
-    const boolFn: IrLibFn | null = name === "aborted" ? "http.clientAborted"
-      : name === "headersSent" ? "http.clientHeadersSent"
-      : name === "writableEnded" || name === "finished" ? "http.clientWritableEnded"
-      : name === "writableFinished" ? "http.clientWritableFinished"
-      : name === "reusedSocket" ? "http.clientReusedSocket" : null;
+    const boolFn: IrLibFn | null =
+      name === "aborted"
+        ? "http.clientAborted"
+        : name === "headersSent"
+          ? "http.clientHeadersSent"
+          : name === "writableEnded" || name === "finished"
+            ? "http.clientWritableEnded"
+            : name === "writableFinished"
+              ? "http.clientWritableFinished"
+              : name === "reusedSocket"
+                ? "http.clientReusedSocket"
+                : null;
     if (boolFn !== null) {
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPCLIENTREQ_T);
       return { kind: "libCall", fn: boolFn, args: [receiver], type: BOOL, loc };
@@ -2310,19 +4078,36 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
   }
   if (httpReqFieldCollection(lowerer, expr.expression) !== null) {
     const collection = httpReqFieldCollection(lowerer, expr.expression)!;
-    const receiver = coerceToHandle(lowerer, (expr.expression as ts.PropertyAccessExpression).expression, HTTPREQ_T);
+    const receiver = coerceToHandle(
+      lowerer,
+      (expr.expression as ts.PropertyAccessExpression).expression,
+      HTTPREQ_T,
+    );
     const key: IrExpr = { kind: "strLit", value: expr.name.text, type: STRING, loc };
-    const fn: IrLibFn = collection === "headers" ? "http.reqHeader"
-      : collection === "trailers" ? "http.reqTrailer"
-      : collection === "headersDistinct" ? "http.reqHeaderValues" : "http.reqTrailerValues";
-    const type = collection.endsWith("Distinct") ? lowerer.withUndefinedArm(arrayOf(STRING)) : lowerer.envValueType();
+    const list = isSetCookieRead(lowerer, expr, collection, key);
+    const fn: IrLibFn =
+      collection === "headers" && !list
+        ? "http.reqHeader"
+        : collection === "trailers"
+          ? "http.reqTrailer"
+          : collection === "headersDistinct" || list
+            ? "http.reqHeaderValues"
+            : "http.reqTrailerValues";
+    const type =
+      collection.endsWith("Distinct") || list
+        ? lowerer.withUndefinedArm(arrayOf(STRING))
+        : lowerer.envValueType();
     return { kind: "libCall", fn, args: [receiver, key], type, loc };
   }
   if (recvKind === "httpRes" && lowerer.isStdlibMember(expr) && expr.name.text === "headersSent") {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resHeadersSent", args: [receiver], type: BOOL, loc };
   }
-  if (recvKind === "httpRes" && lowerer.isStdlibMember(expr) && expr.name.text === "writableEnded") {
+  if (
+    recvKind === "httpRes" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "writableEnded"
+  ) {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resWritableEnded", args: [receiver], type: BOOL, loc };
   }
@@ -2330,7 +4115,11 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resWritableEnded", args: [receiver], type: BOOL, loc };
   }
-  if (recvKind === "httpRes" && lowerer.isStdlibMember(expr) && expr.name.text === "writableCorked") {
+  if (
+    recvKind === "httpRes" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "writableCorked"
+  ) {
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resWritableCorked", args: [receiver], type: F64, loc };
   }
@@ -2340,10 +4129,20 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resStatusGet", args: [receiver], type: F64, loc };
   }
-  if (recvKind === "httpRes" && lowerer.isStdlibMember(expr) && expr.name.text === "statusMessage") {
+  if (
+    recvKind === "httpRes" &&
+    lowerer.isStdlibMember(expr) &&
+    expr.name.text === "statusMessage"
+  ) {
     // Unset until the head is sent; then the assigned or default reason.
     const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
-    return { kind: "libCall", fn: "http.resStatusMsgGet", args: [receiver], type: lowerer.withUndefinedArm(STRING), loc };
+    return {
+      kind: "libCall",
+      fn: "http.resStatusMsgGet",
+      args: [receiver],
+      type: lowerer.withUndefinedArm(STRING),
+      loc,
+    };
   }
   if (recvKind === "httpRes" && lowerer.isStdlibMember(expr)) {
     const name = expr.name.text;
@@ -2362,49 +4161,104 @@ export function lowerServerProperty(lowerer: Lowerer, expr: ts.PropertyAccessExp
     }
     if (name === "sendDate" || name === "strictContentLength") {
       const receiver = coerceToHandle(lowerer, expr.expression, HTTPRES_T);
-      const fn: IrLibFn = name === "sendDate" ? "http.resSendDateGet" : "http.resStrictContentLengthGet";
+      const fn: IrLibFn =
+        name === "sendDate" ? "http.resSendDateGet" : "http.resStrictContentLengthGet";
       return { kind: "libCall", fn, args: [receiver], type: BOOL, loc };
     }
   }
   if (recvKind === "http2Session" && lowerer.isStdlibMember(expr)) {
     const m = expr.name.text;
     const recv = () => coerceToHandle(lowerer, expr.expression, HTTP2SESSION_T);
-    if (m === "closed") return { kind: "libCall", fn: "http2.sessionClosed", args: [recv()], type: BOOL, loc };
-    if (m === "destroyed") return { kind: "libCall", fn: "http2.sessionDestroyed", args: [recv()], type: BOOL, loc };
-    if (m === "encrypted") return { kind: "libCall", fn: "http2.sessionEncrypted", args: [recv()], type: BOOL, loc };
-    if (m === "type") return { kind: "libCall", fn: "http2.sessionType", args: [recv()], type: F64, loc };
-    if (m === "alpnProtocol") return { kind: "libCall", fn: "http2.sessionAlpn", args: [recv()], type: STRING, loc };
-    if (m === "socket") return { kind: "libCall", fn: "http2.sessionSocket", args: [recv()], type: NETSOCKET_T, loc };
-    if (m === "pendingSettingsAck") return { kind: "libCall", fn: "http2.sessionPendingSettingsAck", args: [recv()], type: BOOL, loc };
+    if (m === "closed")
+      return { kind: "libCall", fn: "http2.sessionClosed", args: [recv()], type: BOOL, loc };
+    if (m === "destroyed")
+      return { kind: "libCall", fn: "http2.sessionDestroyed", args: [recv()], type: BOOL, loc };
+    if (m === "encrypted")
+      return { kind: "libCall", fn: "http2.sessionEncrypted", args: [recv()], type: BOOL, loc };
+    if (m === "type")
+      return { kind: "libCall", fn: "http2.sessionType", args: [recv()], type: F64, loc };
+    if (m === "alpnProtocol")
+      return { kind: "libCall", fn: "http2.sessionAlpn", args: [recv()], type: STRING, loc };
+    if (m === "socket")
+      return { kind: "libCall", fn: "http2.sessionSocket", args: [recv()], type: NETSOCKET_T, loc };
+    if (m === "pendingSettingsAck")
+      return {
+        kind: "libCall",
+        fn: "http2.sessionPendingSettingsAck",
+        args: [recv()],
+        type: BOOL,
+        loc,
+      };
     if (m === "localSettings" || m === "remoteSettings") {
       // The settings record crosses as a dyn value (the d.ts types it
       // `any`): member reads ride the checked-dynamic keyed read.
       return {
-        kind: "libCall", fn: "http2.sessionSettingsGet",
-        args: [recv(), boolLit(m === "localSettings", loc)], type: DYN, loc,
+        kind: "libCall",
+        fn: "http2.sessionSettingsGet",
+        args: [recv(), boolLit(m === "localSettings", loc)],
+        type: DYN,
+        loc,
       };
     }
   }
   if (recvKind === "http2Stream" && lowerer.isStdlibMember(expr)) {
     const m = expr.name.text;
     const recv = () => coerceToHandle(lowerer, expr.expression, HTTP2STREAM_T);
-    if (m === "id") return { kind: "libCall", fn: "http2.streamId", args: [recv()], type: F64, loc };
-    if (m === "rstCode") return { kind: "libCall", fn: "http2.streamRstCode", args: [recv()], type: F64, loc };
-    if (m === "destroyed") return { kind: "libCall", fn: "http2.streamDestroyed", args: [recv()], type: BOOL, loc };
-    if (m === "closed") return { kind: "libCall", fn: "http2.streamClosed", args: [recv()], type: BOOL, loc };
-    if (m === "aborted") return { kind: "libCall", fn: "http2.streamAborted", args: [recv()], type: BOOL, loc };
-    if (m === "pending") return { kind: "libCall", fn: "http2.streamPending", args: [recv()], type: BOOL, loc };
-    if (m === "session") return { kind: "libCall", fn: "http2.streamSession", args: [recv()], type: HTTP2SESSION_T, loc };
+    if (m === "id")
+      return { kind: "libCall", fn: "http2.streamId", args: [recv()], type: F64, loc };
+    if (m === "rstCode")
+      return { kind: "libCall", fn: "http2.streamRstCode", args: [recv()], type: F64, loc };
+    if (m === "destroyed")
+      return { kind: "libCall", fn: "http2.streamDestroyed", args: [recv()], type: BOOL, loc };
+    if (m === "closed")
+      return { kind: "libCall", fn: "http2.streamClosed", args: [recv()], type: BOOL, loc };
+    if (m === "aborted")
+      return { kind: "libCall", fn: "http2.streamAborted", args: [recv()], type: BOOL, loc };
+    if (m === "pending")
+      return { kind: "libCall", fn: "http2.streamPending", args: [recv()], type: BOOL, loc };
+    if (m === "session")
+      return {
+        kind: "libCall",
+        fn: "http2.streamSession",
+        args: [recv()],
+        type: HTTP2SESSION_T,
+        loc,
+      };
   }
   if (expr.name.text !== "port") return null;
   const recv = expr.expression;
-  if (!ts.isCallExpression(recv) || recv.questionDotToken || recv.arguments.length !== 0) return null;
+  if (!ts.isCallExpression(recv) || recv.questionDotToken || recv.arguments.nodes.length !== 0)
+    return null;
   if (!ts.isPropertyAccessExpression(recv.expression)) return null;
   const inner = recv.expression;
   if (inner.name.text !== "address" || inner.questionDotToken) return null;
   if (lowerer.mapTypeOf(lowerer.typeOf(inner.expression))?.kind !== "netServer") return null;
   if (!lowerer.isStdlibMember(inner)) return null;
   const receiver = coerceToHandle(lowerer, inner.expression, NETSERVER_T);
+  if (unixListenReachable(lowerer)) {
+    const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
+    const server = (): IrExpr => varRef(local.id, NETSERVER_T, loc);
+    return {
+      kind: "seqExpr",
+      stmts: [
+        { kind: "varDecl", localId: local.id, init: receiver, loc },
+        {
+          kind: "exprStmt",
+          expr: {
+            kind: "libCall",
+            fn: "net.serverAddressCheck",
+            args: [server()],
+            type: VOID,
+            loc,
+          },
+          loc,
+        },
+      ],
+      result: { kind: "libCall", fn: "net.serverPort", args: [server()], type: F64, loc },
+      type: F64,
+      loc,
+    };
+  }
   return { kind: "libCall", fn: "net.serverPort", args: [receiver], type: F64, loc };
 }
 
@@ -2424,13 +4278,22 @@ function lowerRequestHandlerArg(lowerer: Lowerer, node: ts.Expression): IrExpr {
     // calls the wrapper through the checked-dynamic machinery; member
     // uses inside the wrapped body dispatch back onto the same http
     // entry points at runtime.
-    return { kind: "dynCheck", value: cb, type: funcOf([HTTPREQ_T, HTTPRES_T], VOID), loc: locOf(node) };
+    return {
+      kind: "dynCheck",
+      value: cb,
+      type: funcOf([HTTPREQ_T, HTTPRES_T], VOID),
+      loc: locOf(node),
+    };
   }
   if (
     cb.type.kind === "func" &&
     (cb.type.rest === true ||
       (cb.type.params.length > 0 && cb.type.params.every((p) => p.kind === "dyn"))) &&
-    canBoxFuncIntoDyn(cb.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id))
+    canBoxFuncIntoDyn(
+      cb.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
   ) {
     // A hoisted plain-JS handler (`http.createServer(handle)` where
     // `function handle(req, res)` has no contextual type — dyn params),
@@ -2438,7 +4301,12 @@ function lowerRequestHandlerArg(lowerer: Lowerer, node: ts.Expression): IrExpr {
     // like the dyn case — req/res arrive as HANDLE boxes and the body's
     // member uses dispatch at runtime.
     const boxed: IrExpr = { kind: "dynFrom", value: cb, type: DYN, loc: locOf(node) };
-    return { kind: "dynCheck", value: boxed, type: funcOf([HTTPREQ_T, HTTPRES_T], VOID), loc: locOf(node) };
+    return {
+      kind: "dynCheck",
+      value: boxed,
+      type: funcOf([HTTPREQ_T, HTTPRES_T], VOID),
+      loc: locOf(node),
+    };
   }
   if (cb.type.kind !== "func" || cb.type.params.length > 2) {
     lowerer.unsupported(
@@ -2464,10 +4332,15 @@ function lowerRequestHandlerArg(lowerer: Lowerer, node: ts.Expression): IrExpr {
  * writable server field after Node's non-negative-safe-integer validation.
  * Other documented keys fence by name; unknown keys drop like Node drops
  * them. */
-function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: string): {
+function lowerHttpServerOptions(
+  lowerer: Lowerer,
+  node: ts.Expression,
+  what: string,
+): {
   joinDup: boolean;
   allowMissingHost: boolean;
   keepAliveTimeoutBuffer: IrExpr | null;
+  maxHeaderSize: IrExpr | null;
 } {
   if (!ts.isObjectLiteralExpression(node)) {
     lowerer.noLowering(
@@ -2479,10 +4352,13 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
   let joinDup = false;
   let allowMissingHost = false;
   let keepAliveTimeoutBuffer: IrExpr | null = null;
-  for (const prop of node.properties) {
+  let maxHeaderSize: IrExpr | null = null;
+  for (const prop of node.properties.nodes) {
     let initializer: ts.Expression | null;
-    if (ts.isPropertyAssignment(prop) &&
-        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+    ) {
       initializer = prop.initializer;
     } else if (ts.isShorthandPropertyAssignment(prop)) {
       initializer = null;
@@ -2512,7 +4388,7 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
     }
     if (key === "joinDuplicateHeaders") {
       // Literal true/false: the flag decides parse-time read semantics,
-      // so a runtime value would silently pick one — fence dynamics.
+      // so a runtime value would pick one without a diagnostic — fence dynamics.
       if (initializer !== null && initializer.kind === ts.SyntaxKind.TrueKeyword) {
         joinDup = true;
         continue;
@@ -2524,8 +4400,24 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
       lowerer.noLowering(
         `${what} with a non-literal joinDuplicateHeaders option`,
         prop,
-        "the lowered forms are the literals joinDuplicateHeaders: true (repeats join \", \") and false (the keep-first default)",
+        'the lowered forms are the literals joinDuplicateHeaders: true (repeats join ", ") and false (the keep-first default)',
       );
+    }
+    if (key === "maxHeaderSize") {
+      // The header size bound (Node's validateInteger runs in the runtime).
+      const raw =
+        initializer !== null
+          ? lowerer.lowerExpr(initializer)
+          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      if (raw.type.kind !== "f64") {
+        lowerer.noLowering(
+          `${what} with a '${lowerer.fmt(raw.type)}' maxHeaderSize option`,
+          prop,
+          "maxHeaderSize is a number",
+        );
+      }
+      maxHeaderSize = raw;
+      continue;
     }
     if (key === "keepAliveTimeoutBuffer") {
       if (keepAliveTimeoutBuffer !== null) {
@@ -2535,9 +4427,10 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
           "write keepAliveTimeoutBuffer once in the options literal",
         );
       }
-      const raw = initializer !== null
-        ? lowerer.lowerExpr(initializer)
-        : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      const raw =
+        initializer !== null
+          ? lowerer.lowerExpr(initializer)
+          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
       const value = lowerer.coerceToExpected(raw, DYN);
       if (value.type.kind !== "dyn") {
         lowerer.noLowering(
@@ -2555,12 +4448,16 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
       continue;
     }
     fenceOrDropOptionKey(
-      lowerer, prop, key, what, HTTP_SERVER_DOCUMENTED_OPTIONS,
-      "requireHostHeader, joinDuplicateHeaders, and keepAliveTimeoutBuffer are the supported options",
+      lowerer,
+      prop,
+      key,
+      what,
+      HTTP_SERVER_DOCUMENTED_OPTIONS,
+      "requireHostHeader, joinDuplicateHeaders, keepAliveTimeoutBuffer, and maxHeaderSize are the supported options",
     );
     // An undocumented key, dropped like Node drops it.
   }
-  return { joinDup, allowMissingHost, keepAliveTimeoutBuffer };
+  return { joinDup, allowMissingHost, keepAliveTimeoutBuffer, maxHeaderSize };
 }
 
 /** The shared createServer([options][, handler]) shapes behind
@@ -2568,9 +4465,13 @@ function lowerHttpServerOptions(lowerer: Lowerer, node: ts.Expression, what: str
  * (the on("request") route), a lone handler, a lone options object, and
  * (options, handler). Modeled option values wrap the construction in an
  * interned option-setting helper. */
-function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | ts.NewExpression,
-  what: string, loc: SrcLoc,): IrExpr {
-  const args: readonly ts.Expression[] = expr.arguments ?? [];
+function lowerHttpCreateServerForms(
+  lowerer: Lowerer,
+  expr: ts.CallExpression | ts.NewExpression,
+  what: string,
+  loc: SrcLoc,
+): IrExpr {
+  const args: readonly ts.Expression[] = expr.arguments?.nodes ?? [];
   if (args.length > 2) {
     lowerer.noLowering(
       `${what} with ${args.length} arguments`,
@@ -2587,25 +4488,46 @@ function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | 
     if (ts.isObjectLiteralExpression(args[0]!)) optsNode = args[0]!;
     else handlerNode = args[0]!;
   }
-  const opts = optsNode !== null
-    ? lowerHttpServerOptions(lowerer, optsNode, what)
-    : { joinDup: false, allowMissingHost: false, keepAliveTimeoutBuffer: null };
-  const server: IrExpr = handlerNode !== null
-    ? { kind: "libCall", fn: "http.createServer", args: [lowerRequestHandlerArg(lowerer, handlerNode)], type: NETSERVER_T, loc }
-    : { kind: "libCall", fn: "http.createServerEmpty", args: [], type: NETSERVER_T, loc };
-  if (!opts.joinDup && !opts.allowMissingHost && opts.keepAliveTimeoutBuffer === null) return server;
+  const opts =
+    optsNode !== null
+      ? lowerHttpServerOptions(lowerer, optsNode, what)
+      : {
+          joinDup: false,
+          allowMissingHost: false,
+          keepAliveTimeoutBuffer: null,
+          maxHeaderSize: null,
+        };
+  const server: IrExpr =
+    handlerNode !== null
+      ? {
+          kind: "libCall",
+          fn: "http.createServer",
+          args: [lowerRequestHandlerArg(lowerer, handlerNode)],
+          type: NETSERVER_T,
+          loc,
+        }
+      : { kind: "libCall", fn: "http.createServerEmpty", args: [], type: NETSERVER_T, loc };
+  if (
+    !opts.joinDup &&
+    !opts.allowMissingHost &&
+    opts.keepAliveTimeoutBuffer === null &&
+    opts.maxHeaderSize === null
+  )
+    return server;
   // The option-setting composition: an interned helper takes the option
   // values first (preserving Node's options-before-handler evaluation
   // order), then the fresh server, applies the modeled fields, and answers
   // the server as the constructor/factory result.
   const hasBuffer = opts.keepAliveTimeoutBuffer !== null;
-  const key = `server.opts:${opts.joinDup ? 1 : 0}:${opts.allowMissingHost ? 1 : 0}:${hasBuffer ? 1 : 0}`;
+  const hasMax = opts.maxHeaderSize !== null;
+  const key = `server.opts:${opts.joinDup ? 1 : 0}:${opts.allowMissingHost ? 1 : 0}:${hasBuffer ? 1 : 0}:${hasMax ? 1 : 0}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%server.opts.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%server.opts", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const params = [
       ...(hasBuffer ? [{ localId: "b.0", name: "buffer", type: DYN }] : []),
+      ...(hasMax ? [{ localId: "m.0", name: "maxHeaderSize", type: F64 }] : []),
       { localId: "s.0", name: "s", type: NETSERVER_T },
     ];
     const ref: IrExpr = { kind: "varRef", localId: "s.0", type: NETSERVER_T, loc };
@@ -2615,7 +4537,26 @@ function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | 
       const value: IrExpr = { kind: "varRef", localId: "b.0", type: DYN, loc };
       body.push({
         kind: "exprStmt",
-        expr: { kind: "libCall", fn: "http.serverTimeoutOptionSet", args: [ref, selector, value], type: VOID, loc },
+        expr: {
+          kind: "libCall",
+          fn: "http.serverTimeoutOptionSet",
+          args: [ref, selector, value],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+    }
+    if (hasMax) {
+      body.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "http.serverMaxHeaderSize",
+          args: [ref, { kind: "varRef", localId: "m.0", type: F64, loc }],
+          type: VOID,
+          loc,
+        },
         loc,
       });
     }
@@ -2629,7 +4570,13 @@ function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | 
     if (opts.allowMissingHost) {
       body.push({
         kind: "exprStmt",
-        expr: { kind: "libCall", fn: "http.serverAllowMissingHostHeader", args: [ref], type: VOID, loc },
+        expr: {
+          kind: "libCall",
+          fn: "http.serverAllowMissingHostHeader",
+          args: [ref],
+          type: VOID,
+          loc,
+        },
         loc,
       });
     }
@@ -2646,7 +4593,11 @@ function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | 
   return {
     kind: "call",
     callee: name,
-    args: [...(opts.keepAliveTimeoutBuffer !== null ? [opts.keepAliveTimeoutBuffer] : []), server],
+    args: [
+      ...(opts.keepAliveTimeoutBuffer !== null ? [opts.keepAliveTimeoutBuffer] : []),
+      ...(opts.maxHeaderSize !== null ? [opts.maxHeaderSize] : []),
+      server,
+    ],
     type: NETSERVER_T,
     loc,
   };
@@ -2661,12 +4612,12 @@ function lowerHttpCreateServerForms(lowerer: Lowerer, expr: ts.CallExpression | 
  * getName/destroy and the sockets/requests/freeSockets counters dispatch
  * through the dyn handle ops, and the request path threads it (the
  * requestAgent rows). Options parse at the LITERAL construction site:
- * keepAlive (a boolean value — TRUE throws the runtime's named pooling
- * fence: this client dials one connection per request), keepAliveMsecs /
- * maxSockets / maxFreeSockets / timeout / port as numbers, scheduling
- * DROPS (no free pool exists, so selection order cannot observe), other
- * documented keys fence by name, and undocumented keys drop like Node
- * drops them. Null when the callee isn't the http/https Agent. */
+ * keepAlive (a boolean value: finished connections return to the free
+ * list), keepAliveMsecs / maxSockets / maxFreeSockets / timeout / port as
+ * numbers, scheduling as a value the runtime validates ('fifo' or
+ * 'lifo'), other documented keys fence by name, and undocumented keys
+ * drop like Node drops them. Null when the callee isn't the http/https
+ * Agent. */
 export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr | null {
   const callee = expr.expression;
   const bi =
@@ -2685,9 +4636,14 @@ export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrE
   let maxFree: IrExpr = numLit(-1, loc);
   let timeout: IrExpr = numLit(-1, loc);
   let port: IrExpr = numLit(-1, loc);
-  const args = expr.arguments ?? [];
+  let scheduling: IrExpr = lowerer.coerceToExpected(strLit("lifo", loc), DYN);
+  const args = expr.arguments?.nodes ?? [];
   if (args.length > 1) {
-    lowerer.noLowering(`${api} with ${args.length} arguments`, expr, "the supported form is new Agent(options?)");
+    lowerer.noLowering(
+      `${api} with ${args.length} arguments`,
+      expr,
+      "the supported form is new Agent(options?)",
+    );
   }
   if (args.length === 1) {
     const optsNode = stripParensAndCasts(args[0]!);
@@ -2698,13 +4654,15 @@ export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrE
         "spell the options as an object literal at the construction site",
       );
     }
-    for (const prop of optsNode.properties) {
+    for (const prop of optsNode.properties.nodes) {
       if (ts.isSpreadAssignment(prop)) {
         lowerer.noLowering(`${api} with an options spread`, prop, "write each option inline");
       }
       let initializer: ts.Expression | null;
-      if (ts.isPropertyAssignment(prop) &&
-          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+      if (
+        ts.isPropertyAssignment(prop) &&
+        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+      ) {
         initializer = prop.initializer;
       } else if (ts.isShorthandPropertyAssignment(prop)) {
         initializer = null;
@@ -2717,17 +4675,25 @@ export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrE
       }
       const key = (prop.name as ts.Identifier | ts.StringLiteral).text;
       const lowerVal = (want: "bool" | "f64"): IrExpr => {
-        const v = initializer !== null
-          ? lowerer.lowerExpr(initializer)
-          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        const v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
         if (v.type.kind === "dyn") {
-          return { kind: "dynCheck", value: v, type: want === "bool" ? BOOL : F64, loc: locOf(prop) };
+          return {
+            kind: "dynCheck",
+            value: v,
+            type: want === "bool" ? BOOL : F64,
+            loc: locOf(prop),
+          };
         }
         if (v.type.kind !== want) {
           lowerer.noLowering(
             `a ${api} '${key}' option of '${lowerer.fmt(v.type)}' values`,
             prop,
-            want === "bool" ? "the option value must be a boolean" : "the option value must be a number",
+            want === "bool"
+              ? "the option value must be a boolean"
+              : "the option value must be a number",
           );
         }
         return v;
@@ -2753,15 +4719,25 @@ export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrE
           // the settable defaultPort carries this one.
           port = lowerVal("f64");
           break;
-        case "scheduling":
-          // Free-socket selection order: no free pool exists here (no
-          // keep-alive reuse), so the choice cannot observe — dropped.
-          if (initializer !== null) lowerer.lowerExpr(initializer); // evaluate, like Node
+        case "scheduling": {
+          // 'fifo' | 'lifo' (falsy = 'lifo'), validated by the runtime
+          const v =
+            initializer !== null
+              ? lowerer.lowerExpr(initializer)
+              : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+          scheduling = lowerer.coerceToExpected(v, DYN);
           break;
+        }
         default:
           fenceOrDropOptionKey(
-            lowerer, prop, key, api, AGENT_DOCUMENTED_OPTIONS,
-            "keepAlive, keepAliveMsecs, maxSockets, maxFreeSockets, timeout, port, and scheduling are the supported options",
+            lowerer,
+            prop,
+            key,
+            api,
+            bi.module === "https" ? HTTPS_AGENT_DOCUMENTED_OPTIONS : AGENT_DOCUMENTED_OPTIONS,
+            bi.module === "https"
+              ? "keepAlive, keepAliveMsecs, maxSockets, maxFreeSockets, timeout, port, and scheduling are the supported options; pass TLS options such as ca and rejectUnauthorized on each https.request"
+              : "keepAlive, keepAliveMsecs, maxSockets, maxFreeSockets, timeout, port, and scheduling are the supported options",
           );
       }
     }
@@ -2769,7 +4745,16 @@ export function lowerHttpAgentNew(lowerer: Lowerer, expr: ts.NewExpression): IrE
   return {
     kind: "libCall",
     fn: "http.agentNew",
-    args: [boolLit(bi.module === "https", loc), keepAlive, kaMsecs, maxSockets, maxFree, timeout, port],
+    args: [
+      boolLit(bi.module === "https", loc),
+      keepAlive,
+      kaMsecs,
+      maxSockets,
+      maxFree,
+      timeout,
+      port,
+      scheduling,
+    ],
     type: DYN,
     loc,
   };
@@ -2788,33 +4773,174 @@ export function lowerHttpServerNew(lowerer: Lowerer, expr: ts.NewExpression): Ir
   return lowerHttpCreateServerForms(lowerer, expr, "new http.Server", locOf(expr));
 }
 
+/** `new tls.TLSSocket(socket, options)` in server mode: a new TLS socket
+ * takes over the socket's connection and runs the server handshake
+ * (scr_tls_wrap_socket). The options record reads at runtime, the
+ * tls.connect precedent. A literal's secureContext member is a
+ * SecureContext handle, which the checked-dynamic record cannot hold, so
+ * it passes as its own argument; members after it must be free of side
+ * effects, because it is read after them. Node never starts the handshake
+ * of a client-mode TLSSocket, so a literal without isServer: true fences
+ * here. */
+export function lowerTlsSocketNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr | null {
+  const callee = expr.expression;
+  const isTlsSocket =
+    (ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "TLSSocket" &&
+      lowerer.builtinMemberOf(callee)?.module === "tls") ||
+    (ts.isIdentifier(callee) &&
+      lowerer.builtinImportOf(callee)?.module === "tls" &&
+      lowerer.builtinImportOf(callee)?.member === "TLSSocket");
+  if (!isTlsSocket) return null;
+  const loc = locOf(expr);
+  const HINT =
+    "the supported forms are new tls.TLSSocket(socket, { isServer: true, cert, key }) and new tls.TLSSocket(socket, { isServer: true, secureContext })";
+  const args = expr.arguments?.nodes ?? [];
+  if (args.length !== 2 || args.some(ts.isSpreadElement)) {
+    lowerer.noLowering(`new tls.TLSSocket with ${args.length} argument(s)`, expr, HINT);
+  }
+  const socket = lowerer.lowerExpr(args[0]!);
+  if (socket.type.kind !== "netSocket") {
+    lowerer.noLowering(
+      `new tls.TLSSocket over a '${lowerer.fmt(socket.type)}' value`,
+      args[0]!,
+      "the wrapped value must be a net.Socket (a server connection or an http CONNECT socket)",
+    );
+  }
+  let optsNode: ts.Expression = args[1]!;
+  while (ts.isParenthesizedExpression(optsNode)) optsNode = optsNode.expression;
+  if (!ts.isObjectLiteralExpression(optsNode)) {
+    const o = lowerer.lowerExpr(optsNode);
+    const opts: IrExpr =
+      o.type.kind === "dyn"
+        ? o
+        : canConvertToDyn(
+              o.type,
+              (id) => lowerer.shapes.get(id),
+              (id) => lowerer.unions.get(id),
+            )
+          ? { kind: "dynFrom", value: o, type: DYN, loc }
+          : lowerer.noLowering(
+              `new tls.TLSSocket with a '${lowerer.fmt(o.type)}' options record`,
+              optsNode,
+              `${HINT} — a secureContext member lowers in an options object literal`,
+            );
+    return { kind: "libCall", fn: "tls.wrapSocket", args: [socket, opts], type: NETSOCKET_T, loc };
+  }
+  const props = optsNode.properties.nodes;
+  const nameOf = (p: ts.ObjectLiteralElementLike): string | null =>
+    (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+    (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))
+      ? p.name.text
+      : null;
+  const isServer = props.find((p) => nameOf(p) === "isServer");
+  if (
+    isServer === undefined ||
+    (ts.isPropertyAssignment(isServer) && isServer.initializer.kind === ts.SyntaxKind.FalseKeyword)
+  ) {
+    lowerer.noLowering(
+      "new tls.TLSSocket in client mode",
+      optsNode,
+      "Node starts no handshake for a client-mode TLSSocket — pass isServer: true for the server side; tls.connect makes client sockets",
+    );
+  }
+  const ctxIndex = props.findIndex((p) => nameOf(p) === "secureContext");
+  if (ctxIndex < 0) {
+    const opts = lowerDynObjectLiteral(lowerer, optsNode);
+    return { kind: "libCall", fn: "tls.wrapSocket", args: [socket, opts], type: NETSOCKET_T, loc };
+  }
+  const ctxProp = props[ctxIndex]!;
+  const ctxNode = ts.isShorthandPropertyAssignment(ctxProp)
+    ? ctxProp.name
+    : (ctxProp as ts.PropertyAssignment).initializer;
+  for (const p of props.slice(ctxIndex + 1)) {
+    const pure =
+      ts.isShorthandPropertyAssignment(p) ||
+      (ts.isPropertyAssignment(p) && sideEffectFreeOptionValue(p.initializer));
+    if (!pure) {
+      lowerer.noLowering(
+        "a new tls.TLSSocket options literal with side effects after secureContext",
+        p,
+        "secureContext is read after the other members — move it to the end of the object",
+      );
+    }
+  }
+  let ctx: IrExpr | null = null;
+  const opts = lowerDynObjectLiteral(lowerer, optsNode, (node, value) => {
+    if (node !== ctxNode) return lowerer.coerceToExpected(value, DYN);
+    if (value.type.kind !== "secureCtx") {
+      lowerer.noLowering(
+        `a '${lowerer.fmt(value.type)}' secureContext`,
+        node,
+        "pass a tls.createSecureContext({ cert, key }) result",
+      );
+    }
+    ctx = value;
+    return {
+      kind: "dynFrom",
+      value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
+      type: DYN,
+      loc,
+    };
+  });
+  return {
+    kind: "libCall",
+    fn: "tls.wrapSocketCtx",
+    args: [socket, opts, ctx!],
+    type: NETSOCKET_T,
+    loc,
+  };
+}
+
 /** Module-function calls on http import bindings: createServer([options][,
  * handler]) and the call-form Server (Node's constructor works without
  * `new` — test/parallel's http.Server(fn) spelling). The handler takes
  * (req, res), (req), or () — runtime adapters bridge each shape.
  * Everything else the module declares fences qualified. */
-function lowerHttpModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+function lowerHttpModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr {
+  loc: SrcLoc,
+): IrExpr {
   if (bi.member === "validateHeaderName") {
     requireStatementPosition(lowerer, expr, "http.validateHeaderName(...)");
-    if (expr.arguments.length < 1 || expr.arguments.length > 2 || expr.arguments.some(ts.isSpreadElement)) {
-      lowerer.noLowering("http.validateHeaderName arguments", expr, "pass a header name and an optional label");
+    if (
+      expr.arguments.nodes.length < 1 ||
+      expr.arguments.nodes.length > 2 ||
+      expr.arguments.nodes.some(ts.isSpreadElement)
+    ) {
+      lowerer.noLowering(
+        "http.validateHeaderName arguments",
+        expr,
+        "pass a header name and an optional label",
+      );
     }
-    const name = lowerer.lowerExprExpecting(expr.arguments[0]!, STRING);
-    const label = expr.arguments.length === 2
-      ? lowerer.lowerExprExpecting(expr.arguments[1]!, STRING)
-      : strLit("Header name", loc);
+    const name = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const label =
+      expr.arguments.nodes.length === 2
+        ? lowerer.lowerExprExpecting(expr.arguments.nodes[1]!, STRING)
+        : strLit("Header name", loc);
     return { kind: "libCall", fn: "http.validateHeaderName", args: [name, label], type: VOID, loc };
   }
   if (bi.member === "validateHeaderValue") {
     requireStatementPosition(lowerer, expr, "http.validateHeaderValue(...)");
-    if (expr.arguments.length !== 2 || expr.arguments.some(ts.isSpreadElement)) {
-      lowerer.noLowering("http.validateHeaderValue arguments", expr, "pass a header name and a value");
+    if (expr.arguments.nodes.length !== 2 || expr.arguments.nodes.some(ts.isSpreadElement)) {
+      lowerer.noLowering(
+        "http.validateHeaderValue arguments",
+        expr,
+        "pass a header name and a value",
+      );
     }
-    const name = lowerer.lowerExprExpecting(expr.arguments[0]!, STRING);
-    const value = lowerer.lowerExprExpecting(expr.arguments[1]!, DYN);
-    return { kind: "libCall", fn: "http.validateHeaderValue", args: [name, value], type: VOID, loc };
+    const name = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const value = lowerer.lowerExprExpecting(expr.arguments.nodes[1]!, DYN);
+    return {
+      kind: "libCall",
+      fn: "http.validateHeaderValue",
+      args: [name, value],
+      type: VOID,
+      loc,
+    };
   }
   if (bi.member === "createServer" || bi.member === "Server") {
     return lowerHttpCreateServerForms(lowerer, expr, `http.${bi.member}`, loc);
@@ -2836,7 +4962,12 @@ function lowerHttpModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
  * runtime-valued (dyn) entry rides the tls.pemDyn extraction, throwing
  * the fence at runtime for non-PEM kinds (the divergence-66 stance).
  * Every other key fences by name; SNICallback gets the pointed hint. */
-function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: string): { cert: IrExpr; key: IrExpr } {
+function lowerTlsServerOptions(
+  lowerer: Lowerer,
+  node: ts.Expression,
+  what: string,
+  allowSni = false,
+): { cert: IrExpr; key: IrExpr; sni?: IrExpr } {
   if (!ts.isObjectLiteralExpression(node)) {
     lowerer.noLowering(
       `${what} with a non-literal options argument`,
@@ -2847,10 +4978,14 @@ function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: stri
   const loc = locOf(node);
   let cert: IrExpr | null = null;
   let key: IrExpr | null = null;
-  for (const prop of node.properties) {
+  let sni: IrExpr | undefined;
+  let pendingSni: IrStmt | null = null;
+  for (const prop of node.properties.nodes) {
     let initializer: ts.Expression | null;
-    if (ts.isPropertyAssignment(prop) &&
-        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+    ) {
       initializer = prop.initializer;
     } else if (ts.isShorthandPropertyAssignment(prop)) {
       initializer = null;
@@ -2862,38 +4997,55 @@ function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: stri
       );
     }
     const k = (prop.name as ts.Identifier | ts.StringLiteral).text;
+    if (k === "SNICallback" && allowSni) {
+      const value =
+        initializer !== null
+          ? lowerer.lowerExpr(initializer)
+          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      const checked = checkSniCallbackValue(lowerer, value, prop, what);
+      if (cert !== null && key !== null) {
+        sni = checked;
+      } else {
+        // The runtime call reads cert and key first. A cert or key entry
+        // after the callback can change the binding the callback reads,
+        // so the callback is saved ahead of the next of them, in source
+        // order.
+        const saved = lowerer.declareHiddenLocal("%sniCallback", checked.type);
+        pendingSni = { kind: "varDecl", localId: saved.id, init: checked, loc: locOf(prop) };
+        sni = varRef(saved.id, checked.type, locOf(prop));
+      }
+      continue;
+    }
     if (k !== "cert" && k !== "key") {
       const init = ts.isPropertyAssignment(prop) ? prop.initializer : null;
-      if ((k === "ca" || k === "rejectUnauthorized") &&
-          (init === null || sideEffectFreeOptionValue(init))) {
-        // Both are inert without requestCert (which fences): the server's
-        // `ca` verifies CLIENT certificates and rejectUnauthorized only
-        // gates that verification — Node-observably droppable, matching
+      if (k === "rejectUnauthorized" && (init === null || sideEffectFreeOptionValue(init))) {
+        // Without requestCert (a literal with requestCert or ca rides the
+        // runtime walk) rejectUnauthorized gates nothing — droppable, like
         // the runtime walk's split (effectful values keep the fence).
         continue;
       }
-      if (k === "requestCert" &&
-          (init === null || init.kind === ts.SyntaxKind.FalseKeyword)) {
-        continue; // Node's false default, spelled out
-      }
       fenceOrDropOptionKey(
-        lowerer, prop, k, what, TLS_SERVER_DOCUMENTED_OPTIONS,
+        lowerer,
+        prop,
+        k,
+        what,
+        TLS_SERVER_DOCUMENTED_OPTIONS,
         "cert and key (PEM strings or Buffers) are the supported options",
         {
           SNICallback:
-            "SNICallback lowers only on http2.createSecureServer({ allowHTTP1: true, ... }) — serve one cert/key pair here",
-          requestCert:
-            "client-certificate handshakes are not modeled (SEMANTICS.md divergence 55) — requestCert: false is the lowered value",
+            "SNICallback lowers on tls.createServer and http2.createSecureServer({ allowHTTP1: true, ... }) — serve one cert/key pair here",
         },
       );
       continue; // an undocumented key, dropped like Node drops it
     }
-    let v = initializer !== null
-      ? lowerer.lowerExpr(initializer)
-      : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+    let v =
+      initializer !== null
+        ? lowerer.lowerExpr(initializer)
+        : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
     const isArrayOfPem =
       v.type.kind === "array" &&
-      (v.type.elem.kind === "string" || (v.type.elem.kind === "bytes" && v.type.elem.elem === "u8"));
+      (v.type.elem.kind === "string" ||
+        (v.type.elem.kind === "bytes" && v.type.elem.elem === "u8"));
     if (v.type.kind === "dyn" || isArrayOfPem) {
       // A runtime PEM value (fixtures.readKey(...) — the suite's shape) or
       // the one-element-array multi-context spelling: the runtime
@@ -2916,6 +5068,10 @@ function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: stri
         "cert/key are PEM strings or Buffers here",
       );
     }
+    if (pendingSni !== null) {
+      v = { kind: "seqExpr", stmts: [pendingSni], result: v, type: v.type, loc };
+      pendingSni = null;
+    }
     if (k === "cert") cert = v;
     else key = v;
   }
@@ -2926,7 +5082,7 @@ function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: stri
       "the supported options object is { cert, key } (PEM strings or Buffers)",
     );
   }
-  return { cert, key };
+  return sni === undefined ? { cert, key } : { cert, key, sni };
 }
 
 /** The options argument of tls/https createServer, split three ways: an
@@ -2939,33 +5095,81 @@ function lowerTlsServerOptions(lowerer: Lowerer, node: ts.Expression, what: stri
  * rides WHOLE to the walker so the typed ladders run in Node's order
  * (the static walk would fence them before validating). */
 const TLS_VALIDATED_OPTIONS: ReadonlySet<string> = new Set([
-  "ciphers", "passphrase", "ecdhCurve", "sessionIdContext",
-  "clientCertEngine", "privateKeyEngine", "privateKeyIdentifier",
-  "minVersion", "maxVersion", "handshakeTimeout", "keepAliveInitialDelay",
-  "sessionTimeout", "ticketKeys",
+  "ciphers",
+  "passphrase",
+  "ecdhCurve",
+  "sessionIdContext",
+  "clientCertEngine",
+  "privateKeyEngine",
+  "privateKeyIdentifier",
+  "minVersion",
+  "maxVersion",
+  "handshakeTimeout",
+  "keepAliveInitialDelay",
+  "sessionTimeout",
+  "ticketKeys",
 ]);
 
 /** True when a literal options bag must ride the runtime walker: JS uses
- * it for the typed TLS validation ladders, and HTTPS uses it for
+ * it for the typed TLS validation ladders, HTTPS uses it for
  * keepAliveTimeoutBuffer so the HTTP option is consumed without losing
- * the literal's evaluation order. */
-function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression,
-  includeHttpTimeoutOptions = false,): boolean {
-  const jsSource = isJsSourceFile(node.getSourceFile());
-  return node.properties.some((p) =>
-    (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
-    (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
-    ((includeHttpTimeoutOptions && p.name.text === "keepAliveTimeoutBuffer") ||
-      (jsSource && TLS_VALIDATED_OPTIONS.has(p.name.text))),
+ * the literal's evaluation order, and `runtimeKeys` names options only the
+ * runtime walk implements (tls.createServer's ALPNProtocols). */
+function tlsLiteralNeedsRuntimeWalk(
+  node: ts.ObjectLiteralExpression,
+  includeHttpTimeoutOptions = false,
+  runtimeKeys: ReadonlySet<string> = new Set(),
+): boolean {
+  const jsSource = isJsSourceFile(ts.getSourceFileOfNode(node));
+  return node.properties.nodes.some(
+    (p) =>
+      (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+      (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+      ((includeHttpTimeoutOptions && p.name.text === "keepAliveTimeoutBuffer") ||
+        runtimeKeys.has(p.name.text) ||
+        (jsSource && TLS_VALIDATED_OPTIONS.has(p.name.text))),
   );
 }
 
+/** The client-certificate options (requestCert, and ca, which also
+ * completes the server's own chain): the runtime walk implements them for
+ * tls.createServer and https.createServer, and the literal cert/key
+ * lowering does not. */
+const TLS_CLIENT_AUTH_OPTIONS: ReadonlySet<string> = new Set(["requestCert", "ca"]);
+
+/** tls.createServer options the runtime walk implements and the literal
+ * cert/key lowering does not. */
+const TLS_SERVER_RUNTIME_OPTIONS: ReadonlySet<string> = new Set([
+  "ALPNProtocols",
+  "minVersion",
+  "maxVersion",
+  ...TLS_CLIENT_AUTH_OPTIONS,
+]);
+
 function lowerTlsServerOptionsOrDyn(
-  lowerer: Lowerer, node: ts.Expression, what: string, includeHttpTimeoutOptions = false,
-): { cert: IrExpr; key: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
-  if (ts.isObjectLiteralExpression(node) &&
-      !tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions)) {
-    return lowerTlsServerOptions(lowerer, node, what);
+  lowerer: Lowerer,
+  node: ts.Expression,
+  what: string,
+  includeHttpTimeoutOptions = false,
+  runtimeKeys: ReadonlySet<string> = new Set(),
+  allowSni = false,
+): { cert: IrExpr; key: IrExpr; sni?: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
+  if (ts.isObjectLiteralExpression(node)) {
+    if (!tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions, runtimeKeys))
+      return lowerTlsServerOptions(lowerer, node, what, allowSni);
+    const sniOption = node.properties.nodes.find(
+      (p) =>
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+        (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+        p.name.text === "SNICallback",
+    );
+    if (allowSni && sniOption !== undefined) {
+      lowerer.noLowering(
+        `${what} with SNICallback and options the runtime walk reads`,
+        sniOption,
+        "SNICallback lowers with cert and key; ALPNProtocols, minVersion, maxVersion, requestCert, ca and the validated options are not combined with it yet",
+      );
+    }
   }
   const v = lowerer.lowerExpr(node);
   if (v.type.kind === "dyn") return { dyn: v };
@@ -2975,7 +5179,13 @@ function lowerTlsServerOptionsOrDyn(
   // stance — members read at runtime, out-of-bounds ones throw the
   // catchable fence, undefined/undocumented ones drop). canConvertToDyn
   // now folds in the bytes-bearing option records the walker can box.
-  if (canConvertToDyn(v.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id))) {
+  if (
+    canConvertToDyn(
+      v.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
     return { dyn: { kind: "dynFrom", value: v, type: DYN, loc: locOf(node) } };
   }
   lowerer.noLowering(
@@ -2989,19 +5199,20 @@ function lowerTlsServerOptionsOrDyn(
  * connect(options[, cb]) and connect(port[, host][, options][, cb]) with
  * a RUNTIME options record (the checked-dynamic JS lane's shape — a dyn
  * value, or a record that converts): the runtime walk implements
- * port/host/rejectUnauthorized/ca/servername and throws the catchable
+ * port/host/socket/rejectUnauthorized/ca/cert/key/servername/ALPNProtocols/minVersion/maxVersion/timeout and throws the catchable
  * fence for other documented members (the divergence-66 stance). The
  * callback (and 'secureConnect'/'connect' listeners) fires
  * post-handshake — Node's secureConnect timing. */
 function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcLoc): IrExpr {
-  const args = expr.arguments;
+  const args = expr.arguments.nodes;
   const FORMS_HINT =
-    "the supported forms are connect(options[, cb]) and connect(port[, host][, options][, cb]) — options implement port/host/rejectUnauthorized/ca/servername";
+    "the supported forms are connect(options[, cb]) and connect(port[, host][, options][, cb]) — options implement port/host/socket/rejectUnauthorized/ca/cert/key/servername/ALPNProtocols/minVersion/maxVersion/timeout";
   if (args.length < 1 || args.length > 4 || args.some(ts.isSpreadElement)) {
     lowerer.noLowering(`tls.connect with ${args.length} arguments`, expr, FORMS_HINT);
   }
   const isFuncish = (a: ts.Expression): boolean =>
-    ts.isFunctionExpression(a) || ts.isArrowFunction(a) ||
+    ts.isFunctionExpression(a) ||
+    ts.isArrowFunction(a) ||
     lowerer.checker.getCallSignatures(lowerer.typeOf(a)).length > 0;
   const isObjectish = (a: ts.Expression): boolean => {
     if (ts.isObjectLiteralExpression(a)) return true;
@@ -3023,13 +5234,19 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
     const p = lowerer.lowerExpr(args[0]!);
     if (p.type.kind === "f64") port = p;
     else if (p.type.kind === "dyn") port = { kind: "dynCheck", value: p, type: F64, loc };
-    else lowerer.noLowering(`tls.connect with a '${lowerer.fmt(p.type)}' port`, args[0]!, FORMS_HINT);
+    else
+      lowerer.noLowering(`tls.connect with a '${lowerer.fmt(p.type)}' port`, args[0]!, FORMS_HINT);
     i = 1;
     if (i < args.length && !isFuncish(args[i]!) && !isObjectish(args[i]!)) {
       const h = lowerer.lowerExpr(args[i]!);
       if (h.type.kind === "string") host = h;
       else if (h.type.kind === "dyn") host = { kind: "dynCheck", value: h, type: STRING, loc };
-      else lowerer.noLowering(`tls.connect with a '${lowerer.fmt(h.type)}' host`, args[i]!, FORMS_HINT);
+      else
+        lowerer.noLowering(
+          `tls.connect with a '${lowerer.fmt(h.type)}' host`,
+          args[i]!,
+          FORMS_HINT,
+        );
       i++;
     }
     if (i < args.length && isObjectish(args[i]!)) {
@@ -3040,11 +5257,32 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
   // The options value rides whole to the runtime walk: dyn passes
   // directly; a typed record that converts boxes into the checked-dynamic tree.
   let opts: IrExpr;
-  if (optsNode !== null) {
+  let literal: ts.Expression | null = optsNode;
+  while (literal !== null && ts.isParenthesizedExpression(literal)) literal = literal.expression;
+  if (
+    literal !== null &&
+    ts.isObjectLiteralExpression(literal) &&
+    literal.properties.nodes.some(
+      (p) =>
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+        ts.isIdentifier(p.name) &&
+        p.name.text === "socket",
+    )
+  ) {
+    // A socket member is a handle the record form cannot box: the literal
+    // builds the checked-dynamic object member by member.
+    opts = lowerDynObjectLiteral(lowerer, literal);
+  } else if (optsNode !== null) {
     const o = lowerer.lowerExpr(optsNode);
     if (o.type.kind === "dyn") {
       opts = o;
-    } else if (canConvertToDyn(o.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id))) {
+    } else if (
+      canConvertToDyn(
+        o.type,
+        (id) => lowerer.shapes.get(id),
+        (id) => lowerer.unions.get(id),
+      )
+    ) {
       opts = { kind: "dynFrom", value: o, type: DYN, loc };
     } else {
       lowerer.noLowering(
@@ -3059,12 +5297,7 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
     }
     // No options: Node's defaults (rejectUnauthorized: true) — the
     // runtime walk reads an absent record (the dyn undefined).
-    opts = {
-      kind: "dynFrom",
-      value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
-      type: DYN,
-      loc,
-    };
+    opts = dynUndefinedExpr(loc);
   }
   let cb: IrExpr | null = null;
   if (i < args.length) {
@@ -3072,7 +5305,10 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
       lowerer.noLowering("tls.connect with this argument shape", expr, FORMS_HINT);
     }
     const r = lowerCallbackArg(
-      lowerer, args[i]!, "secureConnect listeners", 0,
+      lowerer,
+      args[i]!,
+      "secureConnect listeners",
+      0,
       () => false,
       "use ()",
       [],
@@ -3089,10 +5325,13 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
  * socket that behaves exactly like a net socket. Everything else the
  * module declares fences qualified (createSecureContext and connect
  * carry pointed hints from the fence-hint table). */
-function lowerTlsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+function lowerTlsModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr {
-  const args = expr.arguments;
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
   if (bi.member === "createServer") {
     if (args.length < 1 || args.length > 2) {
       lowerer.noLowering(
@@ -3101,33 +5340,88 @@ function lowerTlsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         "the supported form is createServer({ cert, key }, socket => ...)",
       );
     }
-    const opts = lowerTlsServerOptionsOrDyn(lowerer, args[0]!, "tls.createServer");
+    const opts = lowerTlsServerOptionsOrDyn(
+      lowerer,
+      args[0]!,
+      "tls.createServer",
+      false,
+      TLS_SERVER_RUNTIME_OPTIONS,
+      true,
+    );
     if (args.length === 1) {
-      return opts.dyn !== undefined
-        ? { kind: "libCall", fn: "tls.createServerDyn", args: [opts.dyn], type: NETSERVER_T, loc }
-        : { kind: "libCall", fn: "tls.createServer", args: [opts.cert, opts.key], type: NETSERVER_T, loc };
+      if (opts.dyn !== undefined)
+        return {
+          kind: "libCall",
+          fn: "tls.createServerDyn",
+          args: [opts.dyn],
+          type: NETSERVER_T,
+          loc,
+        };
+      return opts.sni !== undefined
+        ? {
+            kind: "libCall",
+            fn: "tls.createServerSni",
+            args: [opts.cert, opts.key, opts.sni],
+            type: NETSERVER_T,
+            loc,
+          }
+        : {
+            kind: "libCall",
+            fn: "tls.createServer",
+            args: [opts.cert, opts.key],
+            type: NETSERVER_T,
+            loc,
+          };
     }
     const { cb } = lowerCallbackArg(
-      lowerer, args[1]!, "secureConnection listeners", 1,
+      lowerer,
+      args[1]!,
+      "secureConnection listeners",
+      1,
       (p) => p.kind === "netSocket",
       "use (socket) or ()",
       [NETSOCKET_T],
     );
-    return opts.dyn !== undefined
-      ? { kind: "libCall", fn: "tls.createServerDynCb", args: [opts.dyn, cb], type: NETSERVER_T, loc }
-      : { kind: "libCall", fn: "tls.createServerCb", args: [opts.cert, opts.key, cb], type: NETSERVER_T, loc };
+    if (opts.dyn !== undefined)
+      return {
+        kind: "libCall",
+        fn: "tls.createServerDynCb",
+        args: [opts.dyn, cb],
+        type: NETSERVER_T,
+        loc,
+      };
+    return opts.sni !== undefined
+      ? {
+          kind: "libCall",
+          fn: "tls.createServerSniCb",
+          args: [opts.cert, opts.key, opts.sni, cb],
+          type: NETSERVER_T,
+          loc,
+        }
+      : {
+          kind: "libCall",
+          fn: "tls.createServerCb",
+          args: [opts.cert, opts.key, cb],
+          type: NETSERVER_T,
+          loc,
+        };
   }
   if (bi.member === "connect") {
     return lowerTlsConnectCall(lowerer, expr, loc);
   }
-  if (bi.member === "getCACertificates" && args.length === 1 && !args.some(ts.isSpreadElement) &&
-      isJsSourceFile(expr.getSourceFile())) {
+  if (
+    bi.member === "getCACertificates" &&
+    args.length === 1 &&
+    !args.some(ts.isSpreadElement) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr))
+  ) {
     // The type-argument ladder (validateString + the documented name
     // set); the real CA list has no lowering, so a valid name meets the
     // compiler-rendered fence after the validation.
     const raw = lowerer.lowerExpr(args[0]!);
     if (raw.type.kind === "dyn" || raw.kind === "unitLit" || lowerer.dynConvertible(raw.type)) {
-      const t: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+      const t: IrExpr =
+        raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
       return {
         kind: "libCall",
         fn: "tls.caCertsChk",
@@ -3149,11 +5443,29 @@ function lowerTlsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         "the supported form is createSecureContext({ cert, key })",
       );
     }
-    const opts = lowerTlsServerOptionsOrDyn(lowerer, args[0]!, "tls.createSecureContext");
+    const opts = lowerTlsServerOptionsOrDyn(
+      lowerer,
+      args[0]!,
+      "tls.createSecureContext",
+      false,
+      TLS_CLIENT_AUTH_OPTIONS,
+    );
     if (opts.dyn !== undefined) {
-      return { kind: "libCall", fn: "tls.createSecureContextDyn", args: [opts.dyn], type: SECURECTX_T, loc };
+      return {
+        kind: "libCall",
+        fn: "tls.createSecureContextDyn",
+        args: [opts.dyn],
+        type: SECURECTX_T,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "tls.createSecureContext", args: [opts.cert, opts.key], type: SECURECTX_T, loc };
+    return {
+      kind: "libCall",
+      fn: "tls.createSecureContext",
+      args: [opts.cert, opts.key],
+      type: SECURECTX_T,
+      loc,
+    };
   }
   // The CA-store introspection pair (scr_tls_ca.c — its own link gate, no
   // mbedTLS): getCACertificates(type?) answers the per-type cached PEM
@@ -3166,9 +5478,10 @@ function lowerTlsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
     if (args.length > 1) {
       lowerer.noLowering(`getCACertificates with ${args.length} arguments`, expr);
     }
-    const typeArg: IrExpr = args.length === 1
-      ? lowerer.lowerExprExpecting(args[0]!, STRING)
-      : { kind: "strLit", value: "default", type: STRING, loc };
+    const typeArg: IrExpr =
+      args.length === 1
+        ? lowerer.lowerExprExpecting(args[0]!, STRING)
+        : { kind: "strLit", value: "default", type: STRING, loc };
     return { kind: "libCall", fn: "tlsca.get", args: [typeArg], type: arrayOf(STRING), loc };
   }
   if (bi.member === "setDefaultCACertificates") {
@@ -3199,7 +5512,11 @@ function lowerTlsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
  * equality (test-tls-get-ca-certificates-bundled pins certs ===
  * rootCertificates). Null for other members (the property chains keep
  * trying). */
-export function lowerTlsRootCertificates(lowerer: Lowerer, bi: { module: string; member: string }, loc: SrcLoc): IrExpr | null {
+export function lowerTlsRootCertificates(
+  lowerer: Lowerer,
+  bi: { module: string; member: string },
+  loc: SrcLoc,
+): IrExpr | null {
   if (bi.module !== "tls" || bi.member !== "rootCertificates") return null;
   return { kind: "libCall", fn: "tlsca.root", args: [], type: arrayOf(STRING), loc };
 }
@@ -3219,14 +5536,20 @@ export interface HttpClientFnBinding {
   member: "request" | "get";
 }
 
-export function httpClientFnBindingOf(lowerer: Lowerer, sym: ts.Symbol): HttpClientFnBinding | undefined {
+export function httpClientFnBindingOf(
+  lowerer: Lowerer,
+  sym: ts.Symbol,
+): HttpClientFnBinding | undefined {
   return lowerer.httpClientFnBindings.get(sym);
 }
 
 /** The { module, member } of an http/https client-function REFERENCE
  * (`https.request` through a namespace import, or a named `request`
  * import binding) — null for anything else. */
-function clientFnRefOf(lowerer: Lowerer, node: ts.Expression): { module: "http" | "https"; member: "request" | "get" } | null {
+function clientFnRefOf(
+  lowerer: Lowerer,
+  node: ts.Expression,
+): { module: "http" | "https"; member: "request" | "get" } | null {
   const e = node;
   const bi = ts.isPropertyAccessExpression(e)
     ? lowerer.builtinMemberOf(e)
@@ -3234,7 +5557,10 @@ function clientFnRefOf(lowerer: Lowerer, node: ts.Expression): { module: "http" 
       ? lowerer.builtinImportOf(e)
       : null;
   if (!bi) return null;
-  if ((bi.module !== "http" && bi.module !== "https") || (bi.member !== "request" && bi.member !== "get")) {
+  if (
+    (bi.module !== "http" && bi.module !== "https") ||
+    (bi.member !== "request" && bi.member !== "get")
+  ) {
     return null;
   }
   return { module: bi.module, member: bi.member };
@@ -3244,9 +5570,12 @@ function clientFnRefOf(lowerer: Lowerer, node: ts.Expression): { module: "http" 
  * `const` declaration, or a parameter/let whose enclosing scope contains
  * no assignment or ++/-- targeting it. */
 function neverReassigned(lowerer: Lowerer, sym: ts.Symbol): boolean {
-  const decl = lowerer.checker.declarationsOf(sym)[0];
+  const decl = sym.declarations[0];
   if (!decl) return false;
-  if (ts.isVariableDeclaration(decl) && (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0) {
+  if (
+    ts.isVariableDeclaration(decl) &&
+    (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0
+  ) {
     return true;
   }
   if (!ts.isParameter(decl) && !ts.isVariableDeclaration(decl)) return false;
@@ -3254,7 +5583,12 @@ function neverReassigned(lowerer: Lowerer, sym: ts.Symbol): boolean {
   // source file for module-level bindings. Writes anywhere inside
   // (nested closures included) disqualify.
   let scope: ts.Node = decl;
-  while (scope.parent !== undefined && !ts.isFunctionLike(scope.parent) && !ts.isSourceFile(scope.parent)) scope = scope.parent;
+  while (
+    scope.parent !== undefined &&
+    !ts.isFunctionLike(scope.parent) &&
+    !ts.isSourceFile(scope.parent)
+  )
+    scope = scope.parent;
   const root = scope.parent;
   if (root === undefined) return false;
   let written = false;
@@ -3277,9 +5611,13 @@ function neverReassigned(lowerer: Lowerer, sym: ts.Symbol): boolean {
         return;
       }
     }
-    if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
-        (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
-        ts.isIdentifier(n.operand) && lowerer.checker.getSymbolAtLocation(n.operand) === sym) {
+    if (
+      (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+      (n.operator === ts.SyntaxKind.PlusPlusToken ||
+        n.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(n.operand) &&
+      lowerer.checker.getSymbolAtLocation(n.operand) === sym
+    ) {
       written = true;
       return;
     }
@@ -3295,7 +5633,11 @@ function neverReassigned(lowerer: Lowerer, sym: ts.Symbol): boolean {
  * nothing) and answers true. A matched ternary whose condition is not a
  * stable identifier fences pointedly; non-client ternaries answer false
  * (the ordinary decl path and its per-arm fences apply). */
-export function registerHttpClientFnBinding(lowerer: Lowerer, nameNode: ts.Node, init: ts.Expression | undefined): boolean {
+export function registerHttpClientFnBinding(
+  lowerer: Lowerer,
+  nameNode: ts.Node,
+  init: ts.Expression | undefined,
+): boolean {
   if (!init) return false;
   let e: ts.Expression = init;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
@@ -3326,25 +5668,36 @@ export function registerHttpClientFnBinding(lowerer: Lowerer, nameNode: ts.Node,
   }
   const symbol = lowerer.checker.getSymbolAtLocation(nameNode);
   if (symbol) {
-    lowerer.httpClientFnBindings.set(symbol, { cond, trueSecure: t.module === "https", member: t.member });
+    lowerer.httpClientFnBindings.set(symbol, {
+      cond,
+      trueSecure: t.module === "https",
+      member: t.member,
+    });
   }
   return true;
 }
 
 /** A call THROUGH a registered requestFn binding: the http client
  * lowering with the RUNTIME-secure extras (the binding mode). */
-export function lowerHttpClientFnCall(lowerer: Lowerer, expr: ts.CallExpression,
-  binding: HttpClientFnBinding, loc: SrcLoc,): IrExpr {
+export function lowerHttpClientFnCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  binding: HttpClientFnBinding,
+  loc: SrcLoc,
+): IrExpr {
   return lowerHttpClientCall(lowerer, expr, binding.member, loc, binding);
 }
 
 /** Module-function calls on https import bindings: createServer(options,
  * handler) and request/get — the http client lowering with the secure
  * extras (port 443 default, rejectUnauthorized, ca). */
-function lowerHttpsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+function lowerHttpsModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr {
-  const args = expr.arguments;
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
   if (bi.member === "createServer") {
     if (args.length < 1 || args.length > 2) {
       lowerer.noLowering(
@@ -3353,14 +5706,26 @@ function lowerHttpsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         "the supported form is createServer({ cert, key }, (req, res) => ...)",
       );
     }
-    const opts = lowerTlsServerOptionsOrDyn(lowerer, args[0]!, "https.createServer", true);
+    const opts = lowerTlsServerOptionsOrDyn(
+      lowerer,
+      args[0]!,
+      "https.createServer",
+      true,
+      TLS_CLIENT_AUTH_OPTIONS,
+    );
     if (args.length === 1) {
       // The handler-less form: 'request' listeners arrive later via
       // server.on("request", ...) — the createSecureServer emission's
       // NULL-handler shape, here for the runtime-options record only
       // (the literal path keeps its historical two-argument surface).
       if (opts.dyn !== undefined) {
-        return { kind: "libCall", fn: "https.createServerDyn", args: [opts.dyn], type: NETSERVER_T, loc };
+        return {
+          kind: "libCall",
+          fn: "https.createServerDyn",
+          args: [opts.dyn],
+          type: NETSERVER_T,
+          loc,
+        };
       }
       lowerer.noLowering(
         "createServer with 1 arguments",
@@ -3370,8 +5735,20 @@ function lowerHttpsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
     }
     const cb = lowerRequestHandlerArg(lowerer, args[1]!);
     return opts.dyn !== undefined
-      ? { kind: "libCall", fn: "https.createServerDynCb", args: [opts.dyn, cb], type: NETSERVER_T, loc }
-      : { kind: "libCall", fn: "https.createServer", args: [opts.cert, opts.key, cb], type: NETSERVER_T, loc };
+      ? {
+          kind: "libCall",
+          fn: "https.createServerDynCb",
+          args: [opts.dyn, cb],
+          type: NETSERVER_T,
+          loc,
+        }
+      : {
+          kind: "libCall",
+          fn: "https.createServer",
+          args: [opts.cert, opts.key, cb],
+          type: NETSERVER_T,
+          loc,
+        };
   }
   if (bi.member === "request" || bi.member === "get") {
     return lowerHttpClientCall(lowerer, expr, bi.member, loc, true);
@@ -3407,6 +5784,44 @@ const SNI_HINT =
   "...(x ? { SNICallback: x } : {}) — the callback is (servername, cb) => void " +
   "with cb: (err: Error | null, ctx?: tls.SecureContext) => void";
 
+/** An SNICallback option value: (servername: string, cb) => void where cb
+ * is (err: Error | null, ctx?: SecureContext) => void, or that function
+ * unioned with undefined (no callback). cb may declare fewer params (the
+ * emitted answer thunk matches its ABI), but what it does declare must
+ * carry the arms the thunk decodes. */
+function lowerSniCallbackValue(
+  lowerer: Lowerer,
+  node: ts.Expression,
+  blame: ts.Node,
+  what: string,
+): IrExpr {
+  return checkSniCallbackValue(lowerer, lowerer.lowerExpr(node), blame, what);
+}
+
+function checkSniCallbackValue(lowerer: Lowerer, v: IrExpr, blame: ts.Node, what: string): IrExpr {
+  const shapeOk = (t: IrType): boolean => {
+    if (t.kind !== "func" || t.ret.kind !== "void" || t.params.length !== 2) return false;
+    if (t.params[0]!.kind !== "string") return false;
+    const cbT = t.params[1]!;
+    if (cbT.kind !== "func" || cbT.ret.kind !== "void" || cbT.params.length > 2) return false;
+    const armKinds = (u: IrType): string[] =>
+      u.kind === "union" ? (lowerer.unions.get(u.unionId)?.arms ?? []).map((a) => a.kind) : [];
+    const p0 = cbT.params[0];
+    if (p0 !== undefined && !armKinds(p0).includes("nullT")) return false;
+    const p1 = cbT.params[1];
+    if (p1 !== undefined && !armKinds(p1).includes("secureCtx")) return false;
+    return true;
+  };
+  const arms = v.type.kind === "union" ? (lowerer.unions.get(v.type.unionId)?.arms ?? []) : [];
+  const funcArm = v.type.kind === "func" ? v.type : arms.find((a) => a.kind === "func");
+  const unionOk =
+    v.type.kind !== "union" || (arms.length === 2 && arms.some((a) => a.kind === "undefinedT"));
+  if (funcArm === undefined || !unionOk || !shapeOk(funcArm)) {
+    lowerer.noLowering(`a ${what} SNICallback of '${lowerer.fmt(v.type)}' values`, blame, SNI_HINT);
+  }
+  return v;
+}
+
 /** Strips parentheses and type assertions: the portless spelling wraps
  * an options spread as `...({ ... } as Record<string, unknown>)`. */
 function stripParensAndCasts(node: ts.Expression): ts.Expression {
@@ -3421,10 +5836,13 @@ function stripParensAndCasts(node: ts.Expression): ts.Expression {
 /** Module-function calls on http2 import bindings. createServer lowers h2c;
  * createSecureServer lowers h2 over TLS, with allowHTTP1 selecting one
  * dual-ALPN server whose request/connect listeners mirror across parsers. */
-function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+function lowerHttp2ModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr {
-  const args = expr.arguments;
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
   if (bi.member === "createServer") {
     // The REAL h2c server (scr_http2.c). An options object literal is
     // accepted and ignored (h2 session-tuning knobs; the honest-defaults
@@ -3443,8 +5861,10 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       // evaluated (h2 knobs this core runs at defaults; the options
       // expression is a pure read in every suite shape).
       const t = lowerer.typeOf(a);
-      if (lowerer.checker.getCallSignatures(t).length > 0 ||
-          (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+      if (
+        lowerer.checker.getCallSignatures(t).length > 0 ||
+        (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+      ) {
         handlerNode = a;
       }
     }
@@ -3462,13 +5882,19 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
     // http2.connect(authority[, listener]) — the h2c client. The
     // authority is a string (URL objects and an options record fence).
     if (args.length < 1 || args.length > 3) {
-      lowerer.noLowering(`http2.connect with ${args.length} arguments`, expr,
-        "the supported form is connect(authority[, options][, listener]) with a string authority");
+      lowerer.noLowering(
+        `http2.connect with ${args.length} arguments`,
+        expr,
+        "the supported form is connect(authority[, options][, listener]) with a string authority",
+      );
     }
     const auth = lowerer.lowerExpr(args[0]!);
     if (auth.type.kind !== "string") {
-      lowerer.noLowering(`http2.connect with a '${lowerer.fmt(auth.type)}' authority`, args[0]!,
-        "the authority is a string here (\"http://host:port\")");
+      lowerer.noLowering(
+        `http2.connect with a '${lowerer.fmt(auth.type)}' authority`,
+        args[0]!,
+        'the authority is a string here ("http://host:port")',
+      );
     }
     // connect(authority, options[, listener]): session-tuning options
     // are accepted and never evaluated (the core runs at defaults) —
@@ -3483,12 +5909,16 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
     let listenerNode: ts.Expression | undefined = args[1];
     let reject: IrExpr = { kind: "boolLit", value: true, type: BOOL, loc };
     let ca: IrExpr = { kind: "strLit", value: "", type: STRING, loc };
-    const arg1IsDyn = args.length >= 2 &&
+    const arg1IsDyn =
+      args.length >= 2 &&
       (lowerer.typeOf(args[1]!).flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-    if (args.length >= 2 && !arg1IsDyn &&
-        lowerer.checker.getCallSignatures(lowerer.typeOf(args[1]!)).length === 0) {
+    if (
+      args.length >= 2 &&
+      !arg1IsDyn &&
+      lowerer.checker.getCallSignatures(lowerer.typeOf(args[1]!)).length === 0
+    ) {
       if (ts.isObjectLiteralExpression(args[1]!)) {
-        for (const pr of (args[1] as ts.ObjectLiteralExpression).properties) {
+        for (const pr of (args[1] as ts.ObjectLiteralExpression).properties.nodes) {
           // Plain `name: value` and shorthand `{ ca }` both carry the
           // option; a shorthand's value is the same-named identifier.
           let name: string;
@@ -3503,15 +5933,21 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
             continue;
           }
           if (name === "createConnection") {
-            lowerer.noLowering("http2.connect with a createConnection option", args[1]!,
-              "custom transports are not modeled — connect dials TCP itself");
+            lowerer.noLowering(
+              "http2.connect with a createConnection option",
+              args[1]!,
+              "custom transports are not modeled — connect dials TCP itself",
+            );
           }
           if (name === "rejectUnauthorized") {
             if (valueNode.kind === ts.SyntaxKind.FalseKeyword) {
               reject = { kind: "boolLit", value: false, type: BOOL, loc };
             } else if (valueNode.kind !== ts.SyntaxKind.TrueKeyword) {
-              lowerer.noLowering("http2.connect with a non-literal rejectUnauthorized option", pr,
-                "spell it true or false — it gates the https authority's certificate verification");
+              lowerer.noLowering(
+                "http2.connect with a non-literal rejectUnauthorized option",
+                pr,
+                "spell it true or false — it gates the https authority's certificate verification",
+              );
             }
           }
           if (name === "ca") {
@@ -3522,13 +5958,19 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
               ca = {
                 kind: "libCall",
                 fn: "tls.pemDyn",
-                args: [v, { kind: "strLit", value: "an http2.connect 'ca' option", type: STRING, loc }],
+                args: [
+                  v,
+                  { kind: "strLit", value: "an http2.connect 'ca' option", type: STRING, loc },
+                ],
                 type: BYTES_U8,
                 loc,
               };
             } else {
-              lowerer.noLowering(`an http2.connect 'ca' option of '${lowerer.fmt(v.type)}' values`, pr,
-                "ca is a PEM string or Buffer here");
+              lowerer.noLowering(
+                `an http2.connect 'ca' option of '${lowerer.fmt(v.type)}' values`,
+                pr,
+                "ca is a PEM string or Buffer here",
+              );
             }
           }
         }
@@ -3541,14 +5983,29 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       // The listener is the 'connect' once-listener: (session, socket) or
       // fewer. Its result is ignored (voidized); handles pass by ref.
       const { cb } = lowerCallbackArg(
-        lowerer, listenerNode, "connect listeners", 2,
+        lowerer,
+        listenerNode,
+        "connect listeners",
+        2,
         (p) => p.kind === "http2Session" || p.kind === "netSocket",
         "use (session, socket), (session), or ()",
         [HTTP2SESSION_T, NETSOCKET_T],
       );
-      return { kind: "libCall", fn: "http2.connectCb", args: [auth, reject, ca, cb], type: HTTP2SESSION_T, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.connectCb",
+        args: [auth, reject, ca, cb],
+        type: HTTP2SESSION_T,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "http2.connect", args: [auth, reject, ca], type: HTTP2SESSION_T, loc };
+    return {
+      kind: "libCall",
+      fn: "http2.connect",
+      args: [auth, reject, ca],
+      type: HTTP2SESSION_T,
+      loc,
+    };
   }
   if (bi.member === "getDefaultSettings") {
     // The constant defaults record, as a dyn value (the d.ts types it
@@ -3579,7 +6036,13 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       let dynOpts: IrExpr;
       if (v.type.kind === "dyn") {
         dynOpts = v;
-      } else if (canConvertToDyn(v.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id))) {
+      } else if (
+        canConvertToDyn(
+          v.type,
+          (id) => lowerer.shapes.get(id),
+          (id) => lowerer.unions.get(id),
+        )
+      ) {
         dynOpts = { kind: "dynFrom", value: v, type: DYN, loc: locOf(optsNode) };
       } else {
         lowerer.noLowering(
@@ -3589,49 +6052,30 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         );
       }
       if (handlerNode === null) {
-        return { kind: "libCall", fn: "http2.createSecureServerDyn", args: [dynOpts], type: NETSERVER_T, loc };
+        return {
+          kind: "libCall",
+          fn: "http2.createSecureServerDyn",
+          args: [dynOpts],
+          type: NETSERVER_T,
+          loc,
+        };
       }
       const cb = lowerRequestHandlerArg(lowerer, handlerNode);
-      return { kind: "libCall", fn: "http2.createSecureServerDynCb", args: [dynOpts, cb], type: NETSERVER_T, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.createSecureServerDynCb",
+        args: [dynOpts, cb],
+        type: NETSERVER_T,
+        loc,
+      };
     }
     let cert: IrExpr | null = null;
     let key: IrExpr | null = null;
     let sni: IrExpr | null = null;
     let allowHttp1 = false;
     let enableConnectProtocol = false;
-    // The SNICallback value shape: (servername: string, cb) => void where
-    // cb is (err: Error | null, ctx?: SecureContext) => void — cb may
-    // declare fewer params (the emitted answer thunk matches its ABI),
-    // but what it does declare must carry the arms the thunk decodes.
-    const sniShapeOk = (t: IrType): boolean => {
-      if (t.kind !== "func" || t.ret.kind !== "void" || t.params.length !== 2) return false;
-      if (t.params[0]!.kind !== "string") return false;
-      const cbT = t.params[1]!;
-      if (cbT.kind !== "func" || cbT.ret.kind !== "void" || cbT.params.length > 2) return false;
-      const armKinds = (u: IrType): string[] =>
-        u.kind === "union" ? (lowerer.unions.get(u.unionId)?.arms ?? []).map((a) => a.kind) : [];
-      const p0 = cbT.params[0];
-      if (p0 !== undefined && !armKinds(p0).includes("nullT")) return false;
-      const p1 = cbT.params[1];
-      if (p1 !== undefined && !armKinds(p1).includes("secureCtx")) return false;
-      return true;
-    };
     const lowerSniValue = (node: ts.Expression, blame: ts.Node): void => {
-      const v = lowerer.lowerExpr(node);
-      const funcArm =
-        v.type.kind === "func"
-          ? v.type
-          : v.type.kind === "union"
-            ? (lowerer.unions.get(v.type.unionId)?.arms ?? []).find((a) => a.kind === "func")
-            : undefined;
-      const unionOk =
-        v.type.kind !== "union" ||
-        ((lowerer.unions.get(v.type.unionId)?.arms ?? []).length === 2 &&
-          (lowerer.unions.get(v.type.unionId)?.arms ?? []).some((a) => a.kind === "undefinedT"));
-      if (funcArm === undefined || !unionOk || !sniShapeOk(funcArm)) {
-        lowerer.noLowering(`a createSecureServer SNICallback of '${lowerer.fmt(v.type)}' values`, blame, SNI_HINT);
-      }
-      sni = v;
+      sni = lowerSniCallbackValue(lowerer, node, blame, "createSecureServer");
     };
     const lowerOption = (prop: ts.ObjectLiteralElementLike): void => {
       if (ts.isSpreadAssignment(prop)) {
@@ -3650,17 +6094,18 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         if (ts.isConditionalExpression(inner)) {
           const whenTrue = stripParensAndCasts(inner.whenTrue);
           const whenFalse = stripParensAndCasts(inner.whenFalse);
-          const condText = inner.condition.getText();
+          const condText = ts.getTextOfNode(inner.condition);
           const ok =
             ts.isObjectLiteralExpression(whenTrue) &&
             ts.isObjectLiteralExpression(whenFalse) &&
-            whenFalse.properties.length === 0 &&
-            whenTrue.properties.length === 1 &&
-            ts.isPropertyAssignment(whenTrue.properties[0]!) &&
-            (ts.isIdentifier(whenTrue.properties[0]!.name) ||
-              ts.isStringLiteral(whenTrue.properties[0]!.name)) &&
-            (whenTrue.properties[0]!.name as ts.Identifier | ts.StringLiteral).text === "SNICallback" &&
-            whenTrue.properties[0]!.initializer.getText() === condText;
+            whenFalse.properties.nodes.length === 0 &&
+            whenTrue.properties.nodes.length === 1 &&
+            ts.isPropertyAssignment(whenTrue.properties.nodes[0]!) &&
+            (ts.isIdentifier(whenTrue.properties.nodes[0]!.name) ||
+              ts.isStringLiteral(whenTrue.properties.nodes[0]!.name)) &&
+            (whenTrue.properties.nodes[0]!.name as ts.Identifier | ts.StringLiteral).text ===
+              "SNICallback" &&
+            ts.getTextOfNode(whenTrue.properties.nodes[0]!.initializer) === condText;
           if (!ok) {
             lowerer.noLowering(
               "createSecureServer options with a conditional spread",
@@ -3678,12 +6123,14 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
             `spreads must be inline object literals here; ${SNI_HINT}`,
           );
         }
-        for (const p of inner.properties) lowerOption(p);
+        for (const p of inner.properties.nodes) lowerOption(p);
         return;
       }
       let initializer: ts.Expression | null;
-      if (ts.isPropertyAssignment(prop) &&
-          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+      if (
+        ts.isPropertyAssignment(prop) &&
+        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+      ) {
         initializer = prop.initializer;
       } else if (ts.isShorthandPropertyAssignment(prop)) {
         initializer = null;
@@ -3711,16 +6158,20 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         return;
       }
       if (k === "cert" || k === "key") {
-        let v = initializer !== null
-          ? lowerer.lowerExpr(initializer)
-          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        let v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
         if (v.type.kind === "dyn") {
           // A runtime PEM value (fixtures.readKey(...)): the tls walk's
           // runtime extraction, same fences at runtime.
           v = {
             kind: "libCall",
             fn: "tls.pemDyn",
-            args: [v, { kind: "strLit", value: `a createSecureServer '${k}' option`, type: STRING, loc }],
+            args: [
+              v,
+              { kind: "strLit", value: `a createSecureServer '${k}' option`, type: STRING, loc },
+            ],
             type: BYTES_U8,
             loc,
           };
@@ -3742,19 +6193,29 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
         // itself inert h2-session state, so the same no-observable-skip
         // argument covers the one level of nesting.
         const isScalarLiteral = (e: ts.Expression): boolean =>
-          ts.isNumericLiteral(e) || ts.isStringLiteralLike(e) ||
-          e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword;
+          ts.isNumericLiteral(e) ||
+          ts.isStringLiteralLike(e) ||
+          e.kind === ts.SyntaxKind.TrueKeyword ||
+          e.kind === ts.SyntaxKind.FalseKeyword;
         const isLiteralObjectOfLiterals = (e: ts.Expression): boolean =>
           ts.isObjectLiteralExpression(e) &&
-          e.properties.every(
-            (p) => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && isScalarLiteral(p.initializer),
+          e.properties.nodes.every(
+            (p) =>
+              ts.isPropertyAssignment(p) &&
+              ts.isIdentifier(p.name) &&
+              isScalarLiteral(p.initializer),
           );
         if (k === "settings" && initializer !== null && ts.isObjectLiteralExpression(initializer)) {
-          for (const setting of initializer.properties) {
-            if (ts.isPropertyAssignment(setting) && ts.isIdentifier(setting.name) &&
-                setting.name.text === "enableConnectProtocol") {
-              if (setting.initializer.kind !== ts.SyntaxKind.TrueKeyword &&
-                  setting.initializer.kind !== ts.SyntaxKind.FalseKeyword) {
+          for (const setting of initializer.properties.nodes) {
+            if (
+              ts.isPropertyAssignment(setting) &&
+              ts.isIdentifier(setting.name) &&
+              setting.name.text === "enableConnectProtocol"
+            ) {
+              if (
+                setting.initializer.kind !== ts.SyntaxKind.TrueKeyword &&
+                setting.initializer.kind !== ts.SyntaxKind.FalseKeyword
+              ) {
                 lowerer.noLowering(
                   "settings.enableConnectProtocol with a non-boolean literal",
                   setting,
@@ -3765,8 +6226,10 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
             }
           }
         }
-        if (initializer !== null &&
-            (isScalarLiteral(initializer) || isLiteralObjectOfLiterals(initializer))) {
+        if (
+          initializer !== null &&
+          (isScalarLiteral(initializer) || isLiteralObjectOfLiterals(initializer))
+        ) {
           return;
         }
         lowerer.noLowering(
@@ -3777,18 +6240,26 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       }
       if (k === "SNICallback") {
         if (initializer === null) {
-          lowerer.noLowering("createSecureServer with a shorthand SNICallback option", prop, "spell it out: SNICallback: theCallback");
+          lowerer.noLowering(
+            "createSecureServer with a shorthand SNICallback option",
+            prop,
+            "spell it out: SNICallback: theCallback",
+          );
         }
         lowerSniValue(initializer, prop);
         return;
       }
       fenceOrDropOptionKey(
-        lowerer, prop, k, "createSecureServer", HTTP2_SECURE_SERVER_DOCUMENTED_OPTIONS,
+        lowerer,
+        prop,
+        k,
+        "createSecureServer",
+        HTTP2_SECURE_SERVER_DOCUMENTED_OPTIONS,
         "allowHTTP1: true, cert, key, and SNICallback are the supported options (h2 session-tuning options are accepted as literals and ignored)",
       );
       // An undocumented key, dropped like Node drops it.
     };
-    for (const prop of optsNode.properties) lowerOption(prop);
+    for (const prop of optsNode.properties.nodes) lowerOption(prop);
     if (cert === null || key === null) {
       lowerer.noLowering(
         "createSecureServer without both cert and key",
@@ -3800,7 +6271,7 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       lowerer.noLowering(
         "createSecureServer with both an SNICallback and an eager handler",
         expr,
-        "register the handler separately: server.on(\"request\", (req, res) => ...)",
+        'register the handler separately: server.on("request", (req, res) => ...)',
       );
     }
     if (!allowHttp1) {
@@ -3818,18 +6289,48 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       }
       if (handlerNode !== null) {
         const cb = lowerRequestHandlerArg(lowerer, handlerNode);
-        return { kind: "libCall", fn: "http2.createSecureServerH2Req", args: [cert, key, cb, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
+        return {
+          kind: "libCall",
+          fn: "http2.createSecureServerH2Req",
+          args: [cert, key, cb, boolLit(enableConnectProtocol, loc)],
+          type: NETSERVER_T,
+          loc,
+        };
       }
-      return { kind: "libCall", fn: "http2.createSecureServerH2", args: [cert, key, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.createSecureServerH2",
+        args: [cert, key, boolLit(enableConnectProtocol, loc)],
+        type: NETSERVER_T,
+        loc,
+      };
     }
     if (sni !== null) {
-      return { kind: "libCall", fn: "http2.createSecureServerSni", args: [cert, key, sni, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.createSecureServerSni",
+        args: [cert, key, sni, boolLit(enableConnectProtocol, loc)],
+        type: NETSERVER_T,
+        loc,
+      };
     }
     if (handlerNode !== null) {
       const cb = lowerRequestHandlerArg(lowerer, handlerNode);
-      return { kind: "libCall", fn: "http2.createSecureServerReq", args: [cert, key, cb, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
+      return {
+        kind: "libCall",
+        fn: "http2.createSecureServerReq",
+        args: [cert, key, cb, boolLit(enableConnectProtocol, loc)],
+        type: NETSERVER_T,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "http2.createSecureServer", args: [cert, key, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
+    return {
+      kind: "libCall",
+      fn: "http2.createSecureServer",
+      args: [cert, key, boolLit(enableConnectProtocol, loc)],
+      type: NETSERVER_T,
+      loc,
+    };
   }
   lowerer.noLowering(
     `http2.${bi.member}`,
@@ -3838,6 +6339,46 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
       "createSecureServer({ allowHTTP1: true, cert, key }) and the h2-only form are lowered",
     lowerer.resolveValueSymbol(expr.expression as ts.Identifier),
   );
+}
+
+/** The checked-dynamic options value of a request whose options the
+ * runtime reads: a non-literal options value (a RequestOptions variable —
+ * checked-dynamic storage — or a record that converts to one), or a
+ * literal the static walk cannot lower because it spreads another options
+ * value or sets socketPath. Null keeps the static literal walk (and its
+ * fences), which every other literal takes unchanged. */
+function runtimeRequestOptions(
+  lowerer: Lowerer,
+  optsNode: ts.Expression,
+  secureish: boolean,
+): IrExpr | null {
+  if (ts.isObjectLiteralExpression(optsNode)) {
+    const needsRuntime = optsNode.properties.nodes.some((prop) => {
+      if (ts.isSpreadAssignment(prop)) {
+        // the static walk's one spread: `...(c ? { rejectUnauthorized } : {})` on https
+        const cs = conditionalSpreadOf(prop.expression);
+        return !(
+          secureish &&
+          cs !== null &&
+          cs !== "unsupported" &&
+          cs.props.length === 1 &&
+          cs.props[0]!.name.text === "rejectUnauthorized"
+        );
+      }
+      return (
+        (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) &&
+        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+        (prop.name.text === "socketPath" ||
+          // a client certificate: the runtime request walk reads cert and key
+          (secureish && (prop.name.text === "cert" || prop.name.text === "key")))
+      );
+    });
+    if (!needsRuntime) return null;
+    return lowerDynObjectLiteral(lowerer, optsNode);
+  }
+  const t = lowerer.mapTypeOf(lowerer.typeOf(optsNode));
+  if (!t || !(t.kind === "dyn" || (t.kind === "record" && lowerer.dynConvertible(t)))) return null;
+  return lowerer.coerceToExpected(lowerer.lowerExpr(optsNode), DYN);
 }
 
 /** http.request(options[, cb]) / http.get(options[, cb]) — the client.
@@ -3858,19 +6399,22 @@ function lowerHttp2ModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
  * supported options SPREAD is the conditional `...(c ? {
  * rejectUnauthorized: <bool> } : {})` (either orientation) — the
  * portless isProxyRunning shape. */
-function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: "request" | "get",
-  loc: SrcLoc, secure: boolean | HttpClientFnBinding = false): IrExpr {
+function lowerHttpClientCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  member: "request" | "get",
+  loc: SrcLoc,
+  secure: boolean | HttpClientFnBinding = false,
+): IrExpr {
   const binding = typeof secure === "object" ? secure : null;
   const secureish = binding !== null || secure === true;
   /** A FRESH lowering of the binding's secure condition (pure identifier
    * read — each use is its own IR). */
   const secureExpr = (): IrExpr => {
     const c = lowerer.lowerCondition(binding!.cond);
-    return binding!.trueSecure
-      ? c
-      : { kind: "unary", op: "!", operand: c, type: BOOL, loc };
+    return binding!.trueSecure ? c : { kind: "unary", op: "!", operand: c, type: BOOL, loc };
   };
-  const args = expr.arguments;
+  const args = expr.arguments.nodes;
   if (args.length < 1 || args.length > 2) {
     lowerer.noLowering(
       `${member} with ${args.length} arguments`,
@@ -3879,6 +6423,40 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
     );
   }
   const optsNode = args[0]!;
+  const runtimeOptions =
+    binding === null ? runtimeRequestOptions(lowerer, optsNode, secureish) : null;
+  if (runtimeOptions !== null) {
+    // The options record is read at run time (the ClientRequest
+    // constructor's walk in the runtime): a RequestOptions variable, or a
+    // literal that spreads one or sets socketPath.
+    const autoEnd = boolLit(member === "get", loc);
+    const secureDyn = secure === true;
+    if (args.length === 1) {
+      return {
+        kind: "libCall",
+        fn: secureDyn ? "https.requestDyn" : "http.requestDyn",
+        args: [runtimeOptions, autoEnd],
+        type: HTTPCLIENTREQ_T,
+        loc,
+      };
+    }
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      args[1]!,
+      "response callbacks",
+      1,
+      (p) => p.kind === "httpReq",
+      "use (res) or ()",
+      [HTTPREQ_T],
+    );
+    return {
+      kind: "libCall",
+      fn: secureDyn ? "https.requestDynCb" : "http.requestDynCb",
+      args: [runtimeOptions, autoEnd, cb],
+      type: HTTPCLIENTREQ_T,
+      loc,
+    };
+  }
   if (!ts.isObjectLiteralExpression(optsNode)) {
     const t = lowerer.mapTypeOf(lowerer.typeOf(optsNode));
     if ((t?.kind === "string" || t?.kind === "url") && binding === null) {
@@ -3892,24 +6470,40 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
       // reject each other's URLs.
       // A URL OBJECT is its href through the same parse — Node's own
       // reading of the argument, and the serialization round-trips.
-      const url: IrExpr = t.kind === "url"
-        ? { kind: "libCall", fn: "url.href", args: [lowerer.lowerExpr(optsNode)], type: STRING, loc }
-        : lowerer.lowerExprExpecting(optsNode, STRING);
+      const url: IrExpr =
+        t.kind === "url"
+          ? {
+              kind: "libCall",
+              fn: "url.href",
+              args: [lowerer.lowerExpr(optsNode)],
+              type: STRING,
+              loc,
+            }
+          : lowerer.lowerExprExpecting(optsNode, STRING);
       const methodLit: IrExpr = { kind: "strLit", value: "GET", type: STRING, loc };
       const autoEnd = boolLit(member === "get", loc);
       const isTls = secure === true;
       if (args.length === 1) {
-        const fn = isTls ? "https.requestUrl" as const : "http.requestUrl" as const;
+        const fn = isTls ? ("https.requestUrl" as const) : ("http.requestUrl" as const);
         return { kind: "libCall", fn, args: [url, methodLit, autoEnd], type: HTTPCLIENTREQ_T, loc };
       }
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "response callbacks", 1,
+        lowerer,
+        args[1]!,
+        "response callbacks",
+        1,
         (p) => p.kind === "httpReq",
         "use (res) or ()",
         [HTTPREQ_T],
       );
-      const fn = isTls ? "https.requestUrlCb" as const : "http.requestUrlCb" as const;
-      return { kind: "libCall", fn, args: [url, methodLit, autoEnd, cb], type: HTTPCLIENTREQ_T, loc };
+      const fn = isTls ? ("https.requestUrlCb" as const) : ("http.requestUrlCb" as const);
+      return {
+        kind: "libCall",
+        fn,
+        args: [url, methodLit, autoEnd, cb],
+        type: HTTPCLIENTREQ_T,
+        loc,
+      };
     }
     lowerer.noLowering(
       t?.kind === "string"
@@ -3917,9 +6511,9 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
         : `${member} with a non-literal options argument`,
       optsNode,
       t?.kind === "string"
-        // Only the binding mode reaches here now: the scheme would have to
-        // agree with a dial chosen at runtime.
-        ? "call http.request / https.request directly for the URL-string form, or pass the options as an object literal"
+        ? // Only the binding mode reaches here now: the scheme would have to
+          // agree with a dial chosen at runtime.
+          "call http.request / https.request directly for the URL-string form, or pass the options as an object literal"
         : "pass the options as an object literal: { hostname, port, path, method, timeout?, headers? }",
     );
   }
@@ -3936,7 +6530,13 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
   let agentClose: ts.Node | null = null;
   /** agent: <Agent value> — the requestAgent rows thread the handle. */
   let agentVal: IrExpr | null = null;
-  for (const prop of optsNode.properties) {
+  /** signal: an AbortSignal (checked at runtime) that destroys the request. */
+  let signal: IrExpr | null = null;
+  /** servername: the TLS name for SNI and certificate verification. */
+  let servername: IrExpr | null = null;
+  /** maxHeaderSize: the response head's size bound. */
+  let maxHeaderSize: IrExpr | null = null;
+  for (const prop of optsNode.properties.nodes) {
     // Shorthand entries ({ port } for { port: port }) are the natural
     // spelling at these call sites — the shorthand's VALUE lowering
     // resolves the local binding (lowerShorthandValue), not the property
@@ -3949,9 +6549,14 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
     // plain client has no TLS layer to configure).
     if (ts.isSpreadAssignment(prop)) {
       const cs = conditionalSpreadOf(prop.expression);
-      if (cs !== null && cs !== "unsupported" && cs.props.length === 1 &&
-          cs.props[0]!.name.text === "rejectUnauthorized" &&
-          ts.isPropertyAssignment(cs.props[0]!) && secureish) {
+      if (
+        cs !== null &&
+        cs !== "unsupported" &&
+        cs.props.length === 1 &&
+        cs.props[0]!.name.text === "rejectUnauthorized" &&
+        ts.isPropertyAssignment(cs.props[0]!) &&
+        secureish
+      ) {
         const cond = lowerer.lowerCondition(cs.cond);
         const v = lowerer.lowerExpr((cs.props[0] as ts.PropertyAssignment).initializer);
         if (v.type.kind !== "bool") {
@@ -3981,8 +6586,10 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
       );
     }
     let initializer: ts.Expression | null;
-    if (ts.isPropertyAssignment(prop) &&
-        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
+    ) {
       initializer = prop.initializer;
     } else if (ts.isShorthandPropertyAssignment(prop)) {
       initializer = null;
@@ -3995,21 +6602,29 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
     }
     const key = (prop.name as ts.Identifier | ts.StringLiteral).text;
     const lowerVal = (want: "string" | "f64"): IrExpr => {
-      const v = initializer !== null
-        ? lowerer.lowerExpr(initializer)
-        : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      const v =
+        initializer !== null
+          ? lowerer.lowerExpr(initializer)
+          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
       // A checked-dynamic value (an untyped JS binding carrying the
       // port/path through a helper): dynCheck validates it into the
       // option's type — a mismatch is the catchable path-annotated
       // TypeError, the boundary's stance.
       if (v.type.kind === "dyn") {
-        return { kind: "dynCheck", value: v, type: want === "string" ? STRING : F64, loc: locOf(prop) };
+        return {
+          kind: "dynCheck",
+          value: v,
+          type: want === "string" ? STRING : F64,
+          loc: locOf(prop),
+        };
       }
       if (v.type.kind !== want) {
         lowerer.noLowering(
           `a ${member} '${key}' option of '${lowerer.fmt(v.type)}' values`,
           prop,
-          want === "string" ? "the option value must be a string" : "the option value must be a number",
+          want === "string"
+            ? "the option value must be a string"
+            : "the option value must be a number",
         );
       }
       return v;
@@ -4031,9 +6646,41 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
       case "timeout":
         timeout = lowerVal("f64");
         break;
+      case "maxHeaderSize":
+        maxHeaderSize = lowerVal("f64");
+        break;
+      case "servername":
+        if (binding !== null) {
+          lowerer.noLowering(
+            `${member} option 'servername' through a module-function binding`,
+            prop,
+            "call https.request directly when passing servername",
+          );
+        }
+        if (!secureish) {
+          lowerer.noLowering(
+            `${member} option 'servername'`,
+            prop,
+            "servername is an https.request option — the plain http client has no TLS layer",
+          );
+        }
+        servername = lowerVal("string");
+        break;
+      case "signal": {
+        const v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        signal = lowerer.coerceToExpected(v, DYN);
+        break;
+      }
       case "headers":
         if (initializer === null) {
-          lowerer.noLowering(`${member} with a shorthand headers option`, prop, "spell it out: headers: theHeaders");
+          lowerer.noLowering(
+            `${member} with a shorthand headers option`,
+            prop,
+            "spell it out: headers: theHeaders",
+          );
         }
         headers = lowerClientHeadersOption(lowerer, initializer);
         break;
@@ -4050,10 +6697,18 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
           );
         }
         if (initializer === null) {
-          lowerer.noLowering(`${member} with a shorthand createConnection option`, prop, "spell it out: createConnection: theDialer");
+          lowerer.noLowering(
+            `${member} with a shorthand createConnection option`,
+            prop,
+            "spell it out: createConnection: theDialer",
+          );
         }
         const v = lowerer.lowerExpr(initializer);
-        if (v.type.kind !== "func" || v.type.params.length !== 0 || v.type.ret.kind !== "netSocket") {
+        if (
+          v.type.kind !== "func" ||
+          v.type.params.length !== 0 ||
+          v.type.ret.kind !== "netSocket"
+        ) {
           lowerer.noLowering(
             `a ${member} 'createConnection' option of '${lowerer.fmt(v.type)}' values`,
             prop,
@@ -4071,9 +6726,10 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
             "rejectUnauthorized is an https.request option — the plain http client has no TLS layer",
           );
         }
-        const v = initializer !== null
-          ? lowerer.lowerExpr(initializer)
-          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        const v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
         if (v.type.kind !== "bool") {
           lowerer.noLowering(
             `a ${member} 'rejectUnauthorized' option of '${lowerer.fmt(v.type)}' values`,
@@ -4092,9 +6748,10 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
             "ca is an https.request option — the plain http client has no TLS layer",
           );
         }
-        const v = initializer !== null
-          ? lowerer.lowerExpr(initializer)
-          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        const v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
         if (v.type.kind !== "string" && !(v.type.kind === "bytes" && v.type.elem === "u8")) {
           lowerer.noLowering(
             `a ${member} 'ca' option of '${lowerer.fmt(v.type)}' values`,
@@ -4121,14 +6778,16 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
           agentClose = prop;
           break;
         }
-        if (e !== null &&
-            (e.kind === ts.SyntaxKind.NullKeyword ||
-             (ts.isIdentifier(e) && e.text === "undefined"))) {
+        if (
+          e !== null &&
+          (e.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(e) && e.text === "undefined"))
+        ) {
           break; // the default agent: what the agent-free call compiles
         }
-        const v = initializer !== null
-          ? lowerer.lowerExpr(initializer)
-          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        const v =
+          initializer !== null
+            ? lowerer.lowerExpr(initializer)
+            : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
         if (v.type.kind !== "dyn") {
           lowerer.noLowering(
             `a ${member} 'agent' option of '${lowerer.fmt(v.type)}' values`,
@@ -4142,11 +6801,14 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
       }
       default:
         fenceOrDropOptionKey(
-          lowerer, prop, key, member,
+          lowerer,
+          prop,
+          key,
+          member,
           secureish ? HTTPS_CLIENT_DOCUMENTED_OPTIONS : HTTP_CLIENT_DOCUMENTED_OPTIONS,
           secureish
-            ? "hostname/host, port, path, method, timeout, headers, agent, rejectUnauthorized, and ca are the supported options"
-            : "hostname/host, port, path, method, timeout, headers, and agent are the supported options",
+            ? "hostname/host, port, path, method, timeout, headers, agent, signal, maxHeaderSize, rejectUnauthorized, ca, and servername are the supported options"
+            : "hostname/host, port, path, method, timeout, headers, agent, signal, and maxHeaderSize are the supported options",
         );
     }
   }
@@ -4159,27 +6821,35 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
     // fences instead of double-sending.
 
     if (headers === null) {
-      headers = { kind: "arrayLit", elems: [strLit("Connection", loc), strLit("close", loc)], type: arrayOf(STRING), loc };
+      headers = {
+        kind: "arrayLit",
+        elems: [strLit("Connection", loc), strLit("close", loc)],
+        type: arrayOf(STRING),
+        loc,
+      };
     } else if (headers.kind === "arrayLit") {
       const hasConnection = headers.elems.some(
         (el, i) => i % 2 === 0 && el.kind === "strLit" && el.value.toLowerCase() === "connection",
       );
       if (!hasConnection) {
-        headers = { ...headers, elems: [...headers.elems, strLit("Connection", loc), strLit("close", loc)] };
+        headers = {
+          ...headers,
+          elems: [...headers.elems, strLit("Connection", loc), strLit("close", loc)],
+        };
       }
     } else {
       lowerer.noLowering(
         `${member} with agent: false and a non-literal headers record`,
         agentClose,
         "agent: false lowers by injecting Connection: close into a LITERAL headers object — " +
-          "add connection: \"close\" to the record instead, or write the headers inline",
+          'add connection: "close" to the record instead, or write the headers inline',
       );
     }
   }
 
   if (connCb !== null && (host !== null || port !== null)) {
     // Node would use host/port only for the Host header once a dialer
-    // exists — a silent half-use; set headers.host instead.
+    // exists — a partial use with no warning; set headers.host instead.
     lowerer.noLowering(
       `${member} mixing createConnection with hostname/host/port`,
       optsNode,
@@ -4205,27 +6875,121 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
   // TLS arm, 80 on the plain one — exactly each client's own default.
   // With an AGENT the sentinel -1 says "no port option": the runtime
   // consults the agent's (settable) defaultPort first, Node's merge.
-  port ??= binding !== null
-    ? { kind: "ternary", cond: secureExpr(), then: numLit(443, loc), else_: numLit(80, loc), type: F64, loc }
-    : agentVal !== null ? numLit(-1, loc)
-    : numLit(secure === true ? 443 : 80, loc);
+  port ??=
+    binding !== null
+      ? {
+          kind: "ternary",
+          cond: secureExpr(),
+          then: numLit(443, loc),
+          else_: numLit(80, loc),
+          type: F64,
+          loc,
+        }
+      : agentVal !== null
+        ? numLit(-1, loc)
+        : numLit(secure === true ? 443 : 80, loc);
   path ??= strLit("/", loc);
   method ??= strLit("GET", loc);
   timeout ??= numLit(0, loc);
   headers ??= { kind: "arrayLit", elems: [], type: arrayOf(STRING), loc };
   const autoEnd = boolLit(member === "get", loc);
+  // options.signal is checked first: Node's constructor rejects a value
+  // that is not an AbortSignal before it dials. servername is stored just
+  // before construction (it selects the TLS name and which pooled sockets
+  // the request may reuse); maxHeaderSize and the signal then apply to the
+  // built request (an already aborted signal destroys it at once, like
+  // Node's constructor).
+  const withSignal = (request: IrExpr): IrExpr => {
+    if (signal === null && servername === null && maxHeaderSize === null) return request;
+    const local = lowerer.declareHiddenLocal("%requestOptions", HTTPCLIENTREQ_T);
+    const ref = (): IrExpr => varRef(local.id, HTTPCLIENTREQ_T, loc);
+    const steps: IrStmt[] = [];
+    let signalRef: (() => IrExpr) | null = null;
+    if (signal !== null) {
+      const signalLocal = lowerer.declareHiddenLocal("%requestSignal", DYN);
+      signalRef = () => varRef(signalLocal.id, DYN, loc);
+      steps.push({ kind: "varDecl", localId: signalLocal.id, init: signal, loc });
+      steps.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "http.clientSignalCheck",
+          args: [signalRef()],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+    }
+    if (servername !== null) {
+      steps.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "https.nextServername",
+          args: [servername],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+    }
+    steps.push({ kind: "varDecl", localId: local.id, init: request, loc });
+    if (maxHeaderSize !== null) {
+      steps.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "http.clientMaxHeaderSize",
+          args: [ref(), maxHeaderSize],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+    }
+    if (signalRef !== null) {
+      steps.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "http.clientSignal",
+          args: [ref(), signalRef()],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+    }
+    return { kind: "seqExpr", stmts: steps, result: ref(), type: HTTPCLIENTREQ_T, loc };
+  };
   if (connCb !== null) {
     const base = [connCb, path, method, timeout, headers, autoEnd];
     if (args.length === 1) {
-      return { kind: "libCall", fn: "http.requestConn", args: base, type: HTTPCLIENTREQ_T, loc };
+      return withSignal({
+        kind: "libCall",
+        fn: "http.requestConn",
+        args: base,
+        type: HTTPCLIENTREQ_T,
+        loc,
+      });
     }
     const { cb } = lowerCallbackArg(
-      lowerer, args[1]!, "response callbacks", 1,
+      lowerer,
+      args[1]!,
+      "response callbacks",
+      1,
       (p) => p.kind === "httpReq",
       "use (res) or ()",
       [HTTPREQ_T],
     );
-    return { kind: "libCall", fn: "http.requestConnCb", args: [...base, cb], type: HTTPCLIENTREQ_T, loc };
+    return withSignal({
+      kind: "libCall",
+      fn: "http.requestConnCb",
+      args: [...base, cb],
+      type: HTTPCLIENTREQ_T,
+      loc,
+    });
   }
   const base = [host, port, path, method, timeout, headers, autoEnd];
   if (secureish) {
@@ -4236,21 +7000,38 @@ function lowerHttpClientCall(lowerer: Lowerer, expr: ts.CallExpression, member: 
   if (agentVal !== null) base.push(agentVal);
   if (binding !== null) base.unshift(secureExpr());
   if (args.length === 1) {
-    const fn: IrLibFn = binding !== null ? "https.requestFn"
-      : secure === true ? (agentVal !== null ? "https.requestAgent" : "https.request")
-      : agentVal !== null ? "http.requestAgent" : "http.request";
-    return { kind: "libCall", fn, args: base, type: HTTPCLIENTREQ_T, loc };
+    const fn: IrLibFn =
+      binding !== null
+        ? "https.requestFn"
+        : secure === true
+          ? agentVal !== null
+            ? "https.requestAgent"
+            : "https.request"
+          : agentVal !== null
+            ? "http.requestAgent"
+            : "http.request";
+    return withSignal({ kind: "libCall", fn, args: base, type: HTTPCLIENTREQ_T, loc });
   }
   const { cb } = lowerCallbackArg(
-    lowerer, args[1]!, "response callbacks", 1,
+    lowerer,
+    args[1]!,
+    "response callbacks",
+    1,
     (p) => p.kind === "httpReq",
     "use (res) or ()",
     [HTTPREQ_T],
   );
-  const fn: IrLibFn = binding !== null ? "https.requestFnCb"
-    : secure === true ? (agentVal !== null ? "https.requestAgentCb" : "https.requestCb")
-    : agentVal !== null ? "http.requestAgentCb" : "http.requestCb";
-  return { kind: "libCall", fn, args: [...base, cb], type: HTTPCLIENTREQ_T, loc };
+  const fn: IrLibFn =
+    binding !== null
+      ? "https.requestFnCb"
+      : secure === true
+        ? agentVal !== null
+          ? "https.requestAgentCb"
+          : "https.requestCb"
+        : agentVal !== null
+          ? "http.requestAgentCb"
+          : "http.requestCb";
+  return withSignal({ kind: "libCall", fn, args: [...base, cb], type: HTTPCLIENTREQ_T, loc });
 }
 
 /** The headers option of http.request: an object literal with literal
@@ -4262,7 +7043,7 @@ function lowerClientHeadersOption(lowerer: Lowerer, node: ts.Expression): IrExpr
   const loc = locOf(node);
   if (ts.isObjectLiteralExpression(node)) {
     const elems: IrExpr[] = [];
-    for (const prop of node.properties) {
+    for (const prop of node.properties.nodes) {
       const key = ts.isPropertyAssignment(prop) ? staticHeaderKeyOf(lowerer, prop) : null;
       if (!ts.isPropertyAssignment(prop) || key === null) {
         lowerer.noLowering(
@@ -4314,15 +7095,23 @@ function lowerHttpTrailersOption(lowerer: Lowerer, node: ts.Expression): IrExpr 
   if (!ts.isArrayLiteralExpression(node)) return lowerClientHeadersOption(lowerer, node);
   const loc = locOf(node);
   const flat: IrExpr[] = [];
-  for (const entry of node.elements) {
-    if (!ts.isArrayLiteralExpression(entry) || entry.elements.length !== 2) {
-      lowerer.noLowering("addTrailers pair list", entry, "use an object/Record or literal [name, value] pairs");
+  for (const entry of node.elements.nodes) {
+    if (!ts.isArrayLiteralExpression(entry) || entry.elements.nodes.length !== 2) {
+      lowerer.noLowering(
+        "addTrailers pair list",
+        entry,
+        "use an object/Record or literal [name, value] pairs",
+      );
     }
     const pair = entry as ts.ArrayLiteralExpression;
-    const name = pair.elements[0]!;
-    const value = pair.elements[1]!;
+    const name = pair.elements.nodes[0]!;
+    const value = pair.elements.nodes[1]!;
     if (ts.isSpreadElement(name) || ts.isSpreadElement(value)) {
-      lowerer.noLowering("addTrailers pair with spread", entry, "use direct string name/value expressions");
+      lowerer.noLowering(
+        "addTrailers pair with spread",
+        entry,
+        "use direct string name/value expressions",
+      );
     }
     flat.push(lowerer.lowerExprExpecting(name, STRING), lowerer.lowerExprExpecting(value, STRING));
   }
@@ -4332,68 +7121,134 @@ function lowerHttpTrailersOption(lowerer: Lowerer, node: ts.Expression): IrExpr 
 /** Method calls on ClientRequest receivers: write/end/destroy and
  * on/once("response" | "error" | "timeout" | "close"). Null for other
  * receivers. */
-function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerHttpClientMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "httpClientReq") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
   if (name === "setHeader") {
     requireStatementPosition(lowerer, call, "request.setHeader(...)");
-    if (args.length !== 2) lowerer.noLowering("request.setHeader arguments", call, "pass a name and string value");
+    if (args.length !== 2)
+      lowerer.noLowering("request.setHeader arguments", call, "pass a name and string value");
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
     const header = lowerer.lowerExprExpecting(args[0]!, STRING);
     const value = lowerer.lowerExprExpecting(args[1]!, STRING);
-    return { kind: "libCall", fn: "http.clientSetHeader", args: [receiver, header, value], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http.clientSetHeader",
+      args: [receiver, header, value],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "getHeader" || name === "hasHeader" || name === "removeHeader") {
-    if (name === "removeHeader") requireStatementPosition(lowerer, call, "request.removeHeader(...)");
-    if (args.length !== 1) lowerer.noLowering(`request.${name} arguments`, call, `pass one header name`);
+    if (name === "removeHeader")
+      requireStatementPosition(lowerer, call, "request.removeHeader(...)");
+    if (args.length !== 1)
+      lowerer.noLowering(`request.${name} arguments`, call, `pass one header name`);
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
     const header = lowerer.lowerExprExpecting(args[0]!, STRING);
-    const fn: IrLibFn = name === "getHeader" ? "http.clientGetHeader"
-      : name === "hasHeader" ? "http.clientHasHeader" : "http.clientRemoveHeader";
+    const fn: IrLibFn =
+      name === "getHeader"
+        ? "http.clientGetHeader"
+        : name === "hasHeader"
+          ? "http.clientHasHeader"
+          : "http.clientRemoveHeader";
     const type = name === "getHeader" ? lowerer.envValueType() : name === "hasHeader" ? BOOL : VOID;
     return { kind: "libCall", fn, args: [receiver, header], type, loc };
   }
   if (name === "getHeaderNames" || name === "getRawHeaderNames" || name === "getHeaders") {
-    if (args.length !== 0) lowerer.noLowering(`request.${name} arguments`, call, `${name}() takes no arguments`);
+    if (args.length !== 0)
+      lowerer.noLowering(`request.${name} arguments`, call, `${name}() takes no arguments`);
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
-    const fn: IrLibFn = name === "getHeaderNames" ? "http.clientGetHeaderNames"
-      : name === "getRawHeaderNames" ? "http.clientGetRawHeaderNames" : "http.clientGetHeaders";
-    return { kind: "libCall", fn, args: [receiver], type: name === "getHeaders" ? DYN : arrayOf(STRING), loc };
+    const fn: IrLibFn =
+      name === "getHeaderNames"
+        ? "http.clientGetHeaderNames"
+        : name === "getRawHeaderNames"
+          ? "http.clientGetRawHeaderNames"
+          : "http.clientGetHeaders";
+    return {
+      kind: "libCall",
+      fn,
+      args: [receiver],
+      type: name === "getHeaders" ? DYN : arrayOf(STRING),
+      loc,
+    };
   }
   if (name === "flushHeaders" || name === "cork" || name === "uncork") {
     requireStatementPosition(lowerer, call, `request.${name}()`);
-    if (args.length !== 0) lowerer.noLowering(`request.${name} with arguments`, call, `${name}() takes no arguments`);
+    if (args.length !== 0)
+      lowerer.noLowering(`request.${name} with arguments`, call, `${name}() takes no arguments`);
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
-    const fn: IrLibFn = name === "flushHeaders" ? "http.clientFlushHeaders"
-      : name === "cork" ? "http.clientCork" : "http.clientUncork";
+    const fn: IrLibFn =
+      name === "flushHeaders"
+        ? "http.clientFlushHeaders"
+        : name === "cork"
+          ? "http.clientCork"
+          : "http.clientUncork";
     return { kind: "libCall", fn, args: [receiver], type: VOID, loc };
   }
   if (name === "setNoDelay") {
     requireStatementPosition(lowerer, call, "request.setNoDelay(...)");
-    if (args.length > 1) lowerer.noLowering("request.setNoDelay arguments", call, "pass an optional boolean");
+    if (args.length > 1)
+      lowerer.noLowering("request.setNoDelay arguments", call, "pass an optional boolean");
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
-    const enable = args.length === 0 ? boolLit(true, loc) : lowerer.lowerExprExpecting(args[0]!, BOOL);
-    return { kind: "libCall", fn: "http.clientSetNoDelay", args: [receiver, enable], type: VOID, loc };
+    const enable =
+      args.length === 0 ? boolLit(true, loc) : lowerer.lowerExprExpecting(args[0]!, BOOL);
+    return {
+      kind: "libCall",
+      fn: "http.clientSetNoDelay",
+      args: [receiver, enable],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "setSocketKeepAlive") {
     requireStatementPosition(lowerer, call, "request.setSocketKeepAlive(...)");
-    if (args.length > 2) lowerer.noLowering("request.setSocketKeepAlive arguments", call, "pass an optional boolean and initial delay in milliseconds");
+    if (args.length > 2)
+      lowerer.noLowering(
+        "request.setSocketKeepAlive arguments",
+        call,
+        "pass an optional boolean and initial delay in milliseconds",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
-    const enable = args.length === 0 ? boolLit(true, loc) : lowerer.lowerExprExpecting(args[0]!, BOOL);
+    const enable =
+      args.length === 0 ? boolLit(true, loc) : lowerer.lowerExprExpecting(args[0]!, BOOL);
     const delay = args.length < 2 ? numLit(0, loc) : lowerer.lowerExprExpecting(args[1]!, F64);
-    return { kind: "libCall", fn: "http.clientSetSocketKeepAlive", args: [receiver, enable, delay], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http.clientSetSocketKeepAlive",
+      args: [receiver, enable, delay],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "setTimeout") {
-    if (args.length < 1 || args.length > 2) lowerer.noLowering("request.setTimeout arguments", call, "pass milliseconds and an optional callback");
+    if (args.length < 1 || args.length > 2)
+      lowerer.noLowering(
+        "request.setTimeout arguments",
+        call,
+        "pass milliseconds and an optional callback",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
     const ms = lowerer.lowerExprExpecting(args[0]!, F64);
-    const cb = args.length === 2
-      ? lowerCallbackArg(lowerer, args[1]!, "request timeout callbacks", 0, () => false, "use ()", []).cb
-      : null;
+    const cb =
+      args.length === 2
+        ? lowerCallbackArg(
+            lowerer,
+            args[1]!,
+            "request timeout callbacks",
+            0,
+            () => false,
+            "use ()",
+            [],
+          ).cb
+        : null;
     const fn: IrLibFn = cb === null ? "http.clientSetTimeout" : "http.clientSetTimeoutCb";
     const callArgs = cb === null ? [receiver, ms] : [receiver, ms, cb];
     if (resultIsDiscarded(call)) return { kind: "libCall", fn, args: callArgs, type: VOID, loc };
@@ -4401,10 +7256,21 @@ function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "addTrailers") {
     requireStatementPosition(lowerer, call, "request.addTrailers(...)");
-    if (args.length !== 1) lowerer.noLowering("request.addTrailers argument count", call, "pass one trailer object or pair-list literal");
+    if (args.length !== 1)
+      lowerer.noLowering(
+        "request.addTrailers argument count",
+        call,
+        "pass one trailer object or pair-list literal",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, HTTPCLIENTREQ_T);
     const pairs = lowerHttpTrailersOption(lowerer, args[0]!);
-    return { kind: "libCall", fn: "http.clientAddTrailers", args: [receiver, pairs], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http.clientAddTrailers",
+      args: [receiver, pairs],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "write" || name === "end") {
     requireStatementPosition(lowerer, call, `request.${name}(...)`);
@@ -4413,7 +7279,9 @@ function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       lowerer.noLowering(
         `${name} with ${args.length} arguments`,
         call,
-        name === "write" ? "the supported form is write(data)" : "the supported forms are end() and end(data)",
+        name === "write"
+          ? "the supported form is write(data)"
+          : "the supported forms are end() and end(data)",
       );
     }
     const receiver = lowerer.lowerExpr(access.expression);
@@ -4434,15 +7302,49 @@ function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const fn: IrLibFn = name === "write" ? "http.clientWriteBytes" : "http.clientEndBytes";
       return { kind: "libCall", fn, args: [receiver, data], type: VOID, loc };
     }
-    lowerer.noLowering(`${name} of '${lowerer.fmt(data.type)}' data`, args[0] ?? call, NARROW_DATA_HINT);
+    lowerer.noLowering(
+      `${name} of '${lowerer.fmt(data.type)}' data`,
+      args[0] ?? call,
+      NARROW_DATA_HINT,
+    );
+  }
+  if (name === "destroy" && args.length === 1) {
+    // destroy(err): err is the request's 'error' (an Error value here).
+    requireStatementPosition(lowerer, call, "request.destroy(err)");
+    const receiver = lowerer.lowerExpr(access.expression);
+    const err = lowerer.lowerExpr(args[0]!);
+    if (err.type.kind !== "object") {
+      lowerer.noLowering(
+        `destroy with a '${lowerer.fmt(err.type)}' argument`,
+        args[0]!,
+        "pass an Error value, or call destroy() without one",
+      );
+    }
+    return {
+      kind: "libCall",
+      fn: "http.clientDestroyError",
+      args: [receiver, lowerer.coerceToExpected(err, ERROR_T)],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "destroy" || name === "abort") {
     requireStatementPosition(lowerer, call, `request.${name}()`);
     if (args.length !== 0) {
-      lowerer.noLowering(`${name} with ${args.length} arguments`, call, `${name}() takes no arguments here`);
+      lowerer.noLowering(
+        `${name} with ${args.length} arguments`,
+        call,
+        `${name}() takes no arguments here`,
+      );
     }
     const receiver = lowerer.lowerExpr(access.expression);
-    return { kind: "libCall", fn: name === "destroy" ? "http.clientDestroy" : "http.clientAbort", args: [receiver], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: name === "destroy" ? "http.clientDestroy" : "http.clientAbort",
+      args: [receiver],
+      type: VOID,
+      loc,
+    };
   }
   if ((name === "on" || name === "once" || name === "addListener") && args.length === 2) {
     requireStatementPosition(lowerer, call, `request.${name}(...)`);
@@ -4452,32 +7354,84 @@ function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const receiver = lowerer.lowerExpr(access.expression);
     if (event === "response") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "response listeners", 1,
+        lowerer,
+        args[1]!,
+        "response listeners",
+        1,
         (p) => p.kind === "httpReq",
         "use (res) or ()",
         [HTTPREQ_T],
       );
-      return { kind: "libCall", fn: "http.clientOnResponse", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.clientOnResponse",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "socket") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "socket listeners", 1,
-        (p) => p.kind === "netSocket", "use (socket) or ()", [NETSOCKET_T]);
-      return { kind: "libCall", fn: "http.clientOnSocket", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "socket listeners",
+        1,
+        (p) => p.kind === "netSocket",
+        "use (socket) or ()",
+        [NETSOCKET_T],
+      );
+      return {
+        kind: "libCall",
+        fn: "http.clientOnSocket",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "error") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "error listeners", 1,
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
         (p) => p.kind === "object" && p.className === "%Error",
         "use (err) or ()",
         [ERROR_T],
       );
-      return { kind: "libCall", fn: "http.clientOnError", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.clientOnError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
-    if (event === "timeout" || event === "close" || event === "finish" || event === "abort") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, `${event} listeners`, 0, () => false, "use ()", []);
-      const fn: IrLibFn = event === "timeout" ? "http.clientOnTimeout"
-        : event === "close" ? "http.clientOnClose"
-        : event === "abort" ? "http.clientOnAbort" : "http.clientOnFinish";
+    if (
+      event === "timeout" ||
+      event === "close" ||
+      event === "finish" ||
+      event === "abort" ||
+      event === "continue"
+    ) {
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      const fn: IrLibFn =
+        event === "timeout"
+          ? "http.clientOnTimeout"
+          : event === "close"
+            ? "http.clientOnClose"
+            : event === "abort"
+              ? "http.clientOnAbort"
+              : event === "continue"
+                ? "http.clientOnContinue"
+                : "http.clientOnFinish";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "upgrade") {
@@ -4511,7 +7465,13 @@ function lowerHttpClientMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           "upgrade listeners whose parameters are not (res: IncomingMessage, socket: Socket, head: Buffer)",
         );
       }
-      return { kind: "libCall", fn: "http.clientOnUpgrade", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.clientOnUpgrade",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     lowerer.noLowering(
       `request.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
@@ -4555,13 +7515,18 @@ export function isStreamUndefCallExpr(lowerer: Lowerer, node: ts.Node): boolean 
  * net.Socket`): one runtime tag test; tsc's control-flow narrowing types
  * the branches and reads bridge through maybeNarrow's unionNarrow. Null
  * for every other shape (lower-exprs' fences stand). */
-export function lowerSocketInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc: SrcLoc): IrExpr | null {
+export function lowerSocketInstanceOf(
+  lowerer: Lowerer,
+  expr: ts.BinaryExpression,
+  loc: SrcLoc,
+): IrExpr | null {
   const rhs = expr.right;
   const isNetSocketRef =
     (ts.isPropertyAccessExpression(rhs) &&
       rhs.name.text === "Socket" &&
       lowerer.builtinMemberOf(rhs)?.module === "net") ||
-    (ts.isIdentifier(rhs) && lowerer.builtinImportOf(rhs)?.module === "net" &&
+    (ts.isIdentifier(rhs) &&
+      lowerer.builtinImportOf(rhs)?.module === "net" &&
       lowerer.builtinImportOf(rhs)?.member === "Socket");
   if (!isNetSocketRef) return null;
   const leftT = lowerer.mapTypeOf(lowerer.typeOf(expr.left));
@@ -4571,20 +7536,34 @@ export function lowerSocketInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpressio
   if (tag < 0) return null;
   const left = lowerer.lowerExpr(expr.left);
   if (left.type.kind !== "union" || left.type.unionId !== leftT.unionId) return null;
-  return { kind: "unionIsTag", unionId: leftT.unionId, tag, negated: false, value: left, type: BOOL, loc };
+  return {
+    kind: "unionIsTag",
+    unionId: leftT.unionId,
+    tag,
+    negated: false,
+    value: left,
+    type: BOOL,
+    loc,
+  };
 }
 
 /** True when `node` reads `.headers` off an IncomingMessage — the
  * receiver shape of both header-read forms. */
-function httpReqFieldCollection(lowerer: Lowerer, node: ts.Expression): "headers" | "trailers" | "headersDistinct" | "trailersDistinct" | null {
+function httpReqFieldCollection(
+  lowerer: Lowerer,
+  node: ts.Expression,
+): "headers" | "trailers" | "headersDistinct" | "trailersDistinct" | null {
   if (
     ts.isPropertyAccessExpression(node) &&
     !node.questionDotToken &&
-    (node.name.text === "headers" || node.name.text === "trailers" ||
-      node.name.text === "headersDistinct" || node.name.text === "trailersDistinct") &&
+    (node.name.text === "headers" ||
+      node.name.text === "trailers" ||
+      node.name.text === "headersDistinct" ||
+      node.name.text === "trailersDistinct") &&
     lowerer.mapTypeOf(lowerer.typeOf(node.expression))?.kind === "httpReq" &&
     lowerer.isStdlibMember(node)
-  ) return node.name.text;
+  )
+    return node.name.text;
   return null;
 }
 
@@ -4592,60 +7571,130 @@ function httpReqFieldCollection(lowerer: Lowerer, node: ts.Expression): "headers
  * called from lowerElementAccess (the process.env precedent). Answers the
  * interned `string | undefined` union; names match case-insensitively
  * (the runtime stores them lowercased, like Node). */
-export function lowerHttpHeadersElement(lowerer: Lowerer, expr: ts.ElementAccessExpression): IrExpr | null {
+export function lowerHttpHeadersElement(
+  lowerer: Lowerer,
+  expr: ts.ElementAccessExpression,
+): IrExpr | null {
   const collection = httpReqFieldCollection(lowerer, expr.expression);
   if (collection === null) return null;
   const recv = (expr.expression as ts.PropertyAccessExpression).expression;
   const key = lowerer.lowerExpr(expr.argumentExpression);
   if (key.type.kind !== "string") {
-    lowerer.unsupported("SC1090", expr.argumentExpression, `indexing req.${collection} with non-string keys`);
+    lowerer.unsupported(
+      "SC1090",
+      expr.argumentExpression,
+      `indexing req.${collection} with non-string keys`,
+    );
   }
   const receiver = lowerer.lowerExpr(recv);
+  const list = isSetCookieRead(lowerer, expr, collection, key);
   return {
     kind: "libCall",
-    fn: collection === "headers" ? "http.reqHeader"
-      : collection === "trailers" ? "http.reqTrailer"
-      : collection === "headersDistinct" ? "http.reqHeaderValues" : "http.reqTrailerValues",
+    fn:
+      collection === "headers" && !list
+        ? "http.reqHeader"
+        : collection === "trailers"
+          ? "http.reqTrailer"
+          : collection === "headersDistinct" || list
+            ? "http.reqHeaderValues"
+            : "http.reqTrailerValues",
     args: [receiver, key],
-    type: collection.endsWith("Distinct") ? lowerer.withUndefinedArm(arrayOf(STRING)) : lowerer.envValueType(),
+    type:
+      collection.endsWith("Distinct") || list
+        ? lowerer.withUndefinedArm(arrayOf(STRING))
+        : lowerer.envValueType(),
     loc: locOf(expr),
   };
 }
 
+/** `headers["set-cookie"]` reads Node's array of every Set-Cookie line,
+ * the `string[] | undefined` that @types/node's IncomingHttpHeaders
+ * declares. A read typed as a string (the bundled declarations type every
+ * header as one) is refused, because Node's value is an array. */
+function isSetCookieRead(
+  lowerer: Lowerer,
+  expr: ts.Expression,
+  collection: string,
+  key: IrExpr,
+): boolean {
+  if (collection !== "headers" || key.kind !== "strLit" || key.value !== "set-cookie") return false;
+  const type = lowerer.mapTypeOf(lowerer.typeOf(expr));
+  const array = lowerer.withUndefinedArm(arrayOf(STRING));
+  if (type?.kind === "union" && array.kind === "union" && type.unionId === array.unionId)
+    return true;
+  lowerer.noLowering(
+    "reading set-cookie through string-typed headers",
+    expr,
+    "Node stores set-cookie as an array: read headersDistinct['set-cookie'], or install @types/node, which types headers['set-cookie'] as string[]",
+  );
+}
+
 /** Method calls on IncomingMessage receivers: on/once("data" | "end").
  * Null for other receivers. */
-function lowerHttpReqMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerHttpReqMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "httpReq") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
   if (name === "setTimeout") {
     requireStatementPosition(lowerer, call, "message.setTimeout(...)");
-    if (args.length < 1 || args.length > 2) lowerer.noLowering("message.setTimeout arguments", call, "pass milliseconds and an optional callback");
+    if (args.length < 1 || args.length > 2)
+      lowerer.noLowering(
+        "message.setTimeout arguments",
+        call,
+        "pass milliseconds and an optional callback",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
     const ms = lowerer.lowerExprExpecting(args[0]!, F64);
-    if (args.length === 1) return { kind: "libCall", fn: "http.reqSetTimeout", args: [receiver, ms], type: VOID, loc };
-    const { cb } = lowerCallbackArg(lowerer, args[1]!, "message timeout callbacks", 0, () => false, "use ()", []);
-    return { kind: "libCall", fn: "http.reqSetTimeoutCb", args: [receiver, ms, cb], type: VOID, loc };
+    if (args.length === 1)
+      return { kind: "libCall", fn: "http.reqSetTimeout", args: [receiver, ms], type: VOID, loc };
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      args[1]!,
+      "message timeout callbacks",
+      0,
+      () => false,
+      "use ()",
+      [],
+    );
+    return {
+      kind: "libCall",
+      fn: "http.reqSetTimeoutCb",
+      args: [receiver, ms, cb],
+      type: VOID,
+      loc,
+    };
   }
-  if (name === "resume" || name === "destroy") {
+  if (name === "resume" || name === "pause" || name === "destroy") {
     requireStatementPosition(lowerer, call, `req.${name}()`);
     if (args.length !== 0) {
-      lowerer.noLowering(`${name} with ${args.length} arguments`, call, `${name}() takes no arguments here`);
+      lowerer.noLowering(
+        `${name} with ${args.length} arguments`,
+        call,
+        `${name}() takes no arguments here`,
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
-    const fn: IrLibFn = name === "resume" ? "http.reqResume" : "http.reqDestroy";
+    const fn: IrLibFn =
+      name === "resume" ? "http.reqResume" : name === "pause" ? "http.reqPause" : "http.reqDestroy";
     return { kind: "libCall", fn, args: [receiver], type: VOID, loc };
   }
   if (name === "setEncoding") {
     // setEncoding('utf8') — 'data' delivers strings (the chunk-encoding
-    // window); other real encodings fence loudly at runtime, unknown
+    // window); other real encodings throw "not supported yet" at runtime, unknown
     // names throw Node's ERR_UNKNOWN_ENCODING.
     requireStatementPosition(lowerer, call, "req.setEncoding(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`setEncoding with ${args.length} arguments`, call, "the supported form is setEncoding(encoding)");
+      lowerer.noLowering(
+        `setEncoding with ${args.length} arguments`,
+        call,
+        "the supported form is setEncoding(encoding)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
     const enc = lowerer.lowerExprExpecting(args[0]!, STRING);
@@ -4657,15 +7706,22 @@ function lowerHttpReqMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // write) — plus socket→socket, which lives on the socket receiver.
     requireStatementPosition(lowerer, call, "req.pipe(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`pipe with ${args.length} arguments`, call, "the supported form is pipe(destination)");
+      lowerer.noLowering(
+        `pipe with ${args.length} arguments`,
+        call,
+        "the supported form is pipe(destination)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
     const dst = lowerer.lowerExpr(args[0]!);
     const fn: IrLibFn | null =
-      dst.type.kind === "httpRes" ? "http.reqPipeRes"
-      : dst.type.kind === "httpClientReq" ? "http.reqPipeClient"
-      : dst.type.kind === "netSocket" ? "http.reqPipeSock"
-      : null;
+      dst.type.kind === "httpRes"
+        ? "http.reqPipeRes"
+        : dst.type.kind === "httpClientReq"
+          ? "http.reqPipeClient"
+          : dst.type.kind === "netSocket"
+            ? "http.reqPipeSock"
+            : null;
     if (fn === null) {
       lowerer.noLowering(
         `pipe into '${lowerer.fmt(dst.type)}' destinations`,
@@ -4682,8 +7738,32 @@ function lowerHttpReqMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
     if (event === "data") {
+      const sigs = lowerer.checker.getCallSignatures(lowerer.typeOf(args[1]!));
+      const firstParam = sigs.length === 1 ? sigs[0]!.getParameters()[0] : undefined;
+      const param =
+        firstParam !== undefined
+          ? lowerer.mapTypeOf(lowerer.checker.getTypeOfSymbol(firstParam))
+          : null;
+      if (param !== null && param.kind === "string") {
+        // A chunk typed string (the setEncoding('utf8') shape), as on a
+        // socket: the listener takes the chunk through a checked
+        // boundary, so a string arrives after setEncoding and a Buffer
+        // without it fails the check instead of being decoded.
+        const boxed = lowerSocketDynListener(lowerer, args[1]!, "data listeners");
+        const cb: IrExpr = { kind: "dynCheck", value: boxed, type: funcOf([DYN], VOID), loc };
+        return {
+          kind: "libCall",
+          fn: "http.reqOnData",
+          args: [receiver, cb, once],
+          type: VOID,
+          loc,
+        };
+      }
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "data listeners", 1,
+        lowerer,
+        args[1]!,
+        "data listeners",
+        1,
         (p) => p.kind === "bytes" && p.elem === "u8",
         "use (chunk: Buffer) or ()",
         [DYN],
@@ -4691,27 +7771,72 @@ function lowerHttpReqMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       return { kind: "libCall", fn: "http.reqOnData", args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "end") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "end listeners", 0, () => false, "use ()", []);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "end listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       return { kind: "libCall", fn: "http.reqOnEnd", args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "error") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "error listeners", 1,
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
         (p) => p.kind === "object" && p.className === "%Error",
         "use (err) or ()",
         [ERROR_T],
       );
-      return { kind: "libCall", fn: "http.reqOnError", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "http.reqOnError",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "close") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "close listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "http.reqOnClose", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "close listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http.reqOnClose",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "aborted") {
       // The h2 compat event (Http2ServerRequest 'aborted'); an http/1
       // request registers too and never fires — the parser lane's story.
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "aborted listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "http.reqOnAborted", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "aborted listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http.reqOnAborted",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     lowerer.noLowering(
       `req.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
@@ -4729,22 +7854,38 @@ function lowerHttpReqMethodCall(lowerer: Lowerer, call: ts.CallExpression,
 
 /** Method calls on ServerResponse receivers: setHeader/writeHead/write/
  * end. Null for other receivers. */
-function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+function lowerHttpResMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "httpRes") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
   if (name === "setTimeout") {
     if (args.length < 1 || args.length > 2) {
-      lowerer.noLowering(`res.setTimeout with ${args.length} arguments`, call, "use setTimeout(milliseconds[, callback])");
+      lowerer.noLowering(
+        `res.setTimeout with ${args.length} arguments`,
+        call,
+        "use setTimeout(milliseconds[, callback])",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     const ms = lowerer.lowerExprExpecting(args[0]!, F64);
-    const cb = args.length === 2
-      ? lowerCallbackArg(lowerer, args[1]!, "response timeout callbacks", 0, () => false, "use ()", []).cb
-      : null;
+    const cb =
+      args.length === 2
+        ? lowerCallbackArg(
+            lowerer,
+            args[1]!,
+            "response timeout callbacks",
+            0,
+            () => false,
+            "use ()",
+            [],
+          ).cb
+        : null;
     const fn: IrLibFn = cb === null ? "http.resSetTimeout" : "http.resSetTimeoutCb";
     const callArgs = cb === null ? [receiver, ms] : [receiver, ms, cb];
     if (resultIsDiscarded(call)) return { kind: "libCall", fn, args: callArgs, type: VOID, loc };
@@ -4752,27 +7893,51 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "writeContinue" || name === "writeProcessing" || name === "writeEarlyHints") {
     requireStatementPosition(lowerer, call, `res.${name}(...)`);
-    if (lowerer.typeOf(access.expression).getSymbol()?.name === "Http2ServerResponse") {
-      lowerer.noLowering(`Http2ServerResponse.${name}`, call, "HTTP/2 informational responses are not supported by the static runtime yet");
+    if (ts.symbolNameOf(lowerer.typeOf(access.expression).getSymbol()) === "Http2ServerResponse") {
+      lowerer.noLowering(
+        `Http2ServerResponse.${name}`,
+        call,
+        "HTTP/2 informational responses are not supported by the static runtime yet",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     if (name !== "writeEarlyHints") {
-      if (args.length !== 0) lowerer.noLowering(`res.${name} callback`, call, `${name}() supports no callback here`);
-      return { kind: "libCall", fn: name === "writeContinue" ? "http.resWriteContinue" : "http.resWriteProcessing", args: [receiver], type: VOID, loc };
+      if (args.length !== 0)
+        lowerer.noLowering(`res.${name} callback`, call, `${name}() supports no callback here`);
+      return {
+        kind: "libCall",
+        fn: name === "writeContinue" ? "http.resWriteContinue" : "http.resWriteProcessing",
+        args: [receiver],
+        type: VOID,
+        loc,
+      };
     }
-    if (args.length !== 1) lowerer.noLowering("res.writeEarlyHints arguments", call, "pass one header object or Record<string, string> without a callback");
+    if (args.length !== 1)
+      lowerer.noLowering(
+        "res.writeEarlyHints arguments",
+        call,
+        "pass one header object or Record<string, string> without a callback",
+      );
     const node = args[0]!;
     let pairs: IrExpr;
     if (ts.isObjectLiteralExpression(node)) {
       const elems: IrExpr[] = [];
-      for (const prop of node.properties) {
+      for (const prop of node.properties.nodes) {
         const key = ts.isPropertyAssignment(prop) ? staticHeaderKeyOf(lowerer, prop) : null;
         if (!ts.isPropertyAssignment(prop) || key === null) {
-          lowerer.noLowering("writeEarlyHints headers with dynamic keys, spreads, or shorthand entries", prop, "use literal header keys and string values");
+          lowerer.noLowering(
+            "writeEarlyHints headers with dynamic keys, spreads, or shorthand entries",
+            prop,
+            "use literal header keys and string values",
+          );
         }
         const value = lowerer.lowerExpr(prop.initializer);
         if (value.type.kind !== "string") {
-          lowerer.noLowering(`writeEarlyHints value of type '${lowerer.fmt(value.type)}'`, prop.initializer, "header values must be strings here");
+          lowerer.noLowering(
+            `writeEarlyHints value of type '${lowerer.fmt(value.type)}'`,
+            prop.initializer,
+            "header values must be strings here",
+          );
         }
         elems.push({ kind: "strLit", value: key, type: STRING, loc }, value);
       }
@@ -4780,37 +7945,76 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     } else {
       const value = lowerer.lowerExpr(node);
       if (value.type.kind !== "record") {
-        lowerer.noLowering(`writeEarlyHints headers of '${lowerer.fmt(value.type)}'`, node, "pass an object literal or a Record<string, string>");
+        lowerer.noLowering(
+          `writeEarlyHints headers of '${lowerer.fmt(value.type)}'`,
+          node,
+          "pass an object literal or a Record<string, string>",
+        );
       }
       const helper = lowerer.envToPairsHelper(value.type.shapeId, loc);
       if (helper === null) {
-        lowerer.noLowering("writeEarlyHints header values", node, "use a Record<string, string> with string values");
+        lowerer.noLowering(
+          "writeEarlyHints header values",
+          node,
+          "use a Record<string, string> with string values",
+        );
       }
       pairs = { kind: "call", callee: helper, args: [value], type: arrayOf(STRING), loc };
     }
-    return { kind: "libCall", fn: "http.resWriteEarlyHints", args: [receiver, pairs], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http.resWriteEarlyHints",
+      args: [receiver, pairs],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "getHeaderNames" || name === "getRawHeaderNames" || name === "getHeaders") {
-    if (args.length !== 0) lowerer.noLowering(`res.${name} arguments`, call, `${name}() takes no arguments`);
+    if (args.length !== 0)
+      lowerer.noLowering(`res.${name} arguments`, call, `${name}() takes no arguments`);
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
-    const fn: IrLibFn = name === "getHeaderNames" ? "http.resGetHeaderNames"
-      : name === "getRawHeaderNames" ? "http.resGetRawHeaderNames" : "http.resGetHeaders";
-    return { kind: "libCall", fn, args: [receiver], type: name === "getHeaders" ? DYN : arrayOf(STRING), loc };
+    const fn: IrLibFn =
+      name === "getHeaderNames"
+        ? "http.resGetHeaderNames"
+        : name === "getRawHeaderNames"
+          ? "http.resGetRawHeaderNames"
+          : "http.resGetHeaders";
+    return {
+      kind: "libCall",
+      fn,
+      args: [receiver],
+      type: name === "getHeaders" ? DYN : arrayOf(STRING),
+      loc,
+    };
   }
   if (name === "flushHeaders" || name === "cork" || name === "uncork") {
     requireStatementPosition(lowerer, call, `res.${name}()`);
-    if (args.length !== 0) lowerer.noLowering(`res.${name} with arguments`, call, `${name}() takes no arguments`);
+    if (args.length !== 0)
+      lowerer.noLowering(`res.${name} with arguments`, call, `${name}() takes no arguments`);
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
-    const fn: IrLibFn = name === "flushHeaders" ? "http.resFlushHeaders"
-      : name === "cork" ? "http.resCork" : "http.resUncork";
+    const fn: IrLibFn =
+      name === "flushHeaders"
+        ? "http.resFlushHeaders"
+        : name === "cork"
+          ? "http.resCork"
+          : "http.resUncork";
     return { kind: "libCall", fn, args: [receiver], type: VOID, loc };
   }
   if (name === "addTrailers") {
     requireStatementPosition(lowerer, call, "res.addTrailers(...)");
-    if (lowerer.typeOf(access.expression).getSymbol()?.name === "Http2ServerResponse") {
-      lowerer.noLowering("Http2ServerResponse.addTrailers", call, "HTTP/2 response trailers are not supported by the static runtime yet");
+    if (ts.symbolNameOf(lowerer.typeOf(access.expression).getSymbol()) === "Http2ServerResponse") {
+      lowerer.noLowering(
+        "Http2ServerResponse.addTrailers",
+        call,
+        "HTTP/2 response trailers are not supported by the static runtime yet",
+      );
     }
-    if (args.length !== 1) lowerer.noLowering("res.addTrailers argument count", call, "pass one trailer object or pair-list literal");
+    if (args.length !== 1)
+      lowerer.noLowering(
+        "res.addTrailers argument count",
+        call,
+        "pass one trailer object or pair-list literal",
+      );
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     const pairs = lowerHttpTrailersOption(lowerer, args[0]!);
     return { kind: "libCall", fn: "http.resAddTrailers", args: [receiver, pairs], type: VOID, loc };
@@ -4818,7 +8022,11 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   if (name === "setHeader") {
     requireStatementPosition(lowerer, call, "res.setHeader(...)");
     if (args.length !== 2) {
-      lowerer.noLowering(`setHeader with ${args.length} arguments`, call, "the supported form is setHeader(name, value)");
+      lowerer.noLowering(
+        `setHeader with ${args.length} arguments`,
+        call,
+        "the supported form is setHeader(name, value)",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     const header = lowerer.lowerExprExpecting(args[0]!, STRING);
@@ -4835,18 +8043,45 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       // retains the setHeader refusal below.
       value = lowerer.coerceInto(args[1]!, value, STRING);
     }
-    if (value.type.kind === "f64") {
-      // Node formats number values via String(n) — the same ToString.
-      value = { kind: "toString", operand: value, type: STRING, loc };
-    }
     if (value.type.kind !== "string") {
+      // Numbers and arrays keep their type for getHeader/getHeaders, like
+      // Node's stored value; numbers serialize as String(n) and arrays as
+      // one line per element.
+      return {
+        kind: "libCall",
+        fn: "http.resSetHeaderDyn",
+        args: [receiver, header, lowerer.coerceToExpected(value, DYN)],
+        type: VOID,
+        loc,
+      };
+    }
+    return {
+      kind: "libCall",
+      fn: "http.resSetHeader",
+      args: [receiver, header, value],
+      type: VOID,
+      loc,
+    };
+  }
+  if (name === "appendHeader") {
+    requireStatementPosition(lowerer, call, "res.appendHeader(...)");
+    if (args.length !== 2) {
       lowerer.noLowering(
-        `setHeader with a '${lowerer.fmt(value.type)}' value`,
-        args[1]!,
-        "header values are strings or numbers here",
+        `appendHeader with ${args.length} arguments`,
+        call,
+        "the supported form is appendHeader(name, value)",
       );
     }
-    return { kind: "libCall", fn: "http.resSetHeader", args: [receiver, header, value], type: VOID, loc };
+    const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
+    const header = lowerer.lowerExprExpecting(args[0]!, STRING);
+    const value = lowerer.lowerExpr(args[1]!);
+    return {
+      kind: "libCall",
+      fn: "http.resAppendHeader",
+      args: [receiver, header, lowerer.coerceToExpected(value, DYN)],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "writeHead") {
     if (args.length < 1 || args.length > 3) {
@@ -4864,7 +8099,8 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     let msg: IrExpr | null = null;
     let headersNode: ts.Expression | undefined;
     if (args.length === 2) {
-      if (lowerer.mapTypeOf(lowerer.typeOf(args[1]!))?.kind === "string") msg = lowerer.lowerExprExpecting(args[1]!, STRING);
+      if (lowerer.mapTypeOf(lowerer.typeOf(args[1]!))?.kind === "string")
+        msg = lowerer.lowerExprExpecting(args[1]!, STRING);
       else headersNode = args[1];
     } else if (args.length === 3) {
       msg = lowerer.lowerExprExpecting(args[1]!, STRING);
@@ -4906,7 +8142,8 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       if (v.type.kind === "dyn") {
         // A checked-dynamic headers value (an untyped JS helper's
         // parameter — the suite's test(headers) idiom): the runtime OBJ
-        // walk sets each entry, loud fences for non-string/number values.
+        // walk sets each entry and throws ERR_INVALID_ARG_TYPE for
+        // non-string/number values.
         return headResult("http.resWriteHeadDyn", [receiver, status, v]);
       }
       if (v.type.kind !== "record") {
@@ -4929,7 +8166,7 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     }
     const names: IrExpr[] = [];
     const values: IrExpr[] = [];
-    for (const prop of headersNode.properties) {
+    for (const prop of headersNode.properties.nodes) {
       const key = ts.isPropertyAssignment(prop) ? staticHeaderKeyOf(lowerer, prop) : null;
       if (!ts.isPropertyAssignment(prop) || key === null) {
         lowerer.noLowering(
@@ -4972,20 +8209,43 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     // end's callback forms — end(cb) / end(data, cb): the callback fires
-    // deferred once the body went out (Node's 'finish' emit), through
-    // the resOnFinish slot registered just before the end call in an
-    // interned composing helper.
+    // deferred once the body went out (just before Node's 'finish' emit),
+    // through the resOnEndCallback slot registered just before the end
+    // call in an interned composing helper.
     let cbArg: IrExpr | null = null;
     let dataNode: ts.Expression | undefined = args[0];
     if (name === "end" && args.length === 2) {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "end callbacks", 0, () => false, "use ()", []);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "end callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       cbArg = cb;
-    } else if (name === "end" && args.length === 1 &&
-               lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind !== "string" &&
-               lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind !== "bytes") {
+    } else if (
+      name === "end" &&
+      args.length === 1 &&
+      lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind !== "string" &&
+      lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind !== "bytes"
+    ) {
       const probe = lowerer.typeOf(args[0]!);
-      if (lowerer.mapTypeOf(probe)?.kind === "func" || lowerer.mapTypeOf(probe) === null || lowerer.mapTypeOf(probe)?.kind === "dyn") {
-        const { cb } = lowerCallbackArg(lowerer, args[0]!, "end callbacks", 0, () => false, "use ()", []);
+      if (
+        lowerer.mapTypeOf(probe)?.kind === "func" ||
+        lowerer.mapTypeOf(probe) === null ||
+        lowerer.mapTypeOf(probe)?.kind === "dyn"
+      ) {
+        const { cb } = lowerCallbackArg(
+          lowerer,
+          args[0]!,
+          "end callbacks",
+          0,
+          () => false,
+          "use ()",
+          [],
+        );
         cbArg = cb;
         dataNode = undefined;
       }
@@ -4994,7 +8254,7 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const all = [...callArgs, cb];
       const key = `server.endcb:${fn}:${all.map((a) => typeKey(a.type)).join(",")}`;
       const existing = lowerer.arrHofHelpers.get(key);
-      const helper = existing ?? `%server.endcb.${lowerer.arrHofHelpers.size}`;
+      const helper = existing ?? keyedHelperName(lowerer, "%server.endcb", key);
       if (!existing) {
         lowerer.arrHofHelpers.set(key, helper);
         const params = all.map((a, i) => ({ localId: `p${i}.0`, name: `p${i}`, type: a.type }));
@@ -5002,16 +8262,36 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
           name: helper,
           params,
           returnType: VOID,
-          locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+          locals: params.map((p) => ({
+            id: p.localId,
+            name: p.name,
+            type: p.type,
+            mutable: false,
+          })),
           body: [
             {
               kind: "exprStmt",
-              expr: { kind: "libCall", fn: "http.resOnFinish", args: [varRef(params[0]!.localId, params[0]!.type, loc), varRef(params[all.length - 1]!.localId, params[all.length - 1]!.type, loc)], type: VOID, loc },
+              expr: {
+                kind: "libCall",
+                fn: "http.resOnEndCallback",
+                args: [
+                  varRef(params[0]!.localId, params[0]!.type, loc),
+                  varRef(params[all.length - 1]!.localId, params[all.length - 1]!.type, loc),
+                ],
+                type: VOID,
+                loc,
+              },
               loc,
             },
             {
               kind: "exprStmt",
-              expr: { kind: "libCall", fn, args: callArgs.map((_, i) => varRef(params[i]!.localId, params[i]!.type, loc)), type: VOID, loc },
+              expr: {
+                kind: "libCall",
+                fn,
+                args: callArgs.map((_, i) => varRef(params[i]!.localId, params[i]!.type, loc)),
+                type: VOID,
+                loc,
+              },
               loc,
             },
           ],
@@ -5041,32 +8321,91 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       if (cbArg !== null) return endWithCb(fn, [receiver, data], cbArg);
       return { kind: "libCall", fn, args: [receiver, data], type: VOID, loc };
     }
-    lowerer.noLowering(`${name} of '${lowerer.fmt(data.type)}' data`, dataNode ?? call, NARROW_DATA_HINT);
+    // end(payload ? text : undefined): an absent chunk ends without data,
+    // as end() does. The checked-dynamic end takes each arm at run time.
+    if (name === "end" && data.type.kind === "union" && lowerer.dynConvertible(data.type)) {
+      const arms = lowerer.unions.get(data.type.unionId)?.arms ?? [];
+      if (
+        arms.every(
+          (arm) =>
+            arm.kind === "string" ||
+            (arm.kind === "bytes" && arm.elem === "u8") ||
+            arm.kind === "undefinedT" ||
+            arm.kind === "nullT",
+        )
+      ) {
+        const dynData: IrExpr = { kind: "dynFrom", value: data, type: DYN, loc: locOf(dataNode) };
+        if (cbArg !== null) return endWithCb("http.resEndDyn", [receiver, dynData], cbArg);
+        return {
+          kind: "libCall",
+          fn: "http.resEndDyn",
+          args: [receiver, dynData],
+          type: VOID,
+          loc,
+        };
+      }
+    }
+    lowerer.noLowering(
+      `${name} of '${lowerer.fmt(data.type)}' data`,
+      dataNode ?? call,
+      NARROW_DATA_HINT,
+    );
   }
   if (name === "getHeader" || name === "hasHeader" || name === "removeHeader") {
     // The header CRUD trio (setHeader's readers): getHeader answers the
-    // value as SET — `string | undefined` here, where Node can also
-    // answer numbers/arrays it was handed (this surface stores strings);
-    // removeHeader drops every case-insensitive match before the head
-    // goes out; hasHeader is the boolean probe.
+    // value as set (a number, string or string[]); removeHeader drops
+    // every case-insensitive match before the head goes out; hasHeader is
+    // the boolean probe.
     if (name === "removeHeader") requireStatementPosition(lowerer, call, "res.removeHeader(...)");
     if (args.length !== 1) {
-      lowerer.noLowering(`${name} with ${args.length} arguments`, call, `the supported form is ${name}(name)`);
+      lowerer.noLowering(
+        `${name} with ${args.length} arguments`,
+        call,
+        `the supported form is ${name}(name)`,
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     const header = lowerer.lowerExprExpecting(args[0]!, STRING);
     if (name === "getHeader") {
-      return { kind: "libCall", fn: "http.resGetHeader", args: [receiver, header], type: lowerer.envValueType(), loc };
+      // The value as set: number, string or string[] (undefined when
+      // absent), checked against the declared result type.
+      const value: IrExpr = {
+        kind: "libCall",
+        fn: "http.resGetHeaderDyn",
+        args: [receiver, header],
+        type: DYN,
+        loc,
+      };
+      const declared = lowerer.mapTypeOf(lowerer.typeOf(call));
+      return declared === null || declared.kind === "dyn"
+        ? value
+        : lowerer.coerceInto(call, value, declared);
     }
     if (name === "hasHeader") {
-      return { kind: "libCall", fn: "http.resHasHeader", args: [receiver, header], type: BOOL, loc };
+      return {
+        kind: "libCall",
+        fn: "http.resHasHeader",
+        args: [receiver, header],
+        type: BOOL,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "http.resRemoveHeader", args: [receiver, header], type: VOID, loc };
+    return {
+      kind: "libCall",
+      fn: "http.resRemoveHeader",
+      args: [receiver, header],
+      type: VOID,
+      loc,
+    };
   }
   if (name === "destroy") {
     requireStatementPosition(lowerer, call, "res.destroy()");
     if (args.length !== 0) {
-      lowerer.noLowering(`destroy with ${args.length} arguments`, call, "destroy() takes no arguments here");
+      lowerer.noLowering(
+        `destroy with ${args.length} arguments`,
+        call,
+        "destroy() takes no arguments here",
+      );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     return { kind: "libCall", fn: "http.resDestroy", args: [receiver], type: VOID, loc };
@@ -5078,11 +8417,33 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = coerceToHandle(lowerer, access.expression, HTTPRES_T);
     if (event === "close") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "close listeners", 0, () => false, "use ()", []);
-      return { kind: "libCall", fn: "http.resOnClose", args: [receiver, cb, once], type: VOID, loc };
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "close listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "http.resOnClose",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "finish") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, "finish listeners", 0, () => false, "use ()", []);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "finish listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
       return { kind: "libCall", fn: "http.resOnFinish", args: [receiver, cb], type: VOID, loc };
     }
     lowerer.noLowering(
@@ -5094,7 +8455,7 @@ function lowerHttpResMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   lowerer.noLowering(
     `ServerResponse.${name}`,
     call,
-    "setHeader, getHeader, hasHeader, removeHeader, writeHead, writeContinue, writeProcessing, writeEarlyHints, setTimeout, write, end, destroy, response state reads, and on/once of close are the supported ServerResponse members",
+    "setHeader, appendHeader, getHeader, hasHeader, removeHeader, writeHead, writeContinue, writeProcessing, writeEarlyHints, setTimeout, write, end, destroy, response state reads, and on/once of close are the supported ServerResponse members",
     lowerer.checker.getSymbolAtLocation(access.name),
   );
 }

@@ -37,20 +37,52 @@ const num = (value: number, spelling?: string): IrExpr =>
     : { kind: "numLit", value, spelling, type: F64, loc };
 const ref = (localId: string): IrExpr => ({ kind: "varRef", localId, type: F64, loc });
 const bin = (op: IrNumBinOp, left: IrExpr, right: IrExpr): IrExpr => ({
-  kind: "bin", op, left, right, type: op === "<" || op === "<=" || op === ">" || op === ">=" || op === "===" || op === "!==" ? BOOL : F64, loc,
+  kind: "bin",
+  op,
+  left,
+  right,
+  type:
+    op === "<" || op === "<=" || op === ">" || op === ">=" || op === "===" || op === "!=="
+      ? BOOL
+      : F64,
+  loc,
 });
-const and = (left: IrExpr, right: IrExpr): IrExpr => ({ kind: "logical", op: "&&", left, right, type: BOOL, loc });
-const math = (fn: string, ...args: IrExpr[]): IrExpr => ({ kind: "libCall", fn: `math.${fn}`, args, type: F64, loc } as IrExpr);
+const and = (left: IrExpr, right: IrExpr): IrExpr => ({
+  kind: "logical",
+  op: "&&",
+  left,
+  right,
+  type: BOOL,
+  loc,
+});
+const math = (fn: string, ...args: IrExpr[]): IrExpr =>
+  ({ kind: "libCall", fn: `math.${fn}`, args, type: F64, loc }) as IrExpr;
 const send = (value: IrExpr, callee = "send"): IrStmt => ({
   kind: "exprStmt",
   expr: { kind: "call", callee, args: [value], type: VOID, loc },
   loc,
 });
 const decl = (localId: string, init: IrExpr): IrStmt => ({ kind: "varDecl", localId, init, loc });
-const assign = (localId: string, value: IrExpr): IrStmt => ({ kind: "assign", localId, value, loc });
-const iff = (cond: IrExpr, then: IrStmt[]): IrStmt => ({ kind: "if", cond, then, else_: null, loc });
+const assign = (localId: string, value: IrExpr): IrStmt => ({
+  kind: "assign",
+  localId,
+  value,
+  loc,
+});
+const iff = (cond: IrExpr, then: IrStmt[]): IrStmt => ({
+  kind: "if",
+  cond,
+  then,
+  else_: null,
+  loc,
+});
 const forLoop = (init: IrStmt, cond: IrExpr, update: IrStmt, body: IrStmt[]): IrStmt => ({
-  kind: "for", init, cond, update, body, loc,
+  kind: "for",
+  init,
+  cond,
+  update,
+  body,
+  loc,
 });
 
 const sink = (name: string): IrFunction => ({
@@ -65,7 +97,7 @@ const sink = (name: string): IrFunction => ({
 /** A module holding the case function plus the two declared sinks. */
 function caseModule(params: string[], locals: string[], body: IrStmt[]): IrModule {
   return {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "corpus.ts",
     functions: [
       sink("send"),
@@ -74,7 +106,12 @@ function caseModule(params: string[], locals: string[], body: IrStmt[]): IrModul
         name: "case",
         params: params.map((p) => ({ localId: `${p}.0`, name: p, type: F64 })),
         returnType: VOID,
-        locals: [...params, ...locals].map((p) => ({ id: `${p}.0`, name: p, type: F64, mutable: true })),
+        locals: [...params, ...locals].map((p) => ({
+          id: `${p}.0`,
+          name: p,
+          type: F64,
+          mutable: true,
+        })),
         body,
         loc,
       },
@@ -85,8 +122,28 @@ function caseModule(params: string[], locals: string[], body: IrStmt[]): IrModul
 
 const CFG: IntSlotConfig = {
   fns: new Map([
-    ["send", { fnName: "send", params: ["i64"], paramPaths: ["Msg.count"], ret: null, retPath: null, paramSeeds: [null] }],
-    ["sendU64", { fnName: "sendU64", params: ["u64"], paramPaths: ["Msg.id"], ret: null, retPath: null, paramSeeds: [null] }],
+    [
+      "send",
+      {
+        fnName: "send",
+        params: ["i64"],
+        paramPaths: ["Msg.count"],
+        ret: null,
+        retPath: null,
+        paramSeeds: [null],
+      },
+    ],
+    [
+      "sendU64",
+      {
+        fnName: "sendU64",
+        params: ["u64"],
+        paramPaths: ["Msg.id"],
+        ret: null,
+        retPath: null,
+        paramSeeds: [null],
+      },
+    ],
   ]),
   records: new Map(),
 };
@@ -101,7 +158,12 @@ function only(mod: IrModule): IntVerdict {
   return vs[0]!;
 }
 
-const recordRef = (name = "m"): IrExpr => ({ kind: "varRef", localId: `${name}.0`, type: MODEL, loc });
+const recordRef = (name = "m"): IrExpr => ({
+  kind: "varRef",
+  localId: `${name}.0`,
+  type: MODEL,
+  loc,
+});
 const countRead = (name = "m"): IrExpr => ({
   kind: "recordGet",
   obj: recordRef(name),
@@ -129,14 +191,12 @@ const countWrite = (value: IrExpr, name = "m"): IrStmt => ({
 
 const RECORD_CFG: IntSlotConfig = {
   fns: new Map(),
-  records: new Map([
-    [MODEL.shapeId, new Map([["count", { cls: "i64", paths: ["Model.count"] }]])],
-  ]),
+  records: new Map([[MODEL.shapeId, new Map([["count", { cls: "i64", paths: ["Model.count"] }]])]]),
 };
 
 function recordCase(body: IrStmt[], names = ["m"], extraFns: IrFunction[] = []): IrModule {
   return {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "fields.ts",
     functions: [
       ...extraFns,
@@ -177,7 +237,7 @@ const classCountRead = (): IrExpr => ({
 
 function onlyOrdinaryClass(body: IrStmt[]): IntVerdict {
   const mod: IrModule = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: "class-fields.ts",
     functions: [
       sink("send"),
@@ -202,7 +262,9 @@ const noopFn = (name: string, returnsBool = false): IrFunction => ({
   params: [],
   returnType: returnsBool ? BOOL : VOID,
   locals: [],
-  body: returnsBool ? [{ kind: "return", value: { kind: "boolLit", value: true, type: BOOL, loc }, loc }] : [],
+  body: returnsBool
+    ? [{ kind: "return", value: { kind: "boolLit", value: true, type: BOOL, loc }, loc }]
+    : [],
   loc,
 });
 
@@ -226,12 +288,16 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("3. proven-range-overflow — REFUSE, range (2^60 past the provable bound)", () => {
     const v = only(
-      caseModule(["a"], ["t"], [
-        iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(2 ** 30))), [
-          decl("t.0", math("trunc", ref("a.0"))),
-          send(bin("*", ref("t.0"), ref("t.0"))),
-        ]),
-      ]),
+      caseModule(
+        ["a"],
+        ["t"],
+        [
+          iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(2 ** 30))), [
+            decl("t.0", math("trunc", ref("a.0"))),
+            send(bin("*", ref("t.0"), ref("t.0"))),
+          ]),
+        ],
+      ),
     );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
@@ -246,12 +312,16 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("5. times-half-unprovable — REFUSE, wholeness (range and NaN already proven)", () => {
     const v = only(
-      caseModule(["a"], ["t"], [
-        iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(1000))), [
-          decl("t.0", bin("*", ref("a.0"), num(0.5))),
-          send(ref("t.0")),
-        ]),
-      ]),
+      caseModule(
+        ["a"],
+        ["t"],
+        [
+          iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(1000))), [
+            decl("t.0", bin("*", ref("a.0"), num(0.5))),
+            send(ref("t.0")),
+          ]),
+        ],
+      ),
     );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("wholeness");
@@ -260,12 +330,16 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("6. times-half-with-trunc — PROVE, crossing range [0, 500]", () => {
     const v = only(
-      caseModule(["a"], ["t"], [
-        iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(1000))), [
-          decl("t.0", bin("*", ref("a.0"), num(0.5))),
-          send(math("trunc", ref("t.0"))),
-        ]),
-      ]),
+      caseModule(
+        ["a"],
+        ["t"],
+        [
+          iff(and(bin(">=", ref("a.0"), num(0)), bin("<=", ref("a.0"), num(1000))), [
+            decl("t.0", bin("*", ref("a.0"), num(0.5))),
+            send(math("trunc", ref("t.0"))),
+          ]),
+        ],
+      ),
     );
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(0);
@@ -274,11 +348,18 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("7. bounded-counter-loop — PROVE precisely [0, 9] (the anti-trigger-happiness gate)", () => {
     const v = only(
-      caseModule([], ["n"], [
-        forLoop(decl("n.0", num(0)), bin("<", ref("n.0"), num(10)), assign("n.0", bin("+", ref("n.0"), num(1))), [
-          send(ref("n.0")),
-        ]),
-      ]),
+      caseModule(
+        [],
+        ["n"],
+        [
+          forLoop(
+            decl("n.0", num(0)),
+            bin("<", ref("n.0"), num(10)),
+            assign("n.0", bin("+", ref("n.0"), num(1))),
+            [send(ref("n.0"))],
+          ),
+        ],
+      ),
     );
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(0);
@@ -314,12 +395,16 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("12. u64-negative-proven-range — REFUSE, range (negatives cannot enter u64)", () => {
     const v = only(
-      caseModule(["a"], ["t"], [
-        iff(and(bin(">=", ref("a.0"), num(-100)), bin("<=", ref("a.0"), num(100))), [
-          decl("t.0", math("trunc", ref("a.0"))),
-          send(ref("t.0"), "sendU64"),
-        ]),
-      ]),
+      caseModule(
+        ["a"],
+        ["t"],
+        [
+          iff(and(bin(">=", ref("a.0"), num(-100)), bin("<=", ref("a.0"), num(100))), [
+            decl("t.0", math("trunc", ref("a.0"))),
+            send(ref("t.0"), "sendU64"),
+          ]),
+        ],
+      ),
     );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
@@ -328,11 +413,15 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("13. conditional-range-refinement — PROVE, crossing range [2, 6]", () => {
     const v = only(
-      caseModule(["a"], [], [
-        iff(and(bin(">=", ref("a.0"), num(2)), bin("<=", ref("a.0"), num(6))), [
-          send(math("round", ref("a.0"))),
-        ]),
-      ]),
+      caseModule(
+        ["a"],
+        [],
+        [
+          iff(and(bin(">=", ref("a.0"), num(2)), bin("<=", ref("a.0"), num(6))), [
+            send(math("round", ref("a.0"))),
+          ]),
+        ],
+      ),
     );
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(2);
@@ -341,11 +430,18 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
   test("14. data-dependent-loop-bound — REFUSE, range ([0, ∞) is unprovable)", () => {
     const v = only(
-      caseModule(["m"], ["n"], [
-        forLoop(decl("n.0", num(0)), bin("<", ref("n.0"), ref("m.0")), assign("n.0", bin("+", ref("n.0"), num(1))), [
-          send(ref("n.0")),
-        ]),
-      ]),
+      caseModule(
+        ["m"],
+        ["n"],
+        [
+          forLoop(
+            decl("n.0", num(0)),
+            bin("<", ref("n.0"), ref("m.0")),
+            assign("n.0", bin("+", ref("n.0"), num(1))),
+            [send(ref("n.0"))],
+          ),
+        ],
+      ),
     );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
@@ -368,46 +464,92 @@ describe("the ask-4 conformance corpus over scriptc IR", () => {
 
 describe("signed zero in arithmetic before integer boundaries", () => {
   test.each([
-    { name: "positive dividend with an upper clamp", value: math("min", bin("/", num(1), ref("z.0")), num(1)), callee: "send" },
-    { name: "positive dividend at a u64 slot", value: math("min", bin("/", num(1), ref("z.0")), num(1)), callee: "sendU64" },
-    { name: "negative dividend with a lower clamp", value: math("max", bin("/", num(-1), ref("z.0")), num(-1)), callee: "send" },
+    {
+      name: "positive dividend with an upper clamp",
+      value: math("min", bin("/", num(1), ref("z.0")), num(1)),
+      callee: "send",
+    },
+    {
+      name: "positive dividend at a u64 slot",
+      value: math("min", bin("/", num(1), ref("z.0")), num(1)),
+      callee: "sendU64",
+    },
+    {
+      name: "negative dividend with a lower clamp",
+      value: math("max", bin("/", num(-1), ref("z.0")), num(-1)),
+      callee: "send",
+    },
     ...[-1, -3, -5].map((exponent) => ({
       name: `negative odd exponent ${exponent}`,
       value: math("min", bin("**", ref("z.0"), num(exponent)), num(1)),
       callee: "send",
     })),
   ])("$name refuses a reachable infinity", ({ value, callee }) => {
-    const v = only(caseModule(["z"], [], [
-      iff(bin("===", ref("z.0"), num(0)), [send(math("trunc", value), callee)]),
-    ]));
+    const v = only(
+      caseModule(
+        ["z"],
+        [],
+        [iff(bin("===", ref("z.0"), num(0)), [send(math("trunc", value), callee)])],
+      ),
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
     expect(v.detail).toContain("Infinity");
   });
 
-  test.each(["/", "**"] as const)("a two-sided clamp after %s contains both zero signs' results", (op) => {
-    const value = op === "/" ? bin("/", num(1), ref("z.0")) : bin("**", ref("z.0"), num(-1));
-    const v = only(caseModule(["z"], [], [
-      iff(bin("===", ref("z.0"), num(0)), [send(math("trunc", math("max", num(-1), math("min", value, num(1)))))]),
-    ]));
-    expect(v.outcome).toBe("prove");
-    expect(v.provenLo).toBe(-1);
-    expect(v.provenHi).toBe(1);
-  });
+  test.each(["/", "**"] as const)(
+    "a two-sided clamp after %s contains both zero signs' results",
+    (op) => {
+      const value = op === "/" ? bin("/", num(1), ref("z.0")) : bin("**", ref("z.0"), num(-1));
+      const v = only(
+        caseModule(
+          ["z"],
+          [],
+          [
+            iff(bin("===", ref("z.0"), num(0)), [
+              send(math("trunc", math("max", num(-1), math("min", value, num(1))))),
+            ]),
+          ],
+        ),
+      );
+      expect(v.outcome).toBe("prove");
+      expect(v.provenLo).toBe(-1);
+      expect(v.provenHi).toBe(1);
+    },
+  );
 
-  test.each([-2, -4])("an even negative exponent %s still permits a one-sided clamp", (exponent) => {
-    const v = only(caseModule(["z"], [], [
-      iff(bin("===", ref("z.0"), num(0)), [send(math("trunc", math("min", bin("**", ref("z.0"), num(exponent)), num(1))))]),
-    ]));
-    expect(v.outcome).toBe("prove");
-    expect(v.provenLo).toBe(1);
-    expect(v.provenHi).toBe(1);
-  });
+  test.each([-2, -4])(
+    "an even negative exponent %s still permits a one-sided clamp",
+    (exponent) => {
+      const v = only(
+        caseModule(
+          ["z"],
+          [],
+          [
+            iff(bin("===", ref("z.0"), num(0)), [
+              send(math("trunc", math("min", bin("**", ref("z.0"), num(exponent)), num(1)))),
+            ]),
+          ],
+        ),
+      );
+      expect(v.outcome).toBe("prove");
+      expect(v.provenLo).toBe(1);
+      expect(v.provenHi).toBe(1);
+    },
+  );
 
   test("zero divided by either zero sign still refuses NaN", () => {
-    const v = only(caseModule(["z"], [], [
-      iff(bin("===", ref("z.0"), num(0)), [send(math("trunc", math("min", bin("/", num(0), ref("z.0")), num(1))))]),
-    ]));
+    const v = only(
+      caseModule(
+        ["z"],
+        [],
+        [
+          iff(bin("===", ref("z.0"), num(0)), [
+            send(math("trunc", math("min", bin("/", num(0), ref("z.0")), num(1)))),
+          ]),
+        ],
+      ),
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("wholeness");
     expect(v.detail).toContain("NaN");
@@ -439,51 +581,57 @@ describe("the domain's edges beyond the corpus", () => {
       loc,
     };
     const mod: IrModule = {
-      irVersion: 13,
+      irVersion: 17,
       sourceFile: "optional.ts",
-      functions: [{
-        name: "normalize",
-        params: [{ localId: "x.0", name: "x", type: OPTIONAL_NUMBER }],
-        returnType: OPTIONAL_NUMBER,
-        locals: [{ id: "x.0", name: "x", type: OPTIONAL_NUMBER, mutable: true }],
-        body: [
-          {
-            kind: "if",
-            cond: {
-              kind: "unionIsTag",
-              unionId: OPTIONAL_NUMBER.unionId,
-              tag: 1,
-              negated: false,
-              value: x,
-              type: BOOL,
+      functions: [
+        {
+          name: "normalize",
+          params: [{ localId: "x.0", name: "x", type: OPTIONAL_NUMBER }],
+          returnType: OPTIONAL_NUMBER,
+          locals: [{ id: "x.0", name: "x", type: OPTIONAL_NUMBER, mutable: true }],
+          body: [
+            {
+              kind: "if",
+              cond: {
+                kind: "unionIsTag",
+                unionId: OPTIONAL_NUMBER.unionId,
+                tag: 1,
+                negated: false,
+                value: x,
+                type: BOOL,
+                loc,
+              },
+              then: [{ kind: "return", value: x, loc }],
+              else_: null,
               loc,
             },
-            then: [{ kind: "return", value: x, loc }],
-            else_: null,
-            loc,
-          },
-          { kind: "return", value: one, loc },
-        ],
-        loc,
-      }],
-      unions: [{
-        id: OPTIONAL_NUMBER.unionId,
-        arms: [F64, { kind: "nullT" }],
-      }],
+            { kind: "return", value: one, loc },
+          ],
+          loc,
+        },
+      ],
+      unions: [
+        {
+          id: OPTIONAL_NUMBER.unionId,
+          arms: [F64, { kind: "nullT" }],
+        },
+      ],
       entry: "normalize",
     };
     const cfg: IntSlotConfig = {
-      fns: new Map([[
-        "normalize",
-        {
-          fnName: "normalize",
-          params: [null],
-          paramPaths: [null],
-          ret: "u64",
-          retPath: "helpers.normalize.return",
-          paramSeeds: [null],
-        },
-      ]]),
+      fns: new Map([
+        [
+          "normalize",
+          {
+            fnName: "normalize",
+            params: [null],
+            paramPaths: [null],
+            ret: "u64",
+            retPath: "helpers.normalize.return",
+            paramSeeds: [null],
+          },
+        ],
+      ]),
       records: new Map(),
     };
     const vs = checkLibraryIntegerSlots(mod, cfg);
@@ -495,7 +643,9 @@ describe("the domain's edges beyond the corpus", () => {
 
   test("a guard that only excludes NaN still refuses on the unbounded range", () => {
     // if (a === a) send(a) — NaN excluded, but the interval stays ±∞.
-    const v = only(caseModule(["a"], [], [iff(bin("===", ref("a.0"), ref("a.0")), [send(ref("a.0"))])]));
+    const v = only(
+      caseModule(["a"], [], [iff(bin("===", ref("a.0"), ref("a.0")), [send(ref("a.0"))])]),
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
   });
@@ -511,12 +661,16 @@ describe("the domain's edges beyond the corpus", () => {
     // Treating that edge as the negated ordered comparison would incorrectly
     // make it vacuous and prove the integer crossing.
     const v = only(
-      caseModule(["a"], ["x"], [
-        decl("x.0", num(5)),
-        iff(bin("===", ref("a.0"), num(0)), [assign("x.0", bin("/", num(0), num(0)))]),
-        iff(bin(op, ref("x.0"), num(bound)), [{ kind: "return", value: null, loc }]),
-        send(ref("x.0")),
-      ]),
+      caseModule(
+        ["a"],
+        ["x"],
+        [
+          decl("x.0", num(5)),
+          iff(bin("===", ref("a.0"), num(0)), [assign("x.0", bin("/", num(0), num(0)))]),
+          iff(bin(op, ref("x.0"), num(bound)), [{ kind: "return", value: null, loc }]),
+          send(ref("x.0")),
+        ],
+      ),
     );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("wholeness");
@@ -528,53 +682,71 @@ describe("the domain's edges beyond the corpus", () => {
     ["<=", 1],
     [">", 0],
     [">=", 0],
-  ] as const)("a failed %s comparison does not narrow through a NaN right operand", (op, numericY) => {
-    // x is always the non-integer 0.5. The numeric member of y makes the
-    // comparison true, but NaN makes it false without constraining x.
-    const v = only(
-      caseModule(["a"], ["x", "y"], [
-        decl("x.0", num(0.5)),
-        decl("y.0", num(numericY)),
-        iff(bin("===", ref("a.0"), num(0)), [assign("y.0", bin("/", num(0), num(0)))]),
-        iff(bin(op, ref("x.0"), ref("y.0")), [{ kind: "return", value: null, loc }]),
-        send(ref("x.0")),
-      ]),
-    );
-    expect(v.outcome).toBe("refuse");
-    expect(v.obligation).toBe("wholeness");
-  });
+  ] as const)(
+    "a failed %s comparison does not narrow through a NaN right operand",
+    (op, numericY) => {
+      // x is always the non-integer 0.5. The numeric member of y makes the
+      // comparison true, but NaN makes it false without constraining x.
+      const v = only(
+        caseModule(
+          ["a"],
+          ["x", "y"],
+          [
+            decl("x.0", num(0.5)),
+            decl("y.0", num(numericY)),
+            iff(bin("===", ref("a.0"), num(0)), [assign("y.0", bin("/", num(0), num(0)))]),
+            iff(bin(op, ref("x.0"), ref("y.0")), [{ kind: "return", value: null, loc }]),
+            send(ref("x.0")),
+          ],
+        ),
+      );
+      expect(v.outcome).toBe("refuse");
+      expect(v.obligation).toBe("wholeness");
+    },
+  );
 
   test.each([
     ["<", 0],
     ["<=", 0],
     [">", 1],
     [">=", 1],
-  ] as const)("a failed %s comparison does not narrow through a NaN left operand", (op, numericY) => {
-    // The symmetric case: y may be NaN, so a failed comparison cannot
-    // constrain the non-integer x on the right-hand side.
-    const v = only(
-      caseModule(["a"], ["x", "y"], [
-        decl("x.0", num(0.5)),
-        decl("y.0", num(numericY)),
-        iff(bin("===", ref("a.0"), num(0)), [assign("y.0", bin("/", num(0), num(0)))]),
-        iff(bin(op, ref("y.0"), ref("x.0")), [{ kind: "return", value: null, loc }]),
-        send(ref("x.0")),
-      ]),
-    );
-    expect(v.outcome).toBe("refuse");
-    expect(v.obligation).toBe("wholeness");
-  });
+  ] as const)(
+    "a failed %s comparison does not narrow through a NaN left operand",
+    (op, numericY) => {
+      // The symmetric case: y may be NaN, so a failed comparison cannot
+      // constrain the non-integer x on the right-hand side.
+      const v = only(
+        caseModule(
+          ["a"],
+          ["x", "y"],
+          [
+            decl("x.0", num(0.5)),
+            decl("y.0", num(numericY)),
+            iff(bin("===", ref("a.0"), num(0)), [assign("y.0", bin("/", num(0), num(0)))]),
+            iff(bin(op, ref("y.0"), ref("x.0")), [{ kind: "return", value: null, loc }]),
+            send(ref("x.0")),
+          ],
+        ),
+      );
+      expect(v.outcome).toBe("refuse");
+      expect(v.obligation).toBe("wholeness");
+    },
+  );
 
   test("a failed !== comparison clears NaN and proves equality", () => {
     // The true edge consumes the NaN alternative; falling through proves
     // x === 5, so the integer crossing is exact and NaN-free.
     const v = only(
-      caseModule(["a"], ["x"], [
-        decl("x.0", num(5)),
-        iff(bin("===", ref("a.0"), num(0)), [assign("x.0", bin("/", num(0), num(0)))]),
-        iff(bin("!==", ref("x.0"), num(5)), [{ kind: "return", value: null, loc }]),
-        send(ref("x.0")),
-      ]),
+      caseModule(
+        ["a"],
+        ["x"],
+        [
+          decl("x.0", num(5)),
+          iff(bin("===", ref("a.0"), num(0)), [assign("x.0", bin("/", num(0), num(0)))]),
+          iff(bin("!==", ref("x.0"), num(5)), [{ kind: "return", value: null, loc }]),
+          send(ref("x.0")),
+        ],
+      ),
     );
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(5);
@@ -592,10 +764,19 @@ describe("the domain's edges beyond the corpus", () => {
 
   test("a while-loop spelling of the counter proves the same exact bound", () => {
     const v = only(
-      caseModule([], ["n"], [
-        decl("n.0", num(0)),
-        { kind: "while", cond: bin("<", ref("n.0"), num(10)), body: [send(ref("n.0")), assign("n.0", bin("+", ref("n.0"), num(1)))], loc },
-      ]),
+      caseModule(
+        [],
+        ["n"],
+        [
+          decl("n.0", num(0)),
+          {
+            kind: "while",
+            cond: bin("<", ref("n.0"), num(10)),
+            body: [send(ref("n.0")), assign("n.0", bin("+", ref("n.0"), num(1)))],
+            loc,
+          },
+        ],
+      ),
     );
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(0);
@@ -605,18 +786,26 @@ describe("the domain's edges beyond the corpus", () => {
   test("break carries its refined state out of the loop", () => {
     // for (;;) { if (n >= 5) break; send(n); n = n + 1 } send(n)
     const v = verdicts(
-      caseModule([], ["n"], [
-        decl("n.0", num(0)),
-        {
-          kind: "for", init: null, cond: null, update: null, loc,
-          body: [
-            iff(bin(">=", ref("n.0"), num(5)), [{ kind: "break", loc }]),
-            send(ref("n.0")),
-            assign("n.0", bin("+", ref("n.0"), num(1))),
-          ],
-        },
-        send(ref("n.0")),
-      ]),
+      caseModule(
+        [],
+        ["n"],
+        [
+          decl("n.0", num(0)),
+          {
+            kind: "for",
+            init: null,
+            cond: null,
+            update: null,
+            loc,
+            body: [
+              iff(bin(">=", ref("n.0"), num(5)), [{ kind: "break", loc }]),
+              send(ref("n.0")),
+              assign("n.0", bin("+", ref("n.0"), num(1))),
+            ],
+          },
+          send(ref("n.0")),
+        ],
+      ),
     );
     expect(v.length).toBe(2);
     expect(v[0]!.outcome).toBe("prove"); // inside: [0, 4] — the fall-through edge's refinement
@@ -700,11 +889,16 @@ describe("straight-line ordinary-field refinement", () => {
       type: BOOL,
       loc,
     };
-    const mod = recordCase([
-      iff(and(isResized, and(bin(">=", widthRead(), num(0)), bin("<=", widthRead(), num(65535)))), [
-        send(math("trunc", widthRead())),
-      ]),
-    ], ["msg"], [sink("send")]);
+    const mod = recordCase(
+      [
+        iff(
+          and(isResized, and(bin(">=", widthRead(), num(0)), bin("<=", widthRead(), num(65535)))),
+          [send(math("trunc", widthRead()))],
+        ),
+      ],
+      ["msg"],
+      [sink("send")],
+    );
     mod.functions[1]!.params[0]!.type = RESIZE_MSG;
     mod.functions[1]!.locals[0]!.type = RESIZE_MSG;
     mod.unions = [{ id: RESIZE_MSG.unionId, arms: [NOOP, RESIZED] }];
@@ -732,13 +926,17 @@ describe("straight-line ordinary-field refinement", () => {
       type: BOOL,
       loc,
     };
-    const mod = recordCase([
-      iff(bin(">=", countRead(), num(0)), [
-        iff(and(isResized, bin("<=", countRead(), num(100))), [
-          send(math("trunc", countRead()), "sendU64"),
+    const mod = recordCase(
+      [
+        iff(bin(">=", countRead(), num(0)), [
+          iff(and(isResized, bin("<=", countRead(), num(100))), [
+            send(math("trunc", countRead()), "sendU64"),
+          ]),
         ]),
-      ]),
-    ], ["m", "msg"], [sink("sendU64")]);
+      ],
+      ["m", "msg"],
+      [sink("sendU64")],
+    );
     mod.functions[1]!.params[1]!.type = RESIZE_MSG;
     mod.functions[1]!.locals[1]!.type = RESIZE_MSG;
     mod.unions = [{ id: RESIZE_MSG.unionId, arms: [NOOP, RESIZED] }];
@@ -766,12 +964,15 @@ describe("straight-line ordinary-field refinement", () => {
       expr: { kind: "call", callee: "touch", args: [], type: VOID, loc },
       loc,
     };
-    const v = onlyOrdinaryRecord([
-      iff(and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100))), [
-        call,
-        send(math("trunc", countRead())),
-      ]),
-    ], [noopFn("touch")]);
+    const v = onlyOrdinaryRecord(
+      [
+        iff(and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100))), [
+          call,
+          send(math("trunc", countRead())),
+        ]),
+      ],
+      [noopFn("touch")],
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("wholeness");
     expect(v.detail).toContain("NaN");
@@ -819,9 +1020,7 @@ describe("straight-line declared-field refinement", () => {
 
   test("an if guard refines the repeated field read through its boundary write", () => {
     const v = onlyRecord([
-      iff(bin("<", countRead(), num(1000)), [
-        countWrite(bin("+", countRead(), num(1))),
-      ]),
+      iff(bin("<", countRead(), num(1000)), [countWrite(bin("+", countRead(), num(1)))]),
     ]);
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(SAFE_MIN + 1);
@@ -863,14 +1062,17 @@ describe("straight-line declared-field refinement", () => {
     };
     const cfg: IntSlotConfig = {
       fns: new Map([
-        ["sendCount", {
-          fnName: "sendCount",
-          params: ["i64"],
-          paramPaths: ["exports.sendCount.params[0]"],
-          ret: null,
-          retPath: null,
-          paramSeeds: [null],
-        }],
+        [
+          "sendCount",
+          {
+            fnName: "sendCount",
+            params: ["i64"],
+            paramPaths: ["exports.sendCount.params[0]"],
+            ret: null,
+            retPath: null,
+            paramSeeds: [null],
+          },
+        ],
       ]),
       records: RECORD_CFG.records,
     };
@@ -900,12 +1102,11 @@ describe("straight-line declared-field refinement", () => {
       expr: { kind: "call", callee: "touch", args: [], type: VOID, loc },
       loc,
     };
-    const v = onlyRecord([
-      iff(bin("<", countRead(), num(1000)), [
-        call,
-        countWrite(bin("+", countRead(), num(1))),
-      ]),
-    ], ["m"], [noopFn("touch")]);
+    const v = onlyRecord(
+      [iff(bin("<", countRead(), num(1000)), [call, countWrite(bin("+", countRead(), num(1)))])],
+      ["m"],
+      [noopFn("touch")],
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
   });
@@ -930,12 +1131,15 @@ describe("straight-line declared-field refinement", () => {
   });
 
   test("rebinding the receiver kills its path without alias analysis", () => {
-    const v = onlyRecord([
-      iff(bin("<", countRead(), num(1000)), [
-        { kind: "assign", localId: "m.0", value: recordRef("other"), loc },
-        countWrite(bin("+", countRead(), num(1))),
-      ]),
-    ], ["m", "other"]);
+    const v = onlyRecord(
+      [
+        iff(bin("<", countRead(), num(1000)), [
+          { kind: "assign", localId: "m.0", value: recordRef("other"), loc },
+          countWrite(bin("+", countRead(), num(1))),
+        ]),
+      ],
+      ["m", "other"],
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
   });
@@ -952,10 +1156,7 @@ describe("straight-line declared-field refinement", () => {
       loc,
     };
     const v = onlyRecord([
-      iff(bin("<", countRead(), num(1000)), [
-        suspend,
-        countWrite(bin("+", countRead(), num(1))),
-      ]),
+      iff(bin("<", countRead(), num(1000)), [suspend, countWrite(bin("+", countRead(), num(1)))]),
     ]);
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
@@ -970,9 +1171,11 @@ describe("straight-line declared-field refinement", () => {
       type: BOOL,
       loc,
     };
-    const v = onlyRecord([
-      iff(cond, [countWrite(bin("+", countRead(), num(1)))]),
-    ], ["m"], [noopFn("touch", true)]);
+    const v = onlyRecord(
+      [iff(cond, [countWrite(bin("+", countRead(), num(1)))])],
+      ["m"],
+      [noopFn("touch", true)],
+    );
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
   });

@@ -1,44 +1,70 @@
 /** Runtime requirements derived from the lowered program, shared by compiler hosts. */
-import { moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleRuntimeFeatures, type IrModule } from "../ir/ir.js";
+import { type IrModule } from "../ir/ir.js";
+import { moduleRuntimeFeatures } from "../ir/runtime-features.js";
 import { hasForeignFfiCallback } from "./ffi-callbacks.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
+import { youngNurseryRequested } from "./young-nursery.js";
 
-export function executableLinkFeatures(mod: IrModule, dynamic: boolean): NativeLinkFeatures {
+export function executableLinkFeatures(mod: IrModule): NativeLinkFeatures {
   const features = moduleRuntimeFeatures(mod);
   return {
-    dynamic,
+    ...(mod.workers ? { workers: true } : {}),
+    ...(youngNurseryRequested() && mod.lib === undefined ? { youngNursery: true } : {}),
     regex: features.regex,
     copying: features.copying,
     textDecoderLegacy: features.legacyTextDecoder,
     fileHandle: features.fileHandle,
     fetch: features.fetch,
-    netIsland:
-      moduleEmbedsBuiltin(mod, "node:http") ||
-      moduleEmbedsBuiltin(mod, "node:https") ||
-      moduleEmbedsBuiltin(mod, "node:net") ||
-      moduleEmbedsBuiltin(mod, "node:tls"),
-    zlib: features.zlib || moduleEmbedsCompressedNpm(mod),
+    ...(features.eventTarget ? { eventTarget: true } : {}),
+    ...(features.wasm ? { wasm: true } : {}),
+    ...(features.warningReplace ? { warningReplace: true } : {}),
+    ...(features.stdioExtended ? { stdioExtended: true } : {}),
+    ...(features.moduleNamespace ? { moduleNamespace: true } : {}),
+    zlib: features.zlib,
+    ...(features.brotli ? { brotli: true } : {}),
     assert: features.assert,
     inspect: features.inspect,
     dynInvoke: features.dynInvoke,
     dc: features.dc,
     dynAsync: features.dynAsync,
+    ...(features.dynTier ? { dynTier: true } : {}),
+    ...(features.streamDyn ? { streamDyn: true } : {}),
+    ...(features.handleProps ? { handleProps: true } : {}),
+    ...(features.declAdopt ? { declAdopt: true } : {}),
+    ...(features.dynForAwait ? { dynForAwait: true } : {}),
+    ...(features.eventsOnceSignal ? { eventsOnceSignal: true } : {}),
+    ...(features.dynBuffer ? { dynBuffer: true } : {}),
+    ...(features.builtinValues ? { builtinValues: true } : {}),
     events: features.processEvents,
     emitter: features.emitter,
     symbol: features.symbol,
     bigint: features.bigint,
     searchParams: features.searchParams,
     qs: features.qs,
+    utilPromisify: features.utilPromisify,
+    dynBuiltinClass: features.dynBuiltinClass,
+    dynBuiltinStream: features.dynBuiltinStream,
     parseArgs: features.parseArgs,
     stream: features.stream,
     net: features.net,
     http: features.http,
     http2: features.http2,
     dgram: features.dgram,
+    dnsPromises: features.dnsPromises,
+    dgramDyn: features.dgramDyn,
+    textCodecDyn: features.textCodecDyn,
     watch: features.fsWatch,
     foreignFfi: hasForeignFfiCallback(mod.ffiImports ?? []),
     nodeTest: features.nodeTest,
     tls: features.tls,
     tlsCa: features.tlsCa,
+    cipher: features.cipher,
+    ecdh: features.ecdh,
+    dh: features.dh,
+    pki: features.pki,
+    ed25519: features.ed25519,
+    x509: features.x509,
+    webcrypto: features.webcrypto,
+    perfLoop: features.perfLoop,
   };
 }

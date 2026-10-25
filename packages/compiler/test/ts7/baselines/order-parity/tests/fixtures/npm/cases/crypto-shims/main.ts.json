@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/crypto-shims/main.ts"
+ ],
+ "diags": []
+}

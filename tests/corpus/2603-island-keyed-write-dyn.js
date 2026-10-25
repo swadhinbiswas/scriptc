@@ -1,4 +1,3 @@
-// @dynamic
 // The keyed-write family's --dynamic arm: an untyped evolving object rides
 // the ISLAND under --dynamic, so runtime-keyed writes and reads are engine
 // ops (setIdx/getIdx) — later writes win, number keys go through JS's own

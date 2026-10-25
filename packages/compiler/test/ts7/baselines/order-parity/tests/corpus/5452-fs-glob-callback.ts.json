@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5452-fs-glob-callback.ts"
+ ],
+ "diags": []
+}

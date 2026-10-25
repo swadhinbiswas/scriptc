@@ -16,9 +16,15 @@ const prelude = `
 `;
 
 function freshProcess(source: string, args: string[] = []): void {
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", prelude + source, ...args], {
-    cwd: root, encoding: "utf8", timeout: 60_000,
-  });
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", prelude + source, ...args],
+    {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
   expect(result.error).toBeUndefined();
   expect(result.signal).toBeNull();
   expect(result.status, result.stderr).toBe(0);
@@ -26,11 +32,14 @@ function freshProcess(source: string, args: string[] = []): void {
 }
 
 test("ordinary compilation does not initialize the legacy parser", () => {
-  const directory = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-startup-"));
+  const directory = mkdtempSync(
+    join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-startup-"),
+  );
   const entry = join(directory, "main.ts");
   writeFileSync(entry, "const answer: number = 42; console.log(answer);\n");
   try {
-    freshProcess(`
+    freshProcess(
+      `
       const { compile } = await import(${JSON.stringify(compiler)});
       assert.equal(require.cache[legacyParser], undefined, "compiler import loaded TypeScript 5");
       const result = await compile(process.argv[1], {
@@ -38,20 +47,30 @@ test("ordinary compilation does not initialize the legacy parser", () => {
       });
       assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
       assert.equal(require.cache[legacyParser], undefined, "ordinary compilation loaded TypeScript 5");
-    `, [entry, directory, join(directory, "main.ll")]);
+    `,
+      [entry, directory, join(directory, "main.ll")],
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test.each([
-  ["compile-time evaluation", "frontend/comptime-node.ts", `
+  [
+    "compile-time evaluation",
+    "frontend/comptime-node.ts",
+    `
     assert.equal(api.evaluateNodeComptime("(): number => 21 * 2", 1000), 42);
-  `],
-  ["semantic source comparison", "library/semantic-source.ts", `
+  `,
+  ],
+  [
+    "semantic source comparison",
+    "library/semantic-source.ts",
+    `
     assert.equal(api.semanticallyEqualSource("entry.ts", "const n = 1;", "// note\\nconst n = 1;"), true);
     assert.equal(api.semanticallyEqualSource("entry.ts", "const n = 1;", "const n = 2;"), false);
-  `],
+  `,
+  ],
 ])("%s loads the legacy parser on first use", (_name, module, operation) => {
   freshProcess(`
     const api = await import(${JSON.stringify(new URL(`../src/${module}`, import.meta.url).href)});

@@ -11,7 +11,7 @@ export function evaluateNodeComptime(source: string, timeoutMs: number): unknown
   const js = ts5.transpileModule(`(${source})()`, {
     compilerOptions: { target: ts5.ScriptTarget.ESNext },
   }).outputText;
-  // Shadow V8's otherwise silent per-context console. The capture walk
-  // rejects direct console references before evaluation.
+  // Shadow V8's per-context console, which otherwise produces no output.
+  // The capture walk rejects direct console references before evaluation.
   return vm.runInNewContext(js, { console: undefined }, { timeout: timeoutMs });
 }

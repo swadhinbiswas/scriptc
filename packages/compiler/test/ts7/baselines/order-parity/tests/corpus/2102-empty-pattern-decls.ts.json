@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2102-empty-pattern-decls.ts"
+ ],
+ "diags": []
+}

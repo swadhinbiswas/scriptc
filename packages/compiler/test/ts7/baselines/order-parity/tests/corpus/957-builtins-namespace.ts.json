@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/957-builtins-namespace.ts"
+ ],
+ "diags": []
+}

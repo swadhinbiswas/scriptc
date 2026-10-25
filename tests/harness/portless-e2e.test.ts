@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
 
-const portlessRoot = process.env["SCRIPTC_PORTLESS_ROOT"] ?? join(homedir(), "Developer/portless-scratch");
+const portlessRoot =
+  process.env["SCRIPTC_PORTLESS_ROOT"] ?? join(homedir(), "Developer/portless-scratch");
 const portlessPackage = join(portlessRoot, "packages/portless");
 const sourceEntry = join(portlessPackage, "src/cli.ts");
 const suite = existsSync(sourceEntry) ? describe : describe.skip;
@@ -33,8 +34,18 @@ afterAll(async () => {
 function childEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of [
-    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
-    "ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS", "DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "ASAN_OPTIONS",
+    "LSAN_OPTIONS",
+    "UBSAN_OPTIONS",
+    "DYLD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
   ]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
@@ -55,7 +66,8 @@ function freePort(): Promise<number> {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (address === null || typeof address === "string") return reject(new Error("no TCP address"));
+      if (address === null || typeof address === "string")
+        return reject(new Error("no TCP address"));
       server.close(() => resolve(address.port));
     });
   });
@@ -66,7 +78,9 @@ function get(port: number, host: string): Promise<{ status: number; body: string
     const req = request({ hostname: "127.0.0.1", port, headers: { host } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+      );
     });
     req.once("error", reject);
     req.end();
@@ -89,21 +103,29 @@ suite("Portless acceptance", () => {
   test("builds and proxies a live alias without Node at runtime", async () => {
     const work = await mkdtemp(join(tmpdir(), "scriptc-portless-"));
     cleanup.push(() => rm(work, { recursive: true, force: true }));
-    const pkg = JSON.parse(readFileSync(join(portlessRoot, "packages/portless/package.json"), "utf8")) as { version: string };
+    const pkg = JSON.parse(
+      readFileSync(join(portlessRoot, "packages/portless/package.json"), "utf8"),
+    ) as { version: string };
     const shadowPackage = join(work, "checkout");
     await cp(portlessPackage, shadowPackage, {
       recursive: true,
       filter: (source) => source !== join(portlessPackage, "node_modules"),
     });
-    await symlink(join(portlessPackage, "node_modules"), join(shadowPackage, "node_modules"),
-                  process.platform === "win32" ? "junction" : "dir");
+    await symlink(
+      join(portlessPackage, "node_modules"),
+      join(shadowPackage, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const entry = join(shadowPackage, "src/cli.ts");
     const source = readFileSync(entry, "utf8");
     const stamped = source.replace(
       /^(?:declare const __VERSION__: string;|const __VERSION__ = .*;)$/m,
       `const __VERSION__ = ${JSON.stringify(pkg.version)};`,
     );
-    if (stamped === source && !source.includes(`const __VERSION__ = ${JSON.stringify(pkg.version)};`)) {
+    if (
+      stamped === source &&
+      !source.includes(`const __VERSION__ = ${JSON.stringify(pkg.version)};`)
+    ) {
       throw new Error("Portless __VERSION__ declaration was not found");
     }
     writeFileSync(entry, stamped);
@@ -121,11 +143,15 @@ suite("Portless acceptance", () => {
     const backendPort = await freePort();
     const stateDir = join(work, "state");
     const env = childEnv({ PORTLESS_STATE_DIR: stateDir, PORTLESS_SYNC_HOSTS: "0" });
-    const proxy = spawn(binary, ["proxy", "start", "--no-tls", "-p", String(proxyPort), "--foreground"], {
-      cwd: portlessRoot,
-      env,
-      stdio: "ignore",
-    });
+    const proxy = spawn(
+      binary,
+      ["proxy", "start", "--no-tls", "-p", String(proxyPort), "--foreground"],
+      {
+        cwd: portlessRoot,
+        env,
+        stdio: "ignore",
+      },
+    );
     cleanup.push(() => terminate(proxy));
     await waitForProxy(proxyPort);
 
@@ -144,6 +170,9 @@ suite("Portless acceptance", () => {
     const aliasCode = await new Promise<number | null>((resolve) => alias.once("close", resolve));
     expect(aliasCode).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await expect(get(proxyPort, "app.localhost")).resolves.toEqual({ status: 200, body: "native-portless-ok" });
+    await expect(get(proxyPort, "app.localhost")).resolves.toEqual({
+      status: 200,
+      body: "native-portless-ok",
+    });
   }, 300_000);
 });

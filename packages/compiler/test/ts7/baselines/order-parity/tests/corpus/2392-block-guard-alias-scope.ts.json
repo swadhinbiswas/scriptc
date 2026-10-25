@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2392-block-guard-alias-scope.ts"
+ ],
+ "diags": []
+}

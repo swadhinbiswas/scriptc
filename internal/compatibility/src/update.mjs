@@ -2,10 +2,9 @@
 
 import { spawnSync } from "node:child_process";
 
-const check = process.argv.slice(2).includes("--check");
-const args = check ? ["--check"] : [];
+const args = process.argv.slice(2).filter((arg) => arg === "--check" || arg === "--local");
 
-for (const script of ["generate-island-header.mjs", "generate.mjs"]) {
+for (const script of ["generate.mjs"]) {
   const result = spawnSync(process.execPath, [`src/${script}`, ...args], { stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);

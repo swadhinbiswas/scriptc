@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2900-void-conditional-arrow.ts"
+ ],
+ "diags": []
+}

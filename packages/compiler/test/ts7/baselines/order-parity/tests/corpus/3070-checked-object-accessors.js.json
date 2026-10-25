@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3070-checked-object-accessors.js"
+ ],
+ "diags": []
+}

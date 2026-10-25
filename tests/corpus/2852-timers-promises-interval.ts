@@ -3,6 +3,7 @@
 // the for-await loop closes it and cancels the generator before another
 // timer is armed.
 import { setInterval as every } from "node:timers/promises";
+import * as timers from "node:timers/promises";
 
 async function main(): Promise<void> {
   const iterator = every(1, "tick");
@@ -13,6 +14,10 @@ async function main(): Promise<void> {
     if (count === 3) break;
   }
   console.log("done");
+  for await (const value of timers.setInterval(1, "namespace")) {
+    console.log(value);
+    break;
+  }
 }
 
 void main();

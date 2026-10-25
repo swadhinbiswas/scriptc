@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5743-atomics-wait-notify.ts"
+ ],
+ "diags": []
+}

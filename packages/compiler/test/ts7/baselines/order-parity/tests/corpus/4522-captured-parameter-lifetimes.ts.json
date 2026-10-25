@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4522-captured-parameter-lifetimes.ts"
+ ],
+ "diags": []
+}

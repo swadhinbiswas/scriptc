@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1537-chalk-hybrid/colors.ts",
+  "<repo>/tests/corpus/1537-chalk-hybrid/main.ts"
+ ],
+ "diags": []
+}

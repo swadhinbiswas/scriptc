@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5301-stream-add-abort-signal-errors.cjs"
+ ],
+ "diags": []
+}

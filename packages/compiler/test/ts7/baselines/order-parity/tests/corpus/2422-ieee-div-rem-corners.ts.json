@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2422-ieee-div-rem-corners.ts"
+ ],
+ "diags": []
+}

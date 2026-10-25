@@ -1,0 +1,17 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/local-require-binding-esm.js"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "calls through a source binding named 'require' (this spelling is reserved for CommonJS/createRequire module edges — rename the binding) is not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/local-require-binding-esm.js",
+    "start": 80,
+    "end": 100
+   },
+   "milestone": "later"
+  }
+ ]
+}

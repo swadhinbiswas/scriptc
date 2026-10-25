@@ -18,9 +18,6 @@ struct ScrUrl {
   ScrStr *query;    /* "" or "?..." */
   ScrStr *fragment; /* "" or "#..." */
   bool has_authority;
-  /* Node 24 preserves the /. serialization escape when a host setter
-   * enters port state from a host-less // path; pathname excludes it. */
-  bool host_path_escape;
   /* The LIVE searchParams view (NULL until first read). NON-owning: the
    * view retains its URL, so a URL with a live view never dies; the view
    * clears this back-pointer when it releases. Every `u.searchParams`

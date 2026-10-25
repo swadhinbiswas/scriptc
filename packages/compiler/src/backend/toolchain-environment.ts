@@ -104,7 +104,11 @@ export function toolchainEnvironmentFingerprint(env: NodeJS.ProcessEnv = process
   for (const name of TOOLCHAIN_ENV_KEYS) {
     const value = env[name];
     const text: string = value ?? "";
-    hash.update(name).update(value === undefined ? "\0unset\0" : "\0set\0").update(text).update("\0");
+    hash
+      .update(name)
+      .update(value === undefined ? "\0unset\0" : "\0set\0")
+      .update(text)
+      .update("\0");
   }
   return hash.digest("hex");
 }

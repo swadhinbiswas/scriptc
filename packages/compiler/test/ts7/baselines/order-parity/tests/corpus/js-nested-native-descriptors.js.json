@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-nested-native-descriptors.js"
+ ],
+ "diags": []
+}

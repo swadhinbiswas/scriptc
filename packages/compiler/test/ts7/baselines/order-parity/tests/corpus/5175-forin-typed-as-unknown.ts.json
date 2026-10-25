@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5175-forin-typed-as-unknown.ts"
+ ],
+ "diags": []
+}

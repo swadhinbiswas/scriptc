@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2936-static-loose-equality.ts"
+ ],
+ "diags": []
+}

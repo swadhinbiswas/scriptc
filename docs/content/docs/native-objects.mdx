@@ -2,17 +2,17 @@
 title: "Native Program Objects"
 ---
 
-`scriptc build --emit=obj` produces one relocatable program object without invoking clang, a linker, or an SDK on a supported target. The object defines `main`; it is intended to become the program in an external native link. It is not a host-callable library—use `scriptc build --lib --profile ...` for that interface.
+A native program object lets your own build system link a compiled program, for example to combine it with other native code in Xcode, CMake, or a custom linker command. `scriptc build --emit=obj` writes one relocatable object file that defines `main`, without running a compiler, linker, or SDK. To build a library that a host application calls into instead, use library mode (`scriptc build --lib --profile`).
 
 ## ABI and runtime contract
 
-The external object ABI is **experimental**. Its `scr_*` function and data surface may change before 1.0, so consumers must use the exact runtime-pack version reported by the same compiler installation. This is stricter than semver compatibility.
+The object format is experimental and can change in any release before 1.0. Link an object only with the runtime pack from the same scriptc installation, which `--print=native-link-info` reports.
 
-The object intentionally leaves its selected runtime symbols undefined. It also holds a strong reference to `scr_runtime_abi_v6`, which the matching runtime defines. Linking an object against a runtime with another ABI marker fails at link time with the missing versioned symbol; it cannot become a latent runtime incompatibility.
+The object leaves the runtime functions it uses undefined, for the runtime pack to provide. It also references a versioned marker symbol that only the matching runtime defines, so linking against a different runtime version fails at link time instead of misbehaving at runtime.
 
 ## Machine-readable link information
 
-Add `--print=native-link-info` to emit the object and print a JSON document instead of the ordinary path line:
+Add `--print=native-link-info` to write the object and print a JSON link recipe instead of the output path:
 
 ```console
 $ scriptc build main.ts --print=native-link-info -o app.o > link-info.json
@@ -21,16 +21,16 @@ $ scriptc build main.ts --print=native-link-info -o app.o > link-info.json
 The `scriptc.native-link-info.v1` document reports:
 
 - target triple, object format, architecture, minimum OS, and relocation model;
-- the `main` entry and versioned runtime ABI marker;
+- the `main` entry and the runtime marker symbol;
 - the matching installed precompiled runtime-pack root, selected objects and archives, sizes, and hashes;
 - ordered program, FFI, runtime, and vendor inputs; and
 - required system libraries and frameworks.
 
-Runtime artifact paths are relative to `runtime_pack.root`. FFI library paths are absolute. The document names installed, verified pack artifacts and their link order. The example consumer verifies and copies those artifacts before linking.
+Runtime artifact paths are relative to `runtime_pack.root`, and FFI library paths are absolute. Link the inputs in the order the document lists them.
 
 ## C compiler as linker driver
 
-The repository's `examples/native-object` directory is a runnable example with a TypeScript program, a C FFI function, and a small consumer for the JSON recipe:
+The repository's [`examples/native-object`](https://github.com/vercel-labs/scriptc/tree/main/examples/native-object) directory contains a TypeScript program, a C function it calls through [FFI](/docs/ffi), and a small script that links them using the JSON recipe:
 
 ```console
 $ cd examples/native-object
@@ -41,7 +41,7 @@ $ ./app-cc
 42
 ```
 
-The example gives clang the reported objects, archives, and system libraries. Linux objects need the target glibc or musl linker/sysroot; Windows x64 objects use Zig's MinGW sysroot with the supplied runtime pack; WASI objects need a Preview 1 linker/sysroot.
+The script passes clang the reported objects, archives, and system libraries. On other targets, use a linker and sysroot for that target: glibc or musl for Linux, zig's MinGW sysroot for Windows x64, and a WASI Preview 1 sysroot for WASI.
 
 ## Native Apple linker
 
@@ -53,6 +53,6 @@ $ ./app-ld
 42
 ```
 
-This lane asks `xcrun` for the selected macOS SDK and linker, then supplies the target's minimum OS, every ordered object/archive input, and each reported system library. It demonstrates the code-generation boundary precisely: scriptc owns `app.o`; the external toolchain performs the platform link.
+In this mode the script asks `xcrun` for the macOS SDK and linker, then passes the target's minimum OS version, every object and archive in order, and each reported system library. scriptc produces `app.o`; your toolchain performs the link.
 
-Outbound FFI declarations retain the same C ABI in clang-compiled LLVM and helper-produced object paths. Scalar widths, string/byte pointer-plus-length pairs, and callback signatures follow the [Native FFI](/docs/ffi) manifest.
+FFI bindings behave the same in program objects as in executables, following the [Native FFI](/docs/ffi) manifest.

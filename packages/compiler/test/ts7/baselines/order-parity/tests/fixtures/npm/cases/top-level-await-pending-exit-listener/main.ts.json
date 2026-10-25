@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-listener/main.ts"
+ ],
+ "diags": []
+}

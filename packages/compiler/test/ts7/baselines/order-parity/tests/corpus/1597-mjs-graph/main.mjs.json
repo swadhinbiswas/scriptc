@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1597-mjs-graph/util.mjs",
+  "<repo>/tests/corpus/1597-mjs-graph/stats.mjs",
+  "<repo>/tests/corpus/1597-mjs-graph/main.mjs"
+ ],
+ "diags": []
+}

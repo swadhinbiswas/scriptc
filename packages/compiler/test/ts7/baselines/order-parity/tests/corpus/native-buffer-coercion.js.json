@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/native-buffer-coercion.js"
+ ],
+ "diags": []
+}

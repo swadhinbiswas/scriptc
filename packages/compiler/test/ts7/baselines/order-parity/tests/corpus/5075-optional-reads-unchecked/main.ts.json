@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5075-optional-reads-unchecked/main.ts"
+ ],
+ "diags": []
+}

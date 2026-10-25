@@ -1,8 +1,8 @@
-any.ts:8:5 - error SC2011: destructuring on 'any'-typed values runs in the embedded dynamic engine, which this build does not include
+any.ts:8:5 - error SC2011: destructuring on 'any'-typed values cannot compile statically
 
   7 | const sum = n + 1; // ToNumber/ToPrimitive coercion — engine only
   8 | var { x } = <any>0; // destructuring a non-object 'any' — engine only
     |     ^~~~~~~~~~~~~~
   9 | for (const v of n as any) console.log(v); // native checked iteration reports non-iterables at runtime
 
-  hint: build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')
+  hint: use a supported typed operation, or 'unknown' with a checked cast ('x as T')

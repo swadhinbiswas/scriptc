@@ -1,7 +1,6 @@
-// @dynamic
-// Object/array literals in `any` slots build natively in the island;
-// property reads/writes, computed keys, and method calls go through the
-// engine (this-binding and coercions JS-exact).
+// Object/array literals in `any` slots: property reads/writes, computed
+// keys, and method calls go through the checked-dynamic value, including a
+// member read on a fresh typed call result (`s.split(" ").length`).
 const o: any = { a: 1, b: "x", nested: { deep: true } };
 o.a = o.a + 10;
 o["c"] = 2.5;

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/number-parse-statics.ts"
+ ],
+ "diags": []
+}

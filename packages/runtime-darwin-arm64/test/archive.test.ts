@@ -11,12 +11,29 @@ function memberMetadata(bytes: Buffer) {
   const entries: { timestamp: string; uid: string; gid: string; mode: string }[] = [];
   let offset = Buffer.byteLength("!<arch>\n");
   while (offset < bytes.length) {
-    const size = Number(bytes.subarray(offset + 48, offset + 58).toString("ascii").trim());
+    const size = Number(
+      bytes
+        .subarray(offset + 48, offset + 58)
+        .toString("ascii")
+        .trim(),
+    );
     entries.push({
-      timestamp: bytes.subarray(offset + 16, offset + 28).toString("ascii").trim(),
-      uid: bytes.subarray(offset + 28, offset + 34).toString("ascii").trim(),
-      gid: bytes.subarray(offset + 34, offset + 40).toString("ascii").trim(),
-      mode: bytes.subarray(offset + 40, offset + 48).toString("ascii").trim(),
+      timestamp: bytes
+        .subarray(offset + 16, offset + 28)
+        .toString("ascii")
+        .trim(),
+      uid: bytes
+        .subarray(offset + 28, offset + 34)
+        .toString("ascii")
+        .trim(),
+      gid: bytes
+        .subarray(offset + 34, offset + 40)
+        .toString("ascii")
+        .trim(),
+      mode: bytes
+        .subarray(offset + 40, offset + 48)
+        .toString("ascii")
+        .trim(),
     });
     offset += 60 + size + (size % 2);
   }
@@ -34,20 +51,32 @@ describe.runIf(process.platform === "darwin")("runtime-pack archives", () => {
     const lock = join(dir, "build.lock");
     const events: string[] = [];
     let releaseFirst!: () => void;
-    const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
     let firstStarted!: () => void;
-    const firstDidStart = new Promise<void>((resolve) => { firstStarted = resolve; });
-    const first = withBuildLock(lock, async () => {
-      events.push("first:start");
-      firstStarted();
-      await firstMayFinish;
-      events.push("first:end");
-    }, { retryMilliseconds: 5 });
+    const firstDidStart = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const first = withBuildLock(
+      lock,
+      async () => {
+        events.push("first:start");
+        firstStarted();
+        await firstMayFinish;
+        events.push("first:end");
+      },
+      { retryMilliseconds: 5 },
+    );
     await firstDidStart;
-    const second = withBuildLock(lock, async () => {
-      events.push("second:start");
-      events.push("second:end");
-    }, { retryMilliseconds: 5 });
+    const second = withBuildLock(
+      lock,
+      async () => {
+        events.push("second:start");
+        events.push("second:end");
+      },
+      { retryMilliseconds: 5 },
+    );
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(events).toEqual(["first:start"]);
     releaseFirst();
@@ -81,7 +110,12 @@ describe.runIf(process.platform === "darwin")("runtime-pack archives", () => {
 
     expect(await readFile(join(outputRoot, "runtime.o"), "utf8")).toBe("new object");
     expect(await readFile(manifestPath, "utf8")).toBe("new manifest");
-    expect(await stat(join(dir, "artifacts.backup")).then(() => true, () => false)).toBe(false);
+    expect(
+      await stat(join(dir, "artifacts.backup")).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
   });
 
   test("normalize timestamps, ownership, and modes", async () => {
@@ -102,9 +136,14 @@ describe.runIf(process.platform === "darwin")("runtime-pack archives", () => {
     expect(await readFile(second)).toEqual(firstBytes);
     const metadata = memberMetadata(firstBytes);
     expect(metadata.length).toBeGreaterThanOrEqual(1);
-    expect(metadata.every((entry) =>
-      entry.timestamp === "0" && entry.uid === "0" && entry.gid === "0" &&
-      entry.mode === "100644"
-    )).toBe(true);
+    expect(
+      metadata.every(
+        (entry) =>
+          entry.timestamp === "0" &&
+          entry.uid === "0" &&
+          entry.gid === "0" &&
+          entry.mode === "100644",
+      ),
+    ).toBe(true);
   });
 });

@@ -1,8 +1,5 @@
 import { expect, test } from "vitest";
-import {
-  sandboxHostSchedule,
-  sandboxLaneEnv,
-} from "../../scripts/sandbox-platform.mjs";
+import { sandboxHostSchedule, sandboxLaneEnv } from "../../scripts/sandbox-platform.mjs";
 
 const files = ["native-a.test.ts", "native-b.test.ts"];
 

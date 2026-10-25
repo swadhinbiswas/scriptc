@@ -1,0 +1,11 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/shorthand.cjs",
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/assigns.cjs",
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/callval.cjs",
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/getterhead.cjs",
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/wscomma.cjs",
+  "<repo>/tests/corpus/1617-cjs-esm-lexer-visible/main.mjs"
+ ],
+ "diags": []
+}

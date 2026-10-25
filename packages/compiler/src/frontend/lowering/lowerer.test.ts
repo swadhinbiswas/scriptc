@@ -1,37 +1,22 @@
 import { expect, test, vi } from "vitest";
-import { BOOL, F64, JSVAL, NULL_T, STRING, UNDEFINED_T, VOID, type IrExpr, type IrFunction, type IrStmt, type IrType } from "../../ir/ir.js";
+import {
+  F64,
+  NULL_T,
+  STRING,
+  UNDEFINED_T,
+  VOID,
+  type IrFunction,
+  type IrType,
+} from "../../ir/ir.js";
 import type { Node, Program, SourceFile, Symbol, Type } from "../ts7/adapter.js";
-import { Lowerer, stmtUsesIsland } from "./lowerer.js";
+import { Lowerer } from "./lowerer.js";
+import { UnionRegistry } from "../type-mapper.js";
 import { classMethodValue } from "./class-method-values.js";
 
 const loc = { file: "island.ts", start: 0, end: 1 };
-const island: IrExpr = { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc };
-const statement: IrStmt = { kind: "exprStmt", expr: island, loc };
-
-test("accounts only the expressions owned by the current source statement", () => {
-  expect(stmtUsesIsland(statement)).toBe(true);
-  expect(stmtUsesIsland([statement])).toBe(true);
-  expect(stmtUsesIsland({ kind: "block", body: [statement], loc })).toBe(false);
-  expect(stmtUsesIsland({ kind: "if", cond: { kind: "boolLit", value: true, type: BOOL, loc }, then: [statement], else_: null, loc })).toBe(false);
-  expect(stmtUsesIsland({ kind: "if", cond: { kind: "jsExit", value: island, type: BOOL, loc }, then: [], else_: null, loc })).toBe(true);
-});
-
-test("inspects expression results without recounting embedded statement lists", () => {
-  const expr: IrExpr = { kind: "seqExpr", stmts: [statement], result: { kind: "numLit", value: 0, type: F64, loc }, type: F64, loc };
-  expect(stmtUsesIsland({ kind: "exprStmt", expr, loc })).toBe(false);
-  expr.result = { kind: "jsExit", value: island, type: F64, loc };
-  expect(stmtUsesIsland({ kind: "exprStmt", expr, loc })).toBe(true);
-});
-
-test("retains accounting for island library calls and generated loop conditions", () => {
-  const call: IrExpr = { kind: "libCall", fn: "island.eval", args: [], type: JSVAL, loc };
-  const loop: IrStmt = { kind: "for", init: null, cond: { kind: "jsExit", value: call, type: BOOL, loc }, update: null, body: [], loc };
-  expect(stmtUsesIsland({ kind: "block", body: [loop], loc })).toBe(true);
-  expect(stmtUsesIsland({ kind: "exprStmt", expr: { kind: "numLit", value: 1, type: F64, loc }, loc })).toBe(false);
-});
-
 const record = (shapeId: string): IrType => ({ kind: "record", shapeId });
-const context = () => new Lowerer({ getTypeChecker: () => ({}) } as Program, { fileName: loc.file } as SourceFile, [], false);
+const context = () =>
+  new Lowerer({ getTypeChecker: () => ({}) } as Program, { fileName: loc.file } as SourceFile, []);
 
 test("reuses complete copy routes without repeating discriminator planning", () => {
   const lowerer = context();
@@ -48,7 +33,7 @@ test("reuses complete copy routes without repeating discriminator planning", () 
   expect(plan).not.toHaveBeenCalled();
   expect(lowerer.liftedFns.filter((fn) => fn.name === helper)).toHaveLength(1);
   const recursive = {} as Type;
-  lowerer.shapes.recursiveRef(recursive);
+  lowerer.shapes.recursiveRef(recursive, () => "Recursive");
   lowerer.shapes.finalizeRecursive(recursive, [{ name: "kind", type: STRING }]);
   expect(lowerer.unionRetagHelper(from, to, loc)).toBe(helper);
   expect(plan).toHaveBeenCalled();
@@ -70,23 +55,28 @@ test("replans after a recursive union gains its final arms", () => {
   const lowerer = context();
   const recursive = {} as Type;
   const from = lowerer.unions.intern([UNDEFINED_T, NULL_T]);
-  const to = lowerer.unions.recursiveRef(recursive);
+  const to = lowerer.unions.recursiveRef(recursive, () => "Recursive");
   const trapped = lowerer.unionRetagHelper(from, to, loc);
   expect(trapped).not.toBeNull();
   lowerer.unions.finalizeRecursive(recursive, [UNDEFINED_T]);
   const completed = lowerer.unionRetagHelper(from, to, loc);
   expect(completed).not.toBeNull();
   expect(completed).not.toBe(trapped);
-  expect(lowerer.liftedFns.find((fn) => fn.name === completed)?.body).toEqual(expect.arrayContaining([
-    expect.objectContaining({ kind: "if", then: expect.arrayContaining([expect.objectContaining({ kind: "return" })]) }),
-  ]));
+  expect(lowerer.liftedFns.find((fn) => fn.name === completed)?.body).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "if",
+        then: expect.arrayContaining([expect.objectContaining({ kind: "return" })]),
+      }),
+    ]),
+  );
 });
 
 test("rechecks width conversions after recursive record definitions settle", () => {
   const lowerer = context();
   const recursive = {} as Type;
   const source = record(lowerer.shapes.intern([{ name: "value", type: F64 }]));
-  const target = record(lowerer.shapes.recursiveRef(recursive));
+  const target = record(lowerer.shapes.recursiveRef(recursive, () => "Recursive"));
   const from = lowerer.unions.intern([source, UNDEFINED_T]);
   const to = lowerer.unions.intern([target, NULL_T]);
   expect(lowerer.unionRetagHelper(from, to, loc)).not.toBeNull();
@@ -98,8 +88,20 @@ test("method adapter interning does not inspect unrelated lifted functions", () 
   const lowerer = context();
   let nameReads = 0;
   for (let i = 0; i < 100; i++) {
-    const fn: IrFunction = { name: `unrelated.${i}`, params: [], returnType: VOID, locals: [], body: [], loc };
-    Object.defineProperty(fn, "name", { get() { nameReads++; return `unrelated.${i}`; } });
+    const fn: IrFunction = {
+      name: `unrelated.${i}`,
+      params: [],
+      returnType: VOID,
+      locals: [],
+      body: [],
+      loc,
+    };
+    Object.defineProperty(fn, "name", {
+      get() {
+        nameReads++;
+        return `unrelated.${i}`;
+      },
+    });
     lowerer.liftedFns.push(fn);
   }
   const owner = lowerer.classes.get("%Error")!;
@@ -116,7 +118,10 @@ test("method adapter interning does not inspect unrelated lifted functions", () 
 test("literal ownership is reused across values and rechecked when recursive records close", () => {
   const lowerer = context();
   const shape = record(lowerer.shapes.intern([{ name: "kind", type: STRING }]));
-  const union = lowerer.unions.intern([shape, UNDEFINED_T], { field: "kind", cases: [{ tag: 0, values: ["a", "b"] }] });
+  const union = lowerer.unions.intern([shape, UNDEFINED_T], {
+    field: "kind",
+    cases: [{ tag: 0, values: ["a", "b"] }],
+  });
   const inspect = vi.spyOn(lowerer.shapes, "get");
   expect(lowerer.literalUnionArm(union, ["a"])).toEqual(shape);
   inspect.mockClear();
@@ -125,8 +130,11 @@ test("literal ownership is reused across values and rechecked when recursive rec
   expect(inspect).not.toHaveBeenCalled();
 
   const recursive = {} as Type;
-  const pendingShape = record(lowerer.shapes.recursiveRef(recursive));
-  const pending = lowerer.unions.intern([pendingShape], { field: "kind", cases: [{ tag: 0, values: ["a"] }] });
+  const pendingShape = record(lowerer.shapes.recursiveRef(recursive, () => "Recursive"));
+  const pending = lowerer.unions.intern([pendingShape], {
+    field: "kind",
+    cases: [{ tag: 0, values: ["a"] }],
+  });
   expect(lowerer.literalUnionArm(pending, ["a"])).toBeNull();
   lowerer.shapes.finalizeRecursive(recursive, [{ name: "kind", type: STRING }]);
   expect(lowerer.literalUnionArm(pending, ["a"])).toEqual(pendingShape);
@@ -136,29 +144,49 @@ test("literal ownership is reused across values and rechecked when recursive rec
 test("literal ownership sees a recursive union's finalized discriminator", () => {
   const lowerer = context();
   const recursive = {} as Type;
-  const union = lowerer.unions.recursiveRef(recursive);
+  const union = lowerer.unions.recursiveRef(recursive, () => "Recursive");
   const shape = record(lowerer.shapes.intern([{ name: "kind", type: STRING }]));
   expect(lowerer.literalUnionArm(union, ["ready"])).toBeNull();
-  lowerer.unions.finalizeRecursive(recursive, [shape], { field: "kind", cases: [{ tag: 0, values: ["ready"] }] });
+  lowerer.unions.finalizeRecursive(recursive, [shape], {
+    field: "kind",
+    cases: [{ tag: 0, values: ["ready"] }],
+  });
   expect(lowerer.literalUnionArm(union, ["ready"])).toEqual(shape);
 });
 
 test("removing undefined reuses the discriminator transformation without hiding recursive completion", () => {
   const lowerer = context();
   const a = record(lowerer.shapes.intern([{ name: "kind", type: STRING }]));
-  const b = record(lowerer.shapes.intern([{ name: "kind", type: STRING }, { name: "value", type: F64 }]));
-  const union: IrType = { kind: "union", unionId: lowerer.unions.intern([a, b, UNDEFINED_T], {
-    field: "kind", cases: [{ tag: 0, values: ["a"] }, { tag: 1, values: ["b"] }],
-  }) };
+  const b = record(
+    lowerer.shapes.intern([
+      { name: "kind", type: STRING },
+      { name: "value", type: F64 },
+    ]),
+  );
+  const union: IrType = {
+    kind: "union",
+    unionId: lowerer.unions.intern([a, b, UNDEFINED_T], {
+      field: "kind",
+      cases: [
+        { tag: 0, values: ["a"] },
+        { tag: 1, values: ["b"] },
+      ],
+    }),
+  };
   const transform = vi.spyOn(lowerer.unions, "transform");
   const stripped = lowerer.stripUndefinedArm(union);
   for (let i = 0; i < 20; i++) expect(lowerer.stripUndefinedArm(union)).toEqual(stripped);
   expect(transform).toHaveBeenCalledTimes(1);
   if (stripped.kind !== "union") throw new Error("expected two remaining arms");
-  expect(lowerer.unions.get(stripped.unionId)?.discriminant).toEqual(lowerer.unions.get(union.unionId)?.discriminant);
+  expect(lowerer.unions.get(stripped.unionId)?.discriminant).toEqual(
+    lowerer.unions.get(union.unionId)?.discriminant,
+  );
 
   const recursive = {} as Type;
-  const pending: IrType = { kind: "union", unionId: lowerer.unions.recursiveRef(recursive) };
+  const pending: IrType = {
+    kind: "union",
+    unionId: lowerer.unions.recursiveRef(recursive, () => "Recursive"),
+  };
   expect(lowerer.stripUndefinedArm(pending)).toEqual(pending);
   lowerer.unions.finalizeRecursive(recursive, [STRING, UNDEFINED_T]);
   expect(lowerer.stripUndefinedArm(pending)).toEqual(STRING);
@@ -169,8 +197,19 @@ test("removing undefined reuses the discriminator transformation without hiding 
 test("adding undefined reuses semantic union transformations and sees recursive completion", () => {
   const lowerer = context();
   const a = record(lowerer.shapes.intern([{ name: "kind", type: STRING }]));
-  const b = record(lowerer.shapes.intern([{ name: "kind", type: STRING }, { name: "value", type: F64 }]));
-  const discriminant = { field: "kind", cases: [{ tag: 0, values: ["a"] }, { tag: 1, values: ["b"] }] };
+  const b = record(
+    lowerer.shapes.intern([
+      { name: "kind", type: STRING },
+      { name: "value", type: F64 },
+    ]),
+  );
+  const discriminant = {
+    field: "kind",
+    cases: [
+      { tag: 0, values: ["a"] },
+      { tag: 1, values: ["b"] },
+    ],
+  };
   const union: IrType = { kind: "union", unionId: lowerer.unions.intern([a, b], discriminant) };
   const transform = vi.spyOn(lowerer.unions, "transform");
   const added = lowerer.withUndefinedArmOf(union);
@@ -180,7 +219,10 @@ test("adding undefined reuses semantic union transformations and sees recursive 
   expect(lowerer.unions.get(added.unionId)?.discriminant).toEqual(discriminant);
 
   const recursive = {} as Type;
-  const pending: IrType = { kind: "union", unionId: lowerer.unions.recursiveRef(recursive) };
+  const pending: IrType = {
+    kind: "union",
+    unionId: lowerer.unions.recursiveRef(recursive, () => "Recursive"),
+  };
   const before = lowerer.withUndefinedArmOf(pending);
   lowerer.unions.finalizeRecursive(recursive, [a, b], discriminant);
   expect(lowerer.withUndefinedArmOf(pending)).toEqual(added);
@@ -192,33 +234,45 @@ test("adding undefined reuses semantic union transformations and sees recursive 
 test("optional union widening keeps refused and missing contracts current", () => {
   const lowerer = context();
   const recursive = {} as Type;
-  const pending: IrType = { kind: "union", unionId: lowerer.unions.recursiveRef(recursive) };
+  const pending: IrType = {
+    kind: "union",
+    unionId: lowerer.unions.recursiveRef(recursive, () => "Recursive"),
+  };
   expect(lowerer.withUndefinedArmOf(pending)).not.toBeNull();
-  lowerer.unions.finalizeRecursive(recursive, [{ kind: "date" }, STRING]);
+  lowerer.unions.finalizeRecursive(recursive, [{ kind: "promise", inner: F64 }, STRING]);
   expect(lowerer.withUndefinedArmOf(pending)).toBeNull();
   expect(lowerer.withUndefinedArmOf(pending)).toBeNull();
 
-  const missing: IrType = { kind: "union", unionId: `u${lowerer.unions.unions.length}` };
+  // Union ids come from their arms, so a fresh registry names the union
+  // this one has not interned yet.
+  const missing: IrType = { kind: "union", unionId: new UnionRegistry().intern([F64, STRING]) };
   expect(lowerer.withUndefinedArmOf(missing)).toBeNull();
   expect(lowerer.unions.intern([F64, STRING])).toBe(missing.unionId);
   expect(lowerer.withUndefinedArmOf(missing)?.kind).toBe("union");
   expect(lowerer.withUndefinedArmOf(VOID)).toBeNull();
-  expect(lowerer.withUndefinedArmOf(JSVAL)).toBe(JSVAL);
 });
 
 test("stdlib provenance is cached by symbol identity, including merged and shadowed declarations", () => {
-  const builtin = {} as Symbol, shadow = {} as Symbol;
   const userFile = { fileName: "user.ts" } as SourceFile;
   const library = { fileName: "library.d.ts" } as SourceFile;
   const userDeclaration = { getSourceFile: () => userFile } as Node;
   const libraryDeclaration = { getSourceFile: () => library } as Node;
-  const declarationsOf = vi.fn((symbol: Symbol) => symbol === builtin ? [userDeclaration, libraryDeclaration] : [userDeclaration]);
-  const lowerer = new Lowerer({ getTypeChecker: () => ({ declarationsOf }) } as unknown as Program, userFile, [], false);
+  let declarationReads = 0;
+  const symbolWith = (declarations: readonly Node[]): Symbol =>
+    ({
+      get declarations() {
+        declarationReads++;
+        return declarations;
+      },
+    }) as unknown as Symbol;
+  const builtin = symbolWith([userDeclaration, libraryDeclaration]),
+    shadow = symbolWith([userDeclaration]);
+  const lowerer = new Lowerer({ getTypeChecker: () => ({}) } as unknown as Program, userFile, []);
   vi.spyOn(lowerer, "isStdlibFile").mockImplementation((file) => file === library);
   for (let i = 0; i < 20; i++) {
     expect(lowerer.isStdlibSymbol(builtin)).toBe(true);
     expect(lowerer.isStdlibSymbol(shadow)).toBe(false);
     expect(lowerer.isStdlibSymbol(undefined)).toBe(false);
   }
-  expect(declarationsOf).toHaveBeenCalledTimes(2);
+  expect(declarationReads).toBe(2);
 });

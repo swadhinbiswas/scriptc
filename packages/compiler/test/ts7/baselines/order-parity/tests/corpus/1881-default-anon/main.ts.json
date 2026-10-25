@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1881-default-anon/adder.ts",
+  "<repo>/tests/corpus/1881-default-anon/box.ts",
+  "<repo>/tests/corpus/1881-default-anon/main.ts"
+ ],
+ "diags": []
+}

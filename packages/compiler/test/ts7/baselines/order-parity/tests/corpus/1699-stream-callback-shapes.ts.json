@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1699-stream-callback-shapes.ts"
+ ],
+ "diags": []
+}

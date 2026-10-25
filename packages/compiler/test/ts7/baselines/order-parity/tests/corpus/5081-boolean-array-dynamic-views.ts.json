@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5081-boolean-array-dynamic-views.ts"
+ ],
+ "diags": []
+}

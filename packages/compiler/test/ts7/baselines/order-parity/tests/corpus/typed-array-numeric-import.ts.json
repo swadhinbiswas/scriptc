@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-array-numeric-import.ts"
+ ],
+ "diags": []
+}

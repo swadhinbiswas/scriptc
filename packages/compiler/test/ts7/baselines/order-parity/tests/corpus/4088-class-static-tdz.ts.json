@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4088-class-static-tdz.ts"
+ ],
+ "diags": []
+}

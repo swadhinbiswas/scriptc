@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3063-runtime-optional-class-guards.ts"
+ ],
+ "diags": []
+}

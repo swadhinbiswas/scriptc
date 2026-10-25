@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1837-var-undefined-hoisting.ts"
+ ],
+ "diags": []
+}

@@ -34,11 +34,21 @@ if (effectConcurrency !== undefined && effectConcurrency !== "1" && effectConcur
 export default defineConfig({
   resolve: {
     alias: {
-      "@scriptc/compiler/cli/command": fileURLToPath(new URL("./packages/compiler/src/cli/command.ts", import.meta.url)),
-      "@scriptc/compiler/cli/host": fileURLToPath(new URL("./packages/compiler/src/cli/host.ts", import.meta.url)),
-      "@scriptc/compiler/cli/paths": fileURLToPath(new URL("./packages/compiler/src/cli/paths.ts", import.meta.url)),
-      "@scriptc/compiler/cli/output-options": fileURLToPath(new URL("./packages/compiler/src/cli/output-options.ts", import.meta.url)),
-      "@scriptc/compiler/cli/usage": fileURLToPath(new URL("./packages/compiler/src/cli/usage.ts", import.meta.url)),
+      "@scriptc/compiler/cli/command": fileURLToPath(
+        new URL("./packages/compiler/src/cli/command.ts", import.meta.url),
+      ),
+      "@scriptc/compiler/cli/host": fileURLToPath(
+        new URL("./packages/compiler/src/cli/host.ts", import.meta.url),
+      ),
+      "@scriptc/compiler/cli/paths": fileURLToPath(
+        new URL("./packages/compiler/src/cli/paths.ts", import.meta.url),
+      ),
+      "@scriptc/compiler/cli/output-options": fileURLToPath(
+        new URL("./packages/compiler/src/cli/output-options.ts", import.meta.url),
+      ),
+      "@scriptc/compiler/cli/usage": fileURLToPath(
+        new URL("./packages/compiler/src/cli/usage.ts", import.meta.url),
+      ),
       // Tests run against compiler source directly — no build step needed.
       "@scriptc/compiler": fileURLToPath(
         new URL("./packages/compiler/src/index.ts", import.meta.url),
@@ -65,8 +75,7 @@ export default defineConfig({
       // per worker. Reuse expensive compiler/linker metadata probes inside
       // that session; cc.test.ts removes this flag to keep exercising
       // production's fresh-probe invalidation guarantees.
-      SCRIPTC_TEST_STABLE_TOOLCHAIN:
-        process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"] ?? "1",
+      SCRIPTC_TEST_STABLE_TOOLCHAIN: process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"] ?? "1",
     },
     ...(workers !== undefined && workers !== ""
       ? { maxWorkers: Number(workers), minWorkers: 1 }

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2820-array-missing-method-receivers.ts"
+ ],
+ "diags": []
+}

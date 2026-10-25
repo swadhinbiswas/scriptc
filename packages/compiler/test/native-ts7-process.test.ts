@@ -17,9 +17,22 @@ test("the native server boundary owns descriptors and children across success an
     const flags = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
     const target = windows ? execFileSync("clang", ["-dumpmachine"], { encoding: "utf8" }) : "";
     const unicodeFlags = /mingw|windows-gnu/.test(target) ? ["-municode"] : [];
-    execFileSync("clang", [...flags, ...unicodeFlags, join(sources, "ts7-process-child.test.c"), "-o", child]);
-    execFileSync("clang", [...flags, ...unicodeFlags, ...(process.env["SCRIPTC_SAN"] === "1" ? ["-fsanitize=address,undefined"] : []),
-      join(sources, "ts7-process.test.c"), join(sources, "ts7-process.c"), "-o", harness]);
+    execFileSync("clang", [
+      ...flags,
+      ...unicodeFlags,
+      join(sources, "ts7-process-child.test.c"),
+      "-o",
+      child,
+    ]);
+    execFileSync("clang", [
+      ...flags,
+      ...unicodeFlags,
+      ...(process.env["SCRIPTC_SAN"] === "1" ? ["-fsanitize=address,undefined"] : []),
+      join(sources, "ts7-process.test.c"),
+      join(sources, "ts7-process.c"),
+      "-o",
+      harness,
+    ]);
     for (const args of windows ? [[]] : [[], ["closed-standard"]]) {
       const run = spawnSync(harness, [child, ...args], { encoding: "utf8", timeout: 20_000 });
       expect(run.error, run.stderr).toBeUndefined();

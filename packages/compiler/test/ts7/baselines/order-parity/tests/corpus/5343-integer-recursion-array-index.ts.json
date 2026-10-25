@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5343-integer-recursion-array-index.ts"
+ ],
+ "diags": []
+}

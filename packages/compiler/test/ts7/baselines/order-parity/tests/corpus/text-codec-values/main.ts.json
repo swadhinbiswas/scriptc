@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/text-codec-values/shared.ts",
+  "<repo>/tests/corpus/text-codec-values/user.ts",
+  "<repo>/tests/corpus/text-codec-values/main.ts"
+ ],
+ "diags": []
+}

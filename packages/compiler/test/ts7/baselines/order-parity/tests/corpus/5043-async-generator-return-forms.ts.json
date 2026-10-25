@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5043-async-generator-return-forms.ts"
+ ],
+ "diags": []
+}

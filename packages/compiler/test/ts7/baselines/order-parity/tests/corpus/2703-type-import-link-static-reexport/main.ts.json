@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2703-type-import-link-static-reexport/types.ts",
+  "<repo>/tests/corpus/2703-type-import-link-static-reexport/middle.ts",
+  "<repo>/tests/corpus/2703-type-import-link-static-reexport/main.ts"
+ ],
+ "diags": []
+}

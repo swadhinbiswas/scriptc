@@ -10,7 +10,8 @@ export function literalValues(type: ts.Type): UnionLiteral[] | null {
       const value = (part as ts.NumberLiteralType).value;
       if (!Number.isFinite(value)) return null;
       values.push(value);
-    } else if (part.flags & ts.TypeFlags.BooleanLiteral) values.push((part as ts.BooleanLiteralType).value);
+    } else if (part.flags & ts.TypeFlags.BooleanLiteral)
+      values.push((part as ts.BooleanLiteralType).value);
     else return null;
   }
   return values.length > 0 ? values : null;

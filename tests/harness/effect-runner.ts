@@ -23,7 +23,11 @@ async function run(command: string, args: string[]) {
   }
 }
 
-export async function checkEffectFixture(entry: string, npmStatic: string[], optimization: "dev" | "release") {
+export async function checkEffectFixture(
+  entry: string,
+  npmStatic: string[],
+  optimization: "dev" | "release",
+) {
   const sanitize = process.env["SCRIPTC_SAN"] === "1";
   const dir = await mkdtemp("/tmp/scriptc-effect-");
   try {
@@ -31,20 +35,44 @@ export async function checkEffectFixture(entry: string, npmStatic: string[], opt
     expect(reference.status).toBe(0);
     expect(reference.stdout.trim().length).toBeGreaterThan(0);
     const options = {
-      outDir: dir, outPath: join(dir, "program"), backend: "llvm", optimization, dynamic: false,
-      npmStatic, sanitize,
+      outDir: dir,
+      outPath: join(dir, "program"),
+      backend: "llvm",
+      optimization,
+      npmStatic,
+      sanitize,
     };
     // Isolate checker state and process-wide compiler options between
     // concurrent fixtures. Published cluster graphs need extra heap.
     const resultPath = join(dir, "compile.json");
-    await exec(process.execPath, ["--max-old-space-size=8192", "--import", "tsx", "--input-type=module", "--eval", child, entry, JSON.stringify(options), resultPath], { timeout: 540_000 });
+    await exec(
+      process.execPath,
+      [
+        "--max-old-space-size=8192",
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "--eval",
+        child,
+        entry,
+        JSON.stringify(options),
+        resultPath,
+      ],
+      { timeout: 540_000 },
+    );
     const result = JSON.parse(await readFile(resultPath, "utf8")) as CompileResult;
-    if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const actual = await run(result.binaryPath, []);
-    if (sanitize) actual.stderr = actual.stderr.split("\n").filter((line) =>
-      !line.startsWith("scriptc RC audit skipped:") &&
-      !/^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext/.test(line),
-    ).join("\n");
+    if (sanitize)
+      actual.stderr = actual.stderr
+        .split("\n")
+        .filter(
+          (line) =>
+            !line.startsWith("scriptc RC audit skipped:") &&
+            !/^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext/.test(line),
+        )
+        .join("\n");
     expect(actual).toEqual(reference);
   } finally {
     await rm(dir, { recursive: true, force: true });

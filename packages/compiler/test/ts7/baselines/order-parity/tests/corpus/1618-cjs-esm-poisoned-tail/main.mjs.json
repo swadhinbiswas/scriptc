@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1618-cjs-esm-poisoned-tail/cjs.cjs",
+  "<repo>/tests/corpus/1618-cjs-esm-poisoned-tail/main.mjs"
+ ],
+ "diags": []
+}

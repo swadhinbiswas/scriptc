@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5465-dyn-index-read-arrays.ts"
+ ],
+ "diags": []
+}

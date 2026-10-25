@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-implicit-call-results.js"
+ ],
+ "diags": []
+}

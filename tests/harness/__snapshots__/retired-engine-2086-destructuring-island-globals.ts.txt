@@ -1,0 +1,17 @@
+retired-engine-2086-destructuring-island-globals.ts:6:12 - error SC2010: destructuring 'number' values through JavaScript wrapper coercion cannot compile statically
+
+  5 | // stays a handle) — a func-typed slot could never take the engine value.
+  6 | export let { toString } = 1;
+    |            ^~~~~~~~~~~~~~~~
+  7 | export const { toFixed } = 2.5;
+
+  hint: scriptc compiles program code to native instructions; runtime JavaScript evaluation is unsupported
+
+retired-engine-2086-destructuring-island-globals.ts:7:14 - error SC2010: destructuring 'number' values through JavaScript wrapper coercion cannot compile statically
+
+  6 | export let { toString } = 1;
+  7 | export const { toFixed } = 2.5;
+    |              ^~~~~~~~~~~~~~~~~
+  8 | console.log(`${typeof toString} ${typeof toFixed}`);
+
+  hint: scriptc compiles program code to native instructions; runtime JavaScript evaluation is unsupported

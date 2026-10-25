@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5740-atomics-operation-semantics.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5357-init-only-module-bindings.ts"
+ ],
+ "diags": []
+}

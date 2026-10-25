@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3129-js-token-union/lexer.js",
+  "<repo>/tests/corpus/3129-js-token-union/main.ts"
+ ],
+ "diags": []
+}

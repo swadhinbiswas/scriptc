@@ -1,0 +1,16 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Module '\"gtable\"' has no exported member 'chunkGhost'.",
+   "loc": {
+    "file": "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts",
+    "start": 506,
+    "end": 516
+   }
+  }
+ ]
+}

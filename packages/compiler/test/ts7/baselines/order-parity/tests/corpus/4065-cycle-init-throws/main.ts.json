@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4065-cycle-init-throws/rules.ts",
+  "<repo>/tests/corpus/4065-cycle-init-throws/ledger.ts",
+  "<repo>/tests/corpus/4065-cycle-init-throws/main.ts"
+ ],
+ "diags": []
+}

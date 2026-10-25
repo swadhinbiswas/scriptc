@@ -1,0 +1,24 @@
+{
+  "profile_format": 1,
+  "name": "conformance-contract-int-libcall",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "kl_",
+    "init_symbol": "kl_init",
+    "sink_register_symbol": "kl_set_panic_sink",
+    "collect_symbol": null,
+    "result_reset_symbol": null
+  },
+  "exports": [],
+  "sidecar": {
+    "wire_version": 1,
+    "abi_version": 1,
+    "snapshot_format": 1,
+    "build_id_symbol": "kl_build_id",
+    "abi_version_symbol": "kl_abi_version",
+    "model": "Model",
+    "msg": "Msg",
+    "integer_slots": [{ "slot": "Model.phase", "class": "i64" }]
+  }
+}

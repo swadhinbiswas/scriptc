@@ -1,6 +1,20 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
+/**
+ * Zig's C driver enables UBSan for -O0, its Debug mode, on every target. The
+ * dev flavors are plain -O0 builds, so the checks would make their objects
+ * several times larger than release and leave them calling Zig's UBSan
+ * runtime. Every pack compiles the runtime and vendored code without them
+ * and rejects artifacts that still reference the handlers.
+ */
+export const RUNTIME_COMPILE_FLAGS = ["-fno-sanitize=undefined"];
+const RUNTIME_FORBIDDEN_STRINGS = ["__ubsan_"];
+
+export function runtimeForbiddenStrings(packStrings = []) {
+  return [...new Set([...RUNTIME_FORBIDDEN_STRINGS, ...packStrings])];
+}
+
 export async function assertArtifactsExcludeStrings(root, forbiddenStrings) {
   if (!Array.isArray(forbiddenStrings)) {
     throw new Error("runtime-pack forbidden artifact strings must be an array");

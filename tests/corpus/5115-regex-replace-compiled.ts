@@ -1,0 +1,42 @@
+// Global and single replacements over compiled regex matchers: literal
+// templates, $$ $& $n $nn, position directives, named groups, empty
+// matches, unicode and non-ASCII subjects, and lastIndex transitions.
+const show = (label: string, v: unknown): void => console.log(label, JSON.stringify(v));
+const s = "a1b22c333d";
+show("g", s.replace(/\d+/g, "#"));
+show("first", s.replace(/\d+/, "#"));
+show("amp", s.replace(/\d+/g, "<$&>"));
+show("dollar", s.replace(/\d+/g, "$$"));
+show("cap", s.replace(/([a-z])(\d+)/g, "$2$1"));
+show("cap12", "abcdefghijklmn".replace(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)/, "[$12|$13|$1$2|$0|$01|$10]"));
+show("cap1x", "ab".replace(/(a)(b)/, "$3$11$22$02"));
+show("unset", "ac".replace(/a(b)?c/, "[$1]"));
+show("before", s.replace(/\d+/g, "[$`]"));
+show("after", s.replace(/b/g, "[$']"));
+show("named", "2026-10".replace(/(?<y>\d+)-(?<m>\d+)/, "$<m>/$<y>|$<x>|$<y"));
+show("nonamed", "ab".replace(/(a)/, "$<a>"));
+show("empty", "abc".replace(/x*/g, "-"));
+show("empty2", "abc".replace(/(?:)/g, "_"));
+show("emptyu", "abc".replace(/x*/gu, "-"));
+show("wide", "héllo wörld 12".replace(/\w+/g, "W"));
+show("wide2", "😀a😀".replace(/(?:)/gu, "|"));
+show("ci", "AbAB".replace(/ab/gi, "x"));
+show("ml", "a\nb\nc".replace(/^/gm, "> "));
+show("end", "abc".replace(/$/g, "!"));
+const sticky = /\d/y;
+sticky.lastIndex = 1;
+show("sticky", ["a1b".replace(sticky, "#"), sticky.lastIndex]);
+show("sticky2", ["a1b".replace(sticky, "#"), sticky.lastIndex]);
+const gy = /\d/gy;
+show("gy", ["12a3".replace(gy, "#"), gy.lastIndex]);
+const g = /o/g;
+g.lastIndex = 3;
+show("glast", ["foo".replace(g, "0"), g.lastIndex]);
+show("all", "a.b.c".replaceAll(/\./g, "$&$&"));
+show("nomatch", "abc".replace(/\d/g, "#"));
+show("long", "x".repeat(100).replace(/x/g, "yy").length);
+show("tpl17", "abc".replace(/b/g, "1$&2$&3$&4$&5$&6$&7$&8$&9$&"));
+show("lookbehind", "a1b2".replace(/(?<=a)\d/g, "#"));
+show("backref", "aa bb cd".replace(/(\w)\1/g, "<$1>"));
+show("dollarend", "ab".replace(/b/, "$"));
+show("dollarx", "ab".replace(/b/, "$x$"));

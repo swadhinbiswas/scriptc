@@ -1,17 +1,17 @@
 // Map support boundaries at lowering. Keep accepted adjacent forms here
 // as well so widening the value domain removes its old diagnostic.
 
-// Boolean keys remain outside the scalar/reference key domain.
+// Boolean keys compile alongside the remaining value and method fences.
 const byFlag = new Map<boolean, string>();
 
-// Values exclude functions (no closure story in the uniform value slot yet).
+// Function values compile (closures keep their identity in the slot).
 const handlers = new Map<string, () => void>();
 
 // Typed nested Maps retain their identity and are supported.
 const nested = new Map<string, Map<string, number>>();
 
-// Map-typed slots elsewhere report the ordinary unsupported-type diagnostic.
-function useBad(m: Map<boolean, number>): number {
+// Boolean-keyed parameter slots share the supported key domain.
+function useFlags(m: Map<boolean, number>): number {
   return m.size;
 }
 
@@ -30,8 +30,7 @@ console.log(JSON.stringify(m));
 
 // Map methods have no bound-value form — call them directly.
 const getter = m.get;
-
 // Reached: collection defers its diagnostics until a reference makes
 // them relevant; these references are what makes them count.
-useBad(new Map<boolean, number>());
+useFlags(new Map<boolean, number>());
 maybeMap(true);

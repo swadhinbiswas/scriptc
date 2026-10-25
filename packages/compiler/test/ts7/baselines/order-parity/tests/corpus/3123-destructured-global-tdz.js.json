@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3123-destructured-global-tdz.js"
+ ],
+ "diags": []
+}

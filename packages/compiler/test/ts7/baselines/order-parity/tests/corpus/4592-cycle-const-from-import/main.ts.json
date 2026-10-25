@@ -1,0 +1,10 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4592-cycle-const-from-import/report.ts",
+  "<repo>/tests/corpus/4592-cycle-const-from-import/stock.ts",
+  "<repo>/tests/corpus/4592-cycle-const-from-import/markup.ts",
+  "<repo>/tests/corpus/4592-cycle-const-from-import/pricing.ts",
+  "<repo>/tests/corpus/4592-cycle-const-from-import/main.ts"
+ ],
+ "diags": []
+}

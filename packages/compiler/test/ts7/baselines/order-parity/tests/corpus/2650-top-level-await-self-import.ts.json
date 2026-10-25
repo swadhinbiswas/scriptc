@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2650-top-level-await-self-import.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4991-lone-surrogate-halves.ts"
+ ],
+ "diags": []
+}

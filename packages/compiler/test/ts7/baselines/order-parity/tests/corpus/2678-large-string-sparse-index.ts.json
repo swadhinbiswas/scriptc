@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2678-large-string-sparse-index.ts"
+ ],
+ "diags": []
+}

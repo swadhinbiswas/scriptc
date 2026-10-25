@@ -1,0 +1,243 @@
+---
+title: "Sharing Data Between Workers"
+---
+
+Compiled programs can use `node:worker_threads` to run work in parallel on several CPU cores. As in Node.js, each message a worker receives is a copy (a structured clone) of what was sent, so a large data set sent to four workers is copied four times. See [worker threads](/docs/limitations#native-worker-threads) for the supported worker APIs.
+
+When workers need to read the same large data, use the `@scriptc/threads` package. Its `publish(value)` function makes a graph of objects immutable, so a scriptc executable can hand the same objects to every thread by reference instead of copying them.
+
+Add `@scriptc/threads` to your project's dependencies. scriptc compiles its functions directly into your program, and Node.js runs its JavaScript implementation, so the same program runs under both.
+
+## Example
+
+The main thread builds a ledger of a million orders, publishes it, and sends it to four workers. Each worker sums its share of the orders.
+
+```ts:main.ts
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { publish, sharesPublishedGraphs } from "@scriptc/threads";
+
+class Order {
+  customer: string;
+  amount: number;
+  constructor(customer: string, amount: number) {
+    this.customer = customer;
+    this.amount = amount;
+  }
+}
+
+class Ledger {
+  orders: Order[] = [];
+  rates = new Map<string, number>();
+}
+
+interface Job {
+  ledger: Ledger;
+  index: number;
+  count: number;
+}
+
+// Workers read only data: under Node.js they receive a clone without prototypes.
+function revenue(ledger: Ledger, index: number, count: number): number {
+  let sum = 0;
+  for (let i = index; i < ledger.orders.length; i += count) {
+    const order = ledger.orders[i]!;
+    sum += order.amount * (ledger.rates.get(order.customer) ?? 1);
+  }
+  return sum;
+}
+
+if (isMainThread) {
+  const ledger = new Ledger();
+  ledger.rates.set("acme", 2);
+  for (let i = 0; i < 1_000_000; i++) {
+    ledger.orders.push(new Order(i % 3 === 0 ? "acme" : "globex", i % 100));
+  }
+  publish(ledger); // ledger and everything it reaches are now immutable
+  console.log(`shared by reference: ${sharesPublishedGraphs}`);
+
+  const count = 4;
+  let total = 0;
+  let done = 0;
+  for (let index = 0; index < count; index++) {
+    const job: Job = { ledger, index, count };
+    const worker = new Worker(new URL(import.meta.url), { workerData: job });
+    worker.on("message", (part: number) => {
+      total += part;
+      if (++done === count) console.log(`revenue: ${total}`);
+    });
+  }
+
+  try {
+    ledger.orders.push(new Order("initech", 5));
+  } catch (e) {
+    console.log(`${(e as Error).name}: ${(e as Error).message}`);
+  }
+  try {
+    ledger.rates.set("globex", 3);
+  } catch (e) {
+    console.log(`${(e as Error).name}: ${(e as Error).message}`);
+  }
+} else {
+  const job = publish(workerData as Job); // a no-op in scriptc; freezes the clone in Node.js
+  parentPort!.postMessage(revenue(job.ledger, job.index, job.count));
+}
+```
+
+Node.js 24 runs the program directly and clones the ledger for each worker:
+
+```console
+$ node main.ts
+shared by reference: false
+TypeError: Cannot add property 1000000, object is not extensible
+TypeError: Cannot modify a published Map
+revenue: 66000033
+```
+
+The scriptc executable prints the same results, except that every worker reads the main thread's ledger in place:
+
+```console
+$ scriptc build main.ts -o ledger >/dev/null
+$ ./ledger
+shared by reference: true
+TypeError: Cannot add property 1000000, object is not extensible
+TypeError: Cannot modify a published Map
+revenue: 66000033
+```
+
+## The publication contract
+
+`publish(value)` returns `value` after making it, and everything it reaches, immutable. Publishing an already published graph returns immediately.
+
+<table>
+  <thead>
+    <tr>
+      <th>Values</th>
+      <th>publish</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Numbers, strings, booleans, BigInts, <code>undefined</code>, <code>null</code></td>
+      <td>Published</td>
+    </tr>
+    <tr>
+      <td>Plain objects, arrays, class instances, records</td>
+      <td>Published, with their fields and elements</td>
+    </tr>
+    <tr>
+      <td><code>Map</code> and <code>Set</code></td>
+      <td>Published, with their keys and values</td>
+    </tr>
+    <tr>
+      <td>Functions, symbols, accessor properties, <code>Date</code>, <code>RegExp</code>, <code>Error</code>, <code>Promise</code>, typed arrays, other built-in objects</td>
+      <td>Refused with a <code>TypeError</code></td>
+    </tr>
+  </tbody>
+</table>
+
+A refusal names the value, for example `Cannot publish a function` or `Cannot publish a Date object`. Only values that are actually present count: a class whose field type could hold an unpublishable value publishes as long as no such value is reached. A refused `publish` leaves the whole graph unchanged and writable, because both implementations check the graph before they change anything.
+
+```ts:refuse.ts
+import { publish } from "@scriptc/threads";
+
+class Meeting {
+  title: string;
+  when: Date;
+  constructor(title: string, when: Date) {
+    this.title = title;
+    this.when = when;
+  }
+}
+
+const meetings = [new Meeting("review", new Date(0))];
+try {
+  publish(meetings);
+} catch (e) {
+  console.log(`${(e as Error).name}: ${(e as Error).message}`);
+}
+// The failed publish left the whole graph unchanged and writable.
+meetings.push(new Meeting("retro", new Date(0)));
+console.log(meetings.length, meetings[1]!.title);
+```
+
+```console
+$ scriptc build refuse.ts -o refuse >/dev/null
+$ ./refuse
+TypeError: Cannot publish a Date object
+2 retro
+```
+
+### The write guard
+
+Writes into a published graph throw the `TypeError` that Node.js throws for frozen objects, in both implementations:
+
+- Field and property assignment: `Cannot assign to read only property 'title' of object '#<Meeting>'`.
+- Adding array elements: `Cannot add property 3, object is not extensible`.
+- Removing array elements, for example with `pop()`: `Cannot delete property '2' of [object Array]`.
+- Changing an array's length: `Cannot assign to read only property 'length' of object '[object Array]'`.
+- `set`, `add`, `delete`, and `clear` on a published `Map` or `Set`: `Cannot modify a published Map` (or `Set`).
+
+In a scriptc executable, every store the compiler emits into a type that the program publishes checks whether its target is published. Objects of those types that were never published stay writable.
+
+### How it differs from structured clone
+
+Node.js keeps cloning published graphs when it posts them; `sharesPublishedGraphs` is `false` there. A scriptc executable passes a published graph to `postMessage` and `workerData` as a pointer, and `sharesPublishedGraphs` is `true`.
+
+<table>
+  <thead>
+    <tr>
+      <th>Behavior</th>
+      <th>scriptc executable</th>
+      <th>Node.js</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Sending a published graph</td>
+      <td>Constant time; the receiver reads the sender's objects</td>
+      <td>A structured clone per message</td>
+    </tr>
+    <tr>
+      <td>Received graph</td>
+      <td>Immutable</td>
+      <td>A writable clone, until the receiver publishes it</td>
+    </tr>
+    <tr>
+      <td>Class instances</td>
+      <td>Keep their class, methods, and <code>instanceof</code> relations</td>
+      <td>Arrive as plain objects without their prototype</td>
+    </tr>
+    <tr>
+      <td>Identity across messages</td>
+      <td>Two posts of one graph arrive as the same objects</td>
+      <td>Every post arrives as a new clone</td>
+    </tr>
+    <tr>
+      <td>Memory</td>
+      <td>Published objects are never freed</td>
+      <td>Garbage collected as usual</td>
+    </tr>
+  </tbody>
+</table>
+
+A program behaves the same under both when it follows three rules:
+
+1. A receiver calls `publish` on what it receives. In scriptc this is a no-op; in Node.js it freezes the clone, so writes fail in the same way.
+2. A receiver reads data and does not depend on prototypes, methods, or `instanceof`. Error messages that name the receiver's class differ accordingly: `#<Meeting>` in scriptc, `#<Object>` in Node.js.
+3. Nothing compares identity across messages.
+
+### Frozen plain data
+
+Without `@scriptc/threads`, a scriptc executable also shares a message of untyped values, such as `JSON.parse` results, by reference when every object and array in it is frozen with `Object.freeze`, ordinary, and holds only primitives, strings, and other such objects and arrays. That data becomes immortal in the same way. Any other message is cloned. Set `SCRIPTC_PUBLISH=0` in the environment to clone every message.
+
+## Cost
+
+Starting a worker thread takes tens of microseconds plus the worker's own module initialization, since every worker initializes the program's modules again, as in Node.js. A worker that exits frees its heap first, which takes time proportional to what it still holds. `SCRIPTC_WORKER_STATS=1` prints, as each worker exits, how long it took to start, to run its script and to exit.
+
+On Linux, a worker that exits without having shared an object it allocated with another thread returns all of its memory, including objects it never freed, such as `ProgramLifetime` instances, once no other worker thread is running. A worker shares objects when, for example, it sends a published value or frozen plain data, which other threads read by reference, or stores a value in an `InternTable`. The memory of a worker that shared stays allocated, as on other platforms. Set `SCR_SA_DISCARD=0` in the environment to keep the memory of every worker.
+
+`publish` visits each object of the graph once and marks it immortal, so publication takes time proportional to the graph. Published objects then cost nothing on later sends, and reference counting and the cycle collector skip them. Stores into the types a program publishes carry one extra load and branch.
+
+Threads that add to one shared collection of published values while they run can use an [`InternTable`](/docs/experimental#interntable) from `@scriptc/experimental`.
+
+See [published graphs](/docs/limitations#published-graphs) for remaining differences from Node.js.

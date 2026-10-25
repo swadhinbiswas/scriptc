@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2124-imports-field-wildcard/src/x.ts",
+  "<repo>/tests/corpus/2124-imports-field-wildcard/main.ts"
+ ],
+ "diags": []
+}

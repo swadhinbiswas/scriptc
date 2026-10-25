@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2605-cycle-three-module/c.ts",
+  "<repo>/tests/corpus/2605-cycle-three-module/b.ts",
+  "<repo>/tests/corpus/2605-cycle-three-module/a.ts",
+  "<repo>/tests/corpus/2605-cycle-three-module/main.ts"
+ ],
+ "diags": []
+}

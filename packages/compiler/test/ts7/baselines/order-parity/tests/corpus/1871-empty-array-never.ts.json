@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1871-empty-array-never.ts"
+ ],
+ "diags": []
+}

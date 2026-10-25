@@ -2,5 +2,5 @@ import { executableLinkFeatures } from "../../packages/compiler/src/backend/exec
 import type { IrModule } from "../../packages/compiler/src/ir/ir.js";
 
 export function nativeFeatures(module: IrModule) {
-  return executableLinkFeatures(module, false);
+  return executableLinkFeatures(module);
 }

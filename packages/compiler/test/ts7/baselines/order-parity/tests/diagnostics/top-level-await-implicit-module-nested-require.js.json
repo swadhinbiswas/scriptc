@@ -1,0 +1,17 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "require() in an ES module (Node throws ReferenceError — use import) is not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js",
+    "start": 114,
+    "end": 134
+   },
+   "milestone": "later"
+  }
+ ]
+}

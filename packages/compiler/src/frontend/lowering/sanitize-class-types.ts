@@ -7,12 +7,17 @@ import { everyStmtList } from "../../ir/traverse.js";
  * Keep class values and node-level class names for the validator to check.
  * Traverse typed IR directly: boxing a whole module into unknown recursively
  * copies its records and makes this pass costly in the native compiler. */
-export function sanitizeUnregisteredClassTypes(module: IrModule, hasClass: (name: string) => boolean): void {
+export function sanitizeUnregisteredClassTypes(
+  module: IrModule,
+  hasClass: (name: string) => boolean,
+): void {
   const rewrite = (type: IrType): IrType => {
     switch (type.kind) {
       case "object":
         return hasClass(type.className) ? type : F64;
       case "array":
+        type.elem = rewrite(type.elem);
+        break;
       case "set":
         type.elem = rewrite(type.elem);
         break;
@@ -61,7 +66,10 @@ export function sanitizeUnregisteredClassTypes(module: IrModule, hasClass: (name
       // resultType is a record reference; its fields are visited above.
     }
     everyStmtList(fn.body, {
-      expr: (expr) => { expr.type = rewrite(expr.type); return true; },
+      expr: (expr) => {
+        expr.type = rewrite(expr.type);
+        return true;
+      },
       stmt: () => true,
     });
   }

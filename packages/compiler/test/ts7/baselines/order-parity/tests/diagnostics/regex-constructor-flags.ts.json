@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/regex-constructor-flags.ts"
+ ],
+ "diags": []
+}

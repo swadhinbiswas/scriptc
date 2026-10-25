@@ -9,10 +9,16 @@ interface CachedSource {
   references: Set<string>;
 }
 
-function reference(snapshot: number, project: string): string { return `${snapshot}:${project}`; }
+function reference(snapshot: number, project: string): string {
+  return `${snapshot}:${project}`;
+}
 
-class ProjectPaths { readonly paths = new Set<string>(); }
-class SnapshotPaths { readonly projects = new Map<string, ProjectPaths>(); }
+class ProjectPaths {
+  readonly paths = new Set<string>();
+}
+class SnapshotPaths {
+  readonly projects = new Map<string, ProjectPaths>();
+}
 
 /** AST identity is shared only when path, parser options and content all
  * agree. A server snapshot/project pair owns each reference; project-local
@@ -35,7 +41,9 @@ export class Ts7SourceCache {
     const ref = reference(snapshot, project);
     const parseOptions = file.file.wire.parseOptionsKey;
     const hash = file.file.wire.contentHash;
-    const existing = entries.find((entry) => entry.parseOptions === parseOptions && entry.hash === hash);
+    const existing = entries.find(
+      (entry) => entry.parseOptions === parseOptions && entry.hash === hash,
+    );
     if (existing !== undefined) {
       existing.references.add(ref);
       this.track(snapshot, project, path);
@@ -55,7 +63,8 @@ export class Ts7SourceCache {
       const previousRef = reference(previous, project);
       const nextRef = reference(snapshot, project);
       for (const path of retained.paths) {
-        if (changed?.changedFiles?.includes(path) || changed?.deletedFiles?.includes(path)) continue;
+        if (changed?.changedFiles?.includes(path) || changed?.deletedFiles?.includes(path))
+          continue;
         for (const entry of this.files.get(path) ?? []) {
           if (!entry.references.has(previousRef)) continue;
           entry.references.add(nextRef);
@@ -98,6 +107,11 @@ export class Ts7SourceCache {
     paths.paths.add(path);
   }
 
-  clear(): void { this.files.clear(); this.paths.clear(); }
-  get size(): number { return this.files.size; }
+  clear(): void {
+    this.files.clear();
+    this.paths.clear();
+  }
+  get size(): number {
+    return this.files.size;
+  }
 }

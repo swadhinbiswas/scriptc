@@ -9,49 +9,150 @@ import { NATIVE_TARGETS } from "../backend/targets.js";
 import { buildSanitizedRuntime } from "./sanitizer.js";
 
 test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
-  "sanitized vendor archives compile with host libc declarations", () => {
-    const target = NATIVE_TARGETS.find((item) => item.platform === process.platform &&
-      item.architecture === process.arch && !item.name.endsWith("-musl"));
+  "sanitized vendor archives compile with host libc declarations",
+  () => {
+    const target = NATIVE_TARGETS.find(
+      (item) =>
+        item.platform === process.platform &&
+        item.architecture === process.arch &&
+        !item.name.endsWith("-musl"),
+    );
     if (target === undefined) throw new Error("unsupported sanitizer test host");
     const runtimeSourceRoot = fileURLToPath(new URL("../../../runtime", import.meta.url));
-    const { version } = JSON.parse(readFileSync(join(runtimeSourceRoot, "package.json"), "utf8")) as { version: string };
+    const { version } = JSON.parse(
+      readFileSync(join(runtimeSourceRoot, "package.json"), "utf8"),
+    ) as { version: string };
     const directory = mkdtempSync("/tmp/scriptc-sanitized-vendor-");
     const artifact = { path: "libscriptc-libregexp.a", sha256: "0".repeat(64), size: 0 };
     const manifest: RuntimePackManifest = {
-      schema: "scriptc.runtime-pack.v1", format: 1, package: target.runtimePackPackage, version,
-      target: { name: target.name, llvm_triple: target.llvmTriple, architecture: target.architecture,
-        object_format: target.objectFormat, minimum_os: target.minimumOs },
+      schema: "scriptc.runtime-pack.v1",
+      format: 1,
+      package: target.runtimePackPackage,
+      version,
+      target: {
+        name: target.name,
+        llvm_triple: target.llvmTriple,
+        architecture: target.architecture,
+        object_format: target.objectFormat,
+        minimum_os: target.minimumOs,
+      },
       runtime_abi: { version: RUNTIME_ABI_VERSION, marker: RUNTIME_ABI_MARKER },
       compiler: { command: "clang", identity: "test", target: target.llvmTriple },
       macros: { executable: [], excluded: [], sanitizer: "external-toolchain-required" },
       flavors: { dev: { optimization: "-O0", runtime_units: [] } },
-      archives: [{ ...artifact, id: "libregexp", predicate: true }], system_libraries: [], licenses: [],
+      archives: [{ ...artifact, id: "libregexp", predicate: true }],
+      system_libraries: [],
+      licenses: [],
     };
     try {
       // Exercise the actual strict-C11 vendor sources. On Linux, their shared
       // headers need the target feature defines to expose POSIX declarations.
-      const built = buildSanitizedRuntime({
-        compilerVersion: version, target, helper: target.helper, runtimeSourceRoot,
-        ts7Executable: "unused", helperExecutable: "unused", helperPackageRoot: "unused",
-        runtimePackRoot: "unused", linker: "unused", linkerArgs: [], dsymutil: "unused",
-      }, {
-        root: directory, manifest, packageText: "", manifestText: "", flavor: "dev",
-        selected: { runtime: [], archives: [artifact], systemLibraries: [], features: {
-          dynamic: false, regex: true, copying: false, textDecoderLegacy: false, fileHandle: false,
-          fetch: false, netIsland: false, zlib: false, assert: false, inspect: false, dynInvoke: false,
-          dc: false, dynAsync: false, events: false, emitter: false, symbol: false, bigint: false,
-          searchParams: false, qs: false, parseArgs: false, stream: false, net: false, http: false,
-          http2: false, dgram: false, watch: false, foreignFfi: false, nodeTest: false, tls: false, tlsCa: false,
-          nativeFetch: false, netIslandEffective: false, netEffective: false, httpEffective: false,
-          tlsEffective: false, tlsCaEffective: false, zlibEffective: false,
-        } },
-      }, directory, "executable", null);
+      const built = buildSanitizedRuntime(
+        {
+          compilerVersion: version,
+          target,
+          helper: target.helper,
+          runtimeSourceRoot,
+          ts7Executable: "unused",
+          helperExecutable: "unused",
+          helperPackageRoot: "unused",
+          runtimePackRoot: "unused",
+          linker: "unused",
+          linkerArgs: [],
+          dsymutil: "unused",
+        },
+        {
+          root: directory,
+          manifest,
+          licenses: manifest.licenses,
+          packageText: "",
+          manifestText: "",
+          flavor: "dev",
+          selected: {
+            runtime: [],
+            archives: [artifact],
+            systemLibraries: [],
+            features: {
+              workers: false,
+              youngNursery: false,
+              eventTarget: false,
+              wasm: false,
+              dynTier: false,
+              streamDyn: false,
+              handleProps: false,
+              declAdopt: false,
+              dynForAwait: false,
+              eventsOnceSignal: false,
+              dynBuffer: false,
+              builtinValues: false,
+              warningReplace: false,
+              stdioExtended: false,
+              brotli: false,
+              moduleNamespace: false,
+              regex: true,
+              copying: false,
+              textDecoderLegacy: false,
+              fileHandle: false,
+              fetch: false,
+              zlib: false,
+              assert: false,
+              inspect: false,
+              dynInvoke: false,
+              dc: false,
+              dynAsync: false,
+              events: false,
+              emitter: false,
+              symbol: false,
+              bigint: false,
+              searchParams: false,
+              qs: false,
+              utilPromisify: false,
+              dynBuiltinClass: false,
+              dynBuiltinStream: false,
+              parseArgs: false,
+              stream: false,
+              net: false,
+              http: false,
+              http2: false,
+              dgram: false,
+              dnsPromises: false,
+              dgramDyn: false,
+              textCodecDyn: false,
+              watch: false,
+              foreignFfi: false,
+              nodeTest: false,
+              tls: false,
+              tlsCa: false,
+              cipher: false,
+              ecdh: false,
+              dh: false,
+              pki: false,
+              ed25519: false,
+              x509: false,
+              webcrypto: false,
+              perfLoop: false,
+              nativeFetch: false,
+              netEffective: false,
+              httpEffective: false,
+              tlsEffective: false,
+              tlsCaEffective: false,
+              zlibEffective: false,
+            },
+          },
+        },
+        directory,
+        "executable",
+        null,
+      );
       expect(built.runtimeObjects).toEqual([]);
       const archive = join(directory, "libscriptc-libregexp.a");
       expect(built.archives).toEqual([archive]);
       expect(statSync(archive).size).toBeGreaterThan(0);
-      expect(execFileSync("ar", ["t", archive], { encoding: "utf8" }).trim().split("\n"))
-        .toEqual(expect.arrayContaining(["libregexp-libregexp.o", "libregexp-libunicode.o"]));
-    } finally { rmSync(directory, { recursive: true, force: true }); }
+      expect(execFileSync("ar", ["t", archive], { encoding: "utf8" }).trim().split("\n")).toEqual(
+        expect.arrayContaining(["libregexp-libregexp.o", "libregexp-libunicode.o"]),
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   },
 );

@@ -4,7 +4,7 @@
 // Normalization follows typescript@7.0.2's path helpers, Copyright Microsoft
 // Corporation, licensed under Apache-2.0. Preserve the pinned key spelling.
 function volume(code: number): boolean {
-  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
 function encodedRootLength(path: string): number {
@@ -25,10 +25,18 @@ function encodedRootLength(path: string): number {
   const authorityEnd = path.indexOf("/", authorityStart);
   if (authorityEnd < 0) return ~path.length;
   const authority = path.slice(authorityStart, authorityEnd);
-  if (path.slice(0, schemeEnd) === "file" && (authority === "" || authority === "localhost") && volume(path.charCodeAt(authorityEnd + 1))) {
+  if (
+    path.slice(0, schemeEnd) === "file" &&
+    (authority === "" || authority === "localhost") &&
+    volume(path.charCodeAt(authorityEnd + 1))
+  ) {
     const start = authorityEnd + 2;
-    const end = path.charCodeAt(start) === 58 ? start + 1
-      : path.slice(start, start + 3).toLowerCase() === "%3a" ? start + 3 : -1;
+    const end =
+      path.charCodeAt(start) === 58
+        ? start + 1
+        : path.slice(start, start + 3).toLowerCase() === "%3a"
+          ? start + 3
+          : -1;
     if (end >= 0) {
       if (path.charCodeAt(end) === 47) return ~(end + 1);
       if (end === path.length) return ~end;
@@ -37,7 +45,9 @@ function encodedRootLength(path: string): number {
   return ~(authorityEnd + 1);
 }
 
-function slashes(path: string): string { return path.split("\\").join("/"); }
+function slashes(path: string): string {
+  return path.split("\\").join("/");
+}
 
 const relativeSegments = /\/\/|(?:^|\/)\.\.?(?:$|\/)/;
 
@@ -69,24 +79,30 @@ function normalizeAbsolute(path: string, rootLength: number): string {
       code = path.charCodeAt(++index);
     }
     if (index > segmentStart) {
-      if (!initialized) { normalized = path.slice(0, segmentStart - 1); initialized = true; }
+      if (!initialized) {
+        normalized = path.slice(0, segmentStart - 1);
+        initialized = true;
+      }
       segmentStart = index;
     }
     let end = path.indexOf("/", index + 1);
     if (end < 0) end = path.length;
     const length = end - segmentStart;
     if (length === 1 && code === 46) {
-      if (!initialized) { normalized = path.slice(0, normalizedUpTo); initialized = true; }
-    }
-    else if (length === 2 && code === 46 && path.charCodeAt(index + 1) === 46) {
+      if (!initialized) {
+        normalized = path.slice(0, normalizedUpTo);
+        initialized = true;
+      }
+    } else if (length === 2 && code === 46 && path.charCodeAt(index + 1) === 46) {
       if (!seenNonDotDot) {
         if (initialized) normalized += normalized.length === rootLength ? ".." : "/..";
         else normalizedUpTo = index + 2;
       } else if (!initialized) {
         initialized = true;
-        normalized = normalizedUpTo >= 2
-          ? path.slice(0, Math.max(rootLength, path.lastIndexOf("/", normalizedUpTo - 2)))
-          : path.slice(0, normalizedUpTo);
+        normalized =
+          normalizedUpTo >= 2
+            ? path.slice(0, Math.max(rootLength, path.lastIndexOf("/", normalizedUpTo - 2)))
+            : path.slice(0, normalizedUpTo);
       } else {
         const slash = normalized.lastIndexOf("/");
         normalized = slash < 0 ? root : normalized.slice(0, Math.max(rootLength, slash));
@@ -109,8 +125,12 @@ function normalizeAbsolute(path: string, rootLength: number): string {
  * of the platform hosting the client. Rooted disk paths retain a trailing
  * slash, while paths resolved against a working directory do not. */
 export class Ts7Paths {
-  constructor(readonly currentDirectory: string, readonly caseSensitive: boolean) {
-    if (encodedRootLength(slashes(currentDirectory)) <= 0) throw new Error("TypeScript working directory must be an absolute disk path");
+  constructor(
+    readonly currentDirectory: string,
+    readonly caseSensitive: boolean,
+  ) {
+    if (encodedRootLength(slashes(currentDirectory)) <= 0)
+      throw new Error("TypeScript working directory must be an absolute disk path");
   }
 
   canonical(file: string): string {
@@ -125,7 +145,14 @@ export class Ts7Paths {
     const rootLength = encoded < 0 ? ~encoded : encoded;
     const simple = disk ? simplePath(path) : undefined;
     let result = simple ?? normalizeAbsolute(path, rootLength);
-    if (simple === undefined && disk && path.endsWith("/") && result !== "" && !result.endsWith("/")) result += "/";
+    if (
+      simple === undefined &&
+      disk &&
+      path.endsWith("/") &&
+      result !== "" &&
+      !result.endsWith("/")
+    )
+      result += "/";
     return this.caseSensitive ? result : result.toLowerCase();
   }
 }
@@ -139,11 +166,19 @@ export function ts7DocumentFile(document: string | { uri: string }): string {
   if (uri.startsWith("bundled:///")) return uri;
   if (uri.startsWith("file://")) {
     let parsed: URL;
-    try { parsed = new URL(uri); }
-    catch { throw new Error("invalid file URI: " + uri); }
+    try {
+      parsed = new URL(uri);
+    } catch {
+      throw new Error("invalid file URI: " + uri);
+    }
     if (parsed.host !== "") return "//" + parsed.host + parsed.pathname;
     const path = decodeURIComponent(parsed.pathname);
-    if (path.length >= 3 && path.charCodeAt(0) === 47 && volume(path.charCodeAt(1)) && path.charCodeAt(2) === 58) {
+    if (
+      path.length >= 3 &&
+      path.charCodeAt(0) === 47 &&
+      volume(path.charCodeAt(1)) &&
+      path.charCodeAt(2) === 58
+    ) {
       return path.slice(1, 3).toLowerCase() + path.slice(3);
     }
     return path;

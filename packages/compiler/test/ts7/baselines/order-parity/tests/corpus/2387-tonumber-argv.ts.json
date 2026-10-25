@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2387-tonumber-argv.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1562-spawn-conditional-spread.ts"
+ ],
+ "diags": []
+}

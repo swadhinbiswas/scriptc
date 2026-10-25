@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5605-dyn-cycle-containers.ts"
+ ],
+ "diags": []
+}

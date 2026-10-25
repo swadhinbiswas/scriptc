@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/nonnull-forwarded-class-values.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5347-object-values-loop-control.ts"
+ ],
+ "diags": []
+}

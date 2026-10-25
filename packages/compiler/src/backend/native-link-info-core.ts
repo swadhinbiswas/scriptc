@@ -1,41 +1,123 @@
+import type { NativeOptimization } from "./optimization.js";
 import { join } from "node:path";
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
-import { EXTERNAL_OBJECT_ABI_STABILITY, RUNTIME_ABI_MARKER, RUNTIME_ABI_VERSION } from "./runtime-abi.js";
+import {
+  EXTERNAL_OBJECT_ABI_STABILITY,
+  RUNTIME_ABI_MARKER,
+  RUNTIME_ABI_VERSION,
+} from "./runtime-abi.js";
 import { executableLinkInputs } from "./link-plan-core.js";
-import type { RuntimePackArtifact, RuntimePackArtifacts, RuntimePackManifest } from "./runtime-pack-core.js";
+import type {
+  RuntimePackArtifact,
+  RuntimePackArtifacts,
+  RuntimePackManifest,
+} from "./runtime-pack-core.js";
 import type { NativeTargetSpec } from "./targets.js";
 
 export interface NativeLinkFeatures {
-  dynamic: boolean;
+  workers?: boolean;
+  /** The young-in nursery (backend/young-nursery.ts): the SCR_YIN
+   * variant of the collector unit. Absent when off. */
+  youngNursery?: boolean;
   regex: boolean;
   copying: boolean;
   textDecoderLegacy: boolean;
   fileHandle: boolean;
   fetch: boolean;
-  netIsland: boolean;
+  eventTarget?: boolean;
+  /** The WebAssembly API (scr_wasm.c). Absent when unused, so programs
+   * without it keep their link identity. */
+  wasm?: boolean;
+  /** The program assigns process.emitWarning: links the
+   * SCR_WARNING_REPLACE variant of the dyn-async unit. */
+  warningReplace?: boolean;
+  /** The program uses process.stdin.setEncoding, string 'data' listeners
+   * or stdio 'resize' events: links the SCR_STDIO_EXTENDED events unit. */
+  stdioExtended?: boolean;
+  /** Module namespace objects as checked-dynamic values link
+   * scr_module_namespace.c; absent (false) otherwise. */
+  moduleNamespace?: boolean;
   zlib: boolean;
+  /** node:zlib's Brotli forms: scr_brotli.c and the vendored brotli archive. */
+  brotli?: boolean;
   assert: boolean;
   inspect: boolean;
   dynInvoke: boolean;
   dc: boolean;
   dynAsync: boolean;
+  /** Dynamic-tier jsval operations: the scr_js_* units. Absent (not false)
+   * for programs without them, so their link features stay unchanged. */
+  dynTier?: boolean;
+  /** Checked-dynamic stream slots: the scr_stream_dyn.c unit. Absent (not
+   * false) for programs without them. */
+  streamDyn?: boolean;
+  /** Own properties JavaScript adds to children: scr_dyn_handle_props.c.
+   * Absent (false) for programs without them. */
+  handleProps?: boolean;
+  declAdopt?: boolean;
+  /** for await over checked-dynamic values: scr_dyn_for_await.c. Absent
+   * (false) for programs without it. */
+  dynForAwait?: boolean;
+  /** events.once with options: scr_events_once_signal.c. Absent (not
+   * false) for programs without it. */
+  eventsOnceSignal?: boolean;
+  /** Buffer.prototype methods called on checked-dynamic values link
+   * scr_bytes_dyn.c; absent (false) for programs without them. */
+  dynBuffer?: boolean;
+  /** Builtin functions read as values (Buffer.byteLength, Buffer.alloc,
+   * fs.realpathSync) link scr_builtin_values.c; absent (false) otherwise. */
+  builtinValues?: boolean;
   events: boolean;
   emitter: boolean;
   symbol: boolean;
   bigint: boolean;
   searchParams: boolean;
   qs: boolean;
+  utilPromisify: boolean;
+  dynBuiltinClass: boolean;
+  dynBuiltinStream: boolean;
   parseArgs: boolean;
   stream: boolean;
   net: boolean;
   http: boolean;
   http2: boolean;
   dgram: boolean;
+  /** node:dns/promises: scr_dns_promises.c. */
+  dnsPromises: boolean;
+  /** dgram sockets as untyped values: scr_dgram_dyn.c. */
+  dgramDyn: boolean;
+  /** TextEncoder and TextDecoder records as untyped values:
+   * scr_text_codec_dyn.c. */
+  textCodecDyn: boolean;
   watch: boolean;
   foreignFfi: boolean;
   nodeTest: boolean;
   tls: boolean;
+  /** crypto.createCipheriv/createDecipheriv and WebCrypto's encrypt and
+   * decrypt: scr_cipher.c plus the mbedTLS archive (and, with webcrypto,
+   * scr_webcrypto_aes.c). */
+  cipher: boolean;
+  /** crypto.createECDH and ECDH.convertKey: scr_ecdh.c plus the mbedTLS
+   * archive. */
+  ecdh: boolean;
+  /** crypto.createDiffieHellman, getDiffieHellman and
+   * createDiffieHellmanGroup: scr_dh.c plus the mbedTLS archive. */
+  dh: boolean;
+  /** Asymmetric KeyObjects, crypto.sign/verify and Sign/Verify: scr_pki.c
+   * plus the mbedTLS archive. */
+  pki: boolean;
+  /** Ed25519 keys and signatures with pki: scr_ed25519.c (the vendored
+   * libsodium Ed25519). */
+  ed25519: boolean;
+  /** X509Certificate fields beyond the validity window and fingerprint:
+   * scr_x509.c. */
+  x509: boolean;
+  /** perf_hooks event-loop metrics: scr_perf_loop.c. */
+  perfLoop: boolean;
   tlsCa: boolean;
+  /** crypto.subtle importKey/sign/verify/digest and CryptoKey values:
+   * scr_webcrypto.c. */
+  webcrypto: boolean;
 }
 
 export interface NativeLinkInfo {
@@ -69,7 +151,7 @@ export interface NativeLinkInfo {
     version: string;
     root: string;
     path_base: "runtime_pack.root";
-    flavor: "release" | "dev";
+    flavor: NativeOptimization;
     objects: RuntimePackArtifact[];
     archives: RuntimePackArtifact[];
   };
@@ -87,22 +169,30 @@ export interface NativeLinkInfo {
 }
 
 /** Format the same external-link contract after either host verifies a pack. */
-export function formatNativeLinkInfo(options: {
-  programObject: string;
-  target: NativeTargetSpec;
-  ffi: FfiProfile | null;
-}, compilerVersion: string, pack: {
-  root: string;
-  manifest: RuntimePackManifest;
-  selected: RuntimePackArtifacts;
-  flavor: "release" | "dev";
-}): NativeLinkInfo {
+export function formatNativeLinkInfo(
+  options: {
+    programObject: string;
+    target: NativeTargetSpec;
+    ffi: FfiProfile | null;
+  },
+  compilerVersion: string,
+  pack: {
+    root: string;
+    manifest: RuntimePackManifest;
+    selected: RuntimePackArtifacts;
+    flavor: NativeOptimization;
+  },
+): NativeLinkInfo {
   const ffiLibraries = options.ffi?.libraries ?? [];
   const plan = executableLinkInputs({
-    target: options.target, programObject: options.programObject,
-    ffiLibraries, ffiSystemLibraries: options.ffi?.systemLibraries ?? [],
-    ffiFrameworks: options.ffi?.frameworks ?? [], runtimeObjects: pack.selected.runtime.map((artifact) => join(pack.root, artifact.path)),
-    runtimeArchives: pack.selected.archives.map((artifact) => join(pack.root, artifact.path)), runtimeSystemLibraries: pack.selected.systemLibraries,
+    target: options.target,
+    programObject: options.programObject,
+    ffiLibraries,
+    ffiSystemLibraries: options.ffi?.systemLibraries ?? [],
+    ffiFrameworks: options.ffi?.frameworks ?? [],
+    runtimeObjects: pack.selected.runtime.map((artifact) => join(pack.root, artifact.path)),
+    runtimeArchives: pack.selected.archives.map((artifact) => join(pack.root, artifact.path)),
+    runtimeSystemLibraries: pack.selected.systemLibraries,
     optimization: pack.flavor,
   });
   return {
@@ -142,7 +232,8 @@ export function formatNativeLinkInfo(options: {
     },
     ffi: {
       format: options.ffi?.ffiFormat ?? null,
-      symbols: options.ffi?.functions.filter((fn) => !fn.callbackOperation).map((fn) => fn.symbol) ?? [],
+      symbols:
+        options.ffi?.functions.filter((fn) => !fn.callbackOperation).map((fn) => fn.symbol) ?? [],
       libraries: [...ffiLibraries],
     },
     link: {

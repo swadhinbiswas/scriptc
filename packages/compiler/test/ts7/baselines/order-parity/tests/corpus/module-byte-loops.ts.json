@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/module-byte-loops.ts"
+ ],
+ "diags": []
+}

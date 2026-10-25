@@ -69,6 +69,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary } from "@scriptc/compiler";
 
+import { nmDefined } from "./nm-defined.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureDir = join(repoRoot, "tests/library-mode/callbacks");
 const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
@@ -105,7 +106,9 @@ async function buildLibrary(
   const tag = `${opts.tag ?? "callbacks"}-${emission}${opts.sanitize ? "-san" : ""}`;
   const outDir = join(cacheDir, tag);
   mkdirSync(outDir, { recursive: true });
-  const profile = JSON.parse(readFileSync(join(fixtureDir, opts.profileFile ?? "profile.json"), "utf8")) as {
+  const profile = JSON.parse(
+    readFileSync(join(fixtureDir, opts.profileFile ?? "profile.json"), "utf8"),
+  ) as {
     entry: string;
     emission: string;
     abi: Record<string, unknown>;
@@ -120,7 +123,9 @@ async function buildLibrary(
     delete profile.abi["callback_register_symbol"];
   }
   if (opts.stripBufferedExport === true) {
-    profile.exports = (profile.exports as { export: string }[]).filter((e) => e.export !== "buffered");
+    profile.exports = (profile.exports as { export: string }[]).filter(
+      (e) => e.export !== "buffered",
+    );
   }
   const profilePath = join(outDir, "profile.json");
   writeFileSync(profilePath, JSON.stringify(profile, null, 2));
@@ -133,11 +138,16 @@ async function buildLibrary(
 }
 
 /** Compile expecting refusal; returns the diagnostics. */
-async function buildRefusal(emission: Emission, opts: BuildOpts): Promise<{ code: string; message: string; note?: string }[]> {
+async function buildRefusal(
+  emission: Emission,
+  opts: BuildOpts,
+): Promise<{ code: string; message: string; note?: string }[]> {
   const tag = `${opts.tag ?? "refusal"}-${emission}`;
   const outDir = join(cacheDir, tag);
   mkdirSync(outDir, { recursive: true });
-  const profile = JSON.parse(readFileSync(join(fixtureDir, opts.profileFile ?? "profile.json"), "utf8")) as {
+  const profile = JSON.parse(
+    readFileSync(join(fixtureDir, opts.profileFile ?? "profile.json"), "utf8"),
+  ) as {
     entry: string;
     emission: string;
     determinism?: unknown;
@@ -150,7 +160,11 @@ async function buildRefusal(emission: Emission, opts: BuildOpts): Promise<{ code
   const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
-  return result.diagnostics.map((d) => ({ code: d.code, message: d.message, ...(d.note !== undefined ? { note: d.note } : {}) }));
+  return result.diagnostics.map((d) => ({
+    code: d.code,
+    message: d.message,
+    ...(d.note !== undefined ? { note: d.note } : {}),
+  }));
 }
 
 function buildProbe(
@@ -167,21 +181,26 @@ function buildProbe(
     join(fixtureDir, source),
     archive,
     "-lm",
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
 
-function runProbe(bin: string, args: string[] = []): { stdout: string; status: number | null; signal: string | null } {
+function runProbe(
+  bin: string,
+  args: string[] = [],
+): { stdout: string; status: number | null; signal: string | null } {
   // Library poison survival intentionally uses sink longjmp, which abandons
   // the active outer operation by contract. LeakSanitizer cannot model that
   // non-local recovery, while ASan still checks the memory-safety paths.
   const r = spawnSync(bin, args, {
     encoding: "utf8",
     timeout: 60_000,
-    env: process.env["SCRIPTC_SAN"] === "1" || bin.includes("-san/")
-      ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" }
-      : undefined,
+    env:
+      process.env["SCRIPTC_SAN"] === "1" || bin.includes("-san/")
+        ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" }
+        : undefined,
   });
   return { stdout: r.stdout ?? "", status: r.status, signal: r.signal };
 }
@@ -196,7 +215,7 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
     }
     return set;
   };
-  const defined = parse(execFileSync("nm", ["-gU", archive], { encoding: "utf8" }));
+  const defined = parse(nmDefined(archive));
   const undef = parse(execFileSync("nm", ["-u", archive], { encoding: "utf8" }));
   return { defined, undef };
 }
@@ -249,8 +268,15 @@ survived, sink_calls=1
 `;
 
 const CALLBACK_SYMBOLS = [
-  "cb_init", "cb_set_panic_sink", "cb_collect", "cb_reset_results", "cb_set_callback",
-  "cb_stream", "cb_buffered", "cb_ask_host", "cb_poke_orphan",
+  "cb_init",
+  "cb_set_panic_sink",
+  "cb_collect",
+  "cb_reset_results",
+  "cb_set_callback",
+  "cb_stream",
+  "cb_buffered",
+  "cb_ask_host",
+  "cb_poke_orphan",
 ];
 
 const REENTRY_SYMBOLS: Record<string, string> = {
@@ -263,7 +289,9 @@ const REENTRY_SYMBOLS: Record<string, string> = {
 };
 
 function reentryExpected(symbol: string, overlay = false): string {
-  const text = overlay ? "return from the callback before calling the library" : `scriptc: library entry '${symbol}' invoked from a host callback\n`;
+  const text = overlay
+    ? "return from the callback before calling the library"
+    : `scriptc: library entry '${symbol}' invoked from a host callback\n`;
   const remediation = overlay ? "schedule the operation for a later host-loop turn" : undefined;
   return `callbacks ready
 sink[1]:
@@ -291,7 +319,9 @@ describe.each(EMISSIONS)("library host callbacks, %s emission", (emission) => {
     // (the register symbol included), no prefix-carrying undefineds, and
     // the ambient audit holds with the callback machinery linked.
     const { defined, undef } = nmSymbols(archive);
-    expect([...defined].filter((s) => s.startsWith("cb_")).sort()).toEqual([...CALLBACK_SYMBOLS].sort());
+    expect([...defined].filter((s) => s.startsWith("cb_")).sort()).toEqual(
+      [...CALLBACK_SYMBOLS].sort(),
+    );
     expect([...undef].filter((s) => s.startsWith("cb_"))).toEqual([]);
     for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
       expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
@@ -340,16 +370,19 @@ survived, sink_calls=1
 `);
   });
 
-  platformTest("CB8: callback-time entries trap SC4026 before mutation and poison the instance", async () => {
-    const { archive, outDir } = await buildLibrary(emission, { tag: "reentry" });
-    const probe = buildProbe("probe.c", archive, outDir, { pthread: true });
-    for (const [mode, symbol] of Object.entries(REENTRY_SYMBOLS)) {
-      const run = runProbe(probe, [mode]);
-      expect(run.signal, mode).toBe("SIGABRT");
-      expect(run.stdout, mode).toBe(reentryExpected(symbol));
-      expect(run.stdout.includes("UNREACHABLE"), mode).toBe(false);
-    }
-  });
+  platformTest(
+    "CB8: callback-time entries trap SC4026 before mutation and poison the instance",
+    async () => {
+      const { archive, outDir } = await buildLibrary(emission, { tag: "reentry" });
+      const probe = buildProbe("probe.c", archive, outDir, { pthread: true });
+      for (const [mode, symbol] of Object.entries(REENTRY_SYMBOLS)) {
+        const run = runProbe(probe, [mode]);
+        expect(run.signal, mode).toBe("SIGABRT");
+        expect(run.stdout, mode).toBe(reentryExpected(symbol));
+        expect(run.stdout.includes("UNREACHABLE"), mode).toBe(false);
+      }
+    },
+  );
 
   platformTest("CB8: SC4026 rides the teaching overlay table with its inner symbol", async () => {
     const { archive, outDir } = await buildLibrary(emission, {
@@ -411,40 +444,52 @@ survived, sink_calls=1
   });
 
   test("CB6: a called function-valued ambient refuses SC4024 instead of disappearing", async () => {
-    const diags = await buildRefusal(emission, { tag: "ambient-const", entry: "lib_ambient_const.ts" });
+    const diags = await buildRefusal(emission, {
+      tag: "ambient-const",
+      entry: "lib_ambient_const.ts",
+    });
     expect(diags.map((d) => d.code)).toEqual(["SC4024"]);
     expect(diags[0]!.message).toContain("library callback 'orphan'");
-    expect(diags[0]!.message).toContain("does not resolve exclusively to signature-only function declarations");
+    expect(diags[0]!.message).toContain(
+      "does not resolve exclusively to signature-only function declarations",
+    );
   });
 
-  platformTest("CB6: a callback-free profile keeps the ambient ReferenceError lowering", async () => {
-    // The standing guarantee's behavioral half: without a callbacks
-    // section the same signature-only declaration keeps Node's
-    // ReferenceError semantics — the call throws, and the escaped
-    // exception reaches the sink as SC4013, never SC4024/SC4025.
-    const { archive, outDir } = await buildLibrary(emission, {
-      tag: "no-callbacks",
-      entry: "lib_undeclared.ts",
-      stripCallbacks: true,
-      stripBufferedExport: true,
-    });
-    const probe = buildProbe("probe_referror.c", archive, outDir);
-    const run = runProbe(probe);
-    expect(run.signal).toBeNull();
-    expect(run.status).toBe(0);
-    expect(run.stdout).toBe(`sink[1]:
+  platformTest(
+    "CB6: a callback-free profile keeps the ambient ReferenceError lowering",
+    async () => {
+      // The standing guarantee's behavioral half: without a callbacks
+      // section the same signature-only declaration keeps Node's
+      // ReferenceError semantics — the call throws, and the escaped
+      // exception reaches the sink as SC4013, never SC4024/SC4025.
+      const { archive, outDir } = await buildLibrary(emission, {
+        tag: "no-callbacks",
+        entry: "lib_undeclared.ts",
+        stripCallbacks: true,
+        stripBufferedExport: true,
+      });
+      const probe = buildProbe("probe_referror.c", archive, outDir);
+      const run = runProbe(probe);
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe(`sink[1]:
 code=[SC4013]
 symbol=[cb_stream]
 text has ReferenceError: 1
 survived, sink_calls=1
 `);
-  });
+    },
+  );
 
   platformTest("CB6: a declared channel no code references is legal capacity", async () => {
     // lib_unused.ts never mentions 'orphan' (or the other channels); the
     // build succeeds and the registration symbol still answers for every
     // declared name.
-    const { archive, outDir } = await buildLibrary(emission, { tag: "unused", entry: "lib_unused.ts", stripBufferedExport: true });
+    const { archive, outDir } = await buildLibrary(emission, {
+      tag: "unused",
+      entry: "lib_unused.ts",
+      stripBufferedExport: true,
+    });
     const probe = buildProbe("probe_unused.c", archive, outDir);
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -456,20 +501,23 @@ stream(3,7) = 42
 `);
   });
 
-  platformTest("CB6: declaration-file ambient names remain builtins and C-keyword channels stay indirect", async () => {
-    const { archive, outDir } = await buildLibrary(emission, {
-      tag: "builtin-names",
-      profileFile: "profile_builtins.json",
-    });
-    const probe = buildProbe("probe_builtins.c", archive, outDir);
-    const run = runProbe(probe);
-    expect(run.signal).toBeNull();
-    expect(run.status).toBe(0);
-    expect(run.stdout).toBe(`finite: 0
+  platformTest(
+    "CB6: declaration-file ambient names remain builtins and C-keyword channels stay indirect",
+    async () => {
+      const { archive, outDir } = await buildLibrary(emission, {
+        tag: "builtin-names",
+        profileFile: "profile_builtins.json",
+      });
+      const probe = buildProbe("probe_builtins.c", archive, outDir);
+      const run = runProbe(probe);
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe(`finite: 0
 nan: 1
 keyword: 7.5
 `);
-  });
+    },
+  );
 
   platformTest("CB6: a callback declared in a project .d.ts remains authored surface", async () => {
     const { archive, outDir } = await buildLibrary(emission, {
@@ -487,7 +535,10 @@ result=9
   });
 
   localizationTest("CB7: localized + thread-instanced channels route per instance", async () => {
-    const { archive, outDir } = await buildLibrary(emission, { tag: "threads", profileFile: "profile_t.json" });
+    const { archive, outDir } = await buildLibrary(emission, {
+      tag: "threads",
+      profileFile: "profile_t.json",
+    });
     const probe = buildProbe("probe_threads.c", archive, outDir, { pthread: true });
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -510,14 +561,21 @@ B: r1=31 r2=6 chunks=4 thread_ok=1 sink_calls=0
     const { defined, undef } = nmSymbols(archive);
     const prefixDefined = [...defined].filter((s) => s.startsWith("cbt_")).sort();
     expect(prefixDefined).toEqual([
-      "cbt_ask_host", "cbt_init", "cbt_poke_orphan",
-      "cbt_set_callback", "cbt_set_panic_sink", "cbt_stream",
+      "cbt_ask_host",
+      "cbt_init",
+      "cbt_poke_orphan",
+      "cbt_set_callback",
+      "cbt_set_panic_sink",
+      "cbt_stream",
     ]);
     expect([...undef].filter((s) => s.startsWith("cbt_"))).toEqual([]);
   });
 
   localizationTest("CB8: callback re-entry poisons only the active thread instance", async () => {
-    const { archive, outDir } = await buildLibrary(emission, { tag: "threads-reentry", profileFile: "profile_t.json" });
+    const { archive, outDir } = await buildLibrary(emission, {
+      tag: "threads-reentry",
+      profileFile: "profile_t.json",
+    });
     const probe = buildProbe("probe_threads_reentry.c", archive, outDir, { pthread: true });
     const run = runProbe(probe);
     expect(run.signal).toBeNull();

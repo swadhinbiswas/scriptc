@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5795-worker-message-port-batches.ts"
+ ],
+ "diags": []
+}

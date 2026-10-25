@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1696-stream-read-inside-read.ts"
+ ],
+ "diags": []
+}

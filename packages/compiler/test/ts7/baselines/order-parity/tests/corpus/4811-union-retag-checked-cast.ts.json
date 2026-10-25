@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4811-union-retag-checked-cast.ts"
+ ],
+ "diags": []
+}

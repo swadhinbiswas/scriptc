@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-array-checked-index.js"
+ ],
+ "diags": []
+}

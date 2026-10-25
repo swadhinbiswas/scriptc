@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5549-fs-callback-option-checks.cjs"
+ ],
+ "diags": []
+}

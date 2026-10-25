@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1832-enum-modules/lib.ts",
+  "<repo>/tests/corpus/1832-enum-modules/main.ts"
+ ],
+ "diags": []
+}

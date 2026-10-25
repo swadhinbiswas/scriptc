@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1700-mustcall-common/common.cjs",
+  "<repo>/tests/corpus/1700-mustcall-common/main.cjs"
+ ],
+ "diags": []
+}

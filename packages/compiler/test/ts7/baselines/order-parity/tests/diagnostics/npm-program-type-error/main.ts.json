@@ -1,0 +1,25 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/npm-program-type-error/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Module '\"sqlish\"' has no exported member 'open'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/npm-program-type-error/main.ts",
+    "start": 138,
+    "end": 142
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Expected 2 arguments, but got 1.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/npm-program-type-error/main.ts",
+    "start": 239,
+    "end": 244
+   }
+  }
+ ]
+}

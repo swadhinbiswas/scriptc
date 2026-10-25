@@ -1,4 +1,3 @@
-// @dynamic
 // STRING-LITERAL property keys (`"content-type": v`) in object literals:
 // record field names are data, not identifiers. Declared-field records
 // serialize in canonical order (fields alphabetical here — the json

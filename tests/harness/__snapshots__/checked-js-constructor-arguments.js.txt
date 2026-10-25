@@ -1,0 +1,6 @@
+checked-js-constructor-arguments.js:10:29 - error SC0001: Argument of type 'string' is not assignable to parameter of type 'number'.
+
+   9 | }
+  10 | const account = new Account("10");
+     |                             ^~~~
+  11 | console.log(account.balance);

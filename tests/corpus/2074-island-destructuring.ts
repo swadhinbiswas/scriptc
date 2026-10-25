@@ -1,4 +1,3 @@
-// @dynamic
 // @exit: 1
 // Destructuring assignment from island ('any'-typed) sources: the object
 // pattern runs RequireObjectCoercible with V8's exact destructuring

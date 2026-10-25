@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3119-runtime-optional-spread.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,26 @@
+contract-program-lifetime.ts:10:39 - error SC7008: 'Derived' is declared ProgramLifetime but extends 'Base'
+
+   9 | 
+  10 | class Derived extends Base implements ProgramLifetime {
+     |                                       ^~~~~~~~~~~~~~~
+  11 |   name = "d";
+
+  hint: declare ProgramLifetime on the root class 'Base' instead; it applies to every subclass
+
+contract-program-lifetime.ts:14:40 - error SC7008: 'Failure' is declared ProgramLifetime but extends 'Error'
+
+  13 | 
+  14 | class Failure extends Error implements ProgramLifetime {}
+     |                                        ^~~~~~~~~~~~~~~
+  15 | 
+
+  hint: ProgramLifetime applies to classes the program owns end to end; built-in bases (errors, emitters, streams) keep runtime state that is released with the object
+
+contract-program-lifetime.ts:22:25 - error SC7007: 'Holder' is declared Acyclic but can lie on a reference cycle: Holder.tree → Tree.holder → Holder (Tree.holder can be assigned after construction, as at contract-program-lifetime.ts:30:1)
+
+  21 | 
+  22 | class Holder implements Acyclic {
+     |                         ^~~~~~~
+  23 |   readonly tree: Tree;
+
+  hint: assign the reference only in the constructor (before `this` escapes), so a new object can only point to older ones, or remove Acyclic

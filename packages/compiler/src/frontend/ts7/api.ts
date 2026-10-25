@@ -20,8 +20,16 @@ export class Ts7Api {
     }
   }
 
-  parseConfigFile(file: string): Ts7ConfigData { return this.session.parseConfigFile(file); }
-  updateSnapshot(params: Ts7Update = {}): Ts7SessionSnapshot { return this.session.updateSnapshot(params); }
-  getTimingInfo(): Ts7TimingInfo { return this.session.getTimingInfo(); }
-  close(): void { this.session.close(); }
+  parseConfigFile(file: string): Ts7ConfigData {
+    return this.session.parseConfigFile(file);
+  }
+  updateSnapshot(params: Ts7Update = {}): Ts7SessionSnapshot {
+    return this.session.updateSnapshot(params);
+  }
+  getTimingInfo(): Ts7TimingInfo {
+    return this.session.getTimingInfo();
+  }
+  close(): void {
+    this.session.close();
+  }
 }

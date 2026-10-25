@@ -1,24 +1,3 @@
-/* The provenance-sources registry — the flag-gated state `--provenance-
- * sources` compiles against (EXPERIMENTAL prototype).
- *
- * The thesis: an npm package published with provenance attests the exact
- * {repository, commit} its dist was built from, so the compiler can fetch
- * that SOURCE and hand it to the static frontend as ordinary program
- * modules — real TypeScript with real types — instead of island-embedding
- * the published JavaScript. provenance.ts fills this registry before the
- * program loads; the pipeline consults it at three chokepoints:
- *
- *   - resolve.ts resolveProjectImport: a registered bare specifier answers
- *     its mapped source entry (preflight's user-module edges, the module
- *     order, and the CJS link check all ride that one resolver);
- *   - program.ts resolveNpmImport: a registered specifier is NOT an npm
- *     import (no island embed, no .d.ts type surface);
- *   - program.ts loadProgram: the registered entries become tsconfig
- *     "paths" so tsgo's own resolution agrees with ours.
- *
- * Empty registry (the default — the flag off) = every chokepoint answers
- * exactly as before; nothing in the production npm/island path changes. */
-
 export interface ProvenancePackageSource {
   /** Package name ("cookie"). */
   name: string;
@@ -43,10 +22,7 @@ export interface ProvenancePackageSource {
 export interface ProvenanceSources {
   /** Successfully source-mapped packages, driver-import order. */
   packages: ProvenancePackageSource[];
-  /** Everything that fell back to the island path (or is informational):
-   * no attestation, unfetchable source, unmappable entry, version skew.
-   * Fallbacks are never build failures — the coverage report carries
-   * these so the build output stays honest. */
+
   notes: string[];
 }
 
@@ -62,10 +38,7 @@ let state: RegistryState | null = null;
  * Passing null (or an empty set) clears the registry. */
 export function setProvenanceSources(sources: ProvenanceSources | null): void {
   if (sources === null || sources.packages.length === 0) {
-    state =
-      sources === null
-        ? null
-        : { bySpecifier: new Map(), packageDirs: [], sources };
+    state = sources === null ? null : { bySpecifier: new Map(), packageDirs: [], sources };
     return;
   }
   const bySpecifier = new Map<string, string>();

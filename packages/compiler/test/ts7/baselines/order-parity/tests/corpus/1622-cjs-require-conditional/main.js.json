@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1622-cjs-require-conditional/taken.js",
+  "<repo>/tests/corpus/1622-cjs-require-conditional/skipped.js",
+  "<repo>/tests/corpus/1622-cjs-require-conditional/main.js"
+ ],
+ "diags": []
+}

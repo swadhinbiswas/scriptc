@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5139-event-target-listener-throw.ts"
+ ],
+ "diags": []
+}

@@ -39,7 +39,11 @@ export function lowerCallbackArg(
     (cb.type.rest === true ||
       (cb.type.params.length > 0 && cb.type.params.some((param, i) => !paramOk(param, i)))) &&
     cb.type.params.every((param) => param.kind === "dyn") &&
-    canBoxFuncIntoDyn(cb.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id))
+    canBoxFuncIntoDyn(
+      cb.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
   ) {
     const boxed: IrExpr = { kind: "dynFrom", value: cb, type: DYN, loc: locOf(node) };
     const toT = funcOf([...options.dynTuple], VOID);
@@ -68,7 +72,11 @@ export function lowerCallbackArg(
   const params = options.checkAllParams ? cb.type.params : cb.type.params.slice(0, 1);
   for (let i = 0; i < params.length; i++) {
     if (!paramOk(params[i]!, i)) {
-      lowerer.unsupported("SC1090", node, `${what} whose parameter is not supported (${paramHint})`);
+      lowerer.unsupported(
+        "SC1090",
+        node,
+        `${what} whose parameter is not supported (${paramHint})`,
+      );
     }
   }
   const adapted = options.adapt?.(cb) ?? cb;

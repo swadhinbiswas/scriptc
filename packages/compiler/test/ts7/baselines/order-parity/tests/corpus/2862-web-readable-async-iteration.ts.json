@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2862-web-readable-async-iteration.ts"
+ ],
+ "diags": []
+}

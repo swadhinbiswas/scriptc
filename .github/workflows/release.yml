@@ -100,10 +100,59 @@ jobs:
           if (receiptRun) appendFileSync(process.env.GITHUB_OUTPUT, `receipt_run=${receiptRun}\n`);
           NODE
 
-  build-native-packages:
-    name: Build native package (${{ matrix.platform }})
+  # Collects the native compiler's profile on this commit
+  # (scripts/refresh-cli-profile.mjs), so every platform's CLI build optimizes
+  # with a profile of the code it compiles. The committed profile falls behind
+  # main within a day or two. If this job fails, the CLI builds use the
+  # committed profile.
+  cli-profile:
+    name: Collect the native compiler profile
     needs: check-release
     if: needs.check-release.outputs.should_release == 'true' && needs.check-release.outputs.reuse_artifacts != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - uses: ./.github/actions/llvm-linux
+      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/zig
+      - uses: ./.github/actions/native-packages
+        with:
+          target: linux-x64-gnu
+      - run: pnpm --filter @scriptc/compiler --filter scriptc build
+      - name: Check out tsc-ts
+        run: |
+          git clone --quiet --depth 1 https://github.com/vercel-labs/tsc-ts "$RUNNER_TEMP/tsc-ts"
+          echo "tsc-ts $(git -C "$RUNNER_TEMP/tsc-ts" rev-parse HEAD)"
+          npm ci --prefix "$RUNNER_TEMP/tsc-ts"
+      - name: Collect the profile
+        run: >-
+          node scripts/refresh-cli-profile.mjs --tsc-ts "$RUNNER_TEMP/tsc-ts" --jobs 4
+          --output "$RUNNER_TEMP/cli-profile/cli.profdata.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-profile
+          path: ${{ runner.temp }}/cli-profile/cli.profdata.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  build-native-packages:
+    name: Build native package (${{ matrix.platform }})
+    needs: [check-release, cli-profile]
+    # Runs when the profile job fails; the CLI builds then use the committed profile.
+    if: >-
+      !cancelled() && needs.check-release.outputs.should_release == 'true' &&
+      needs.check-release.outputs.reuse_artifacts != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -163,7 +212,8 @@ jobs:
             llvm_asset: LLVM-22.1.8-Linux-X64
             use_zig: true
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # The Intel macOS build took 24 minutes for 0.3.2 and passed 30 for 0.3.3.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -218,6 +268,12 @@ jobs:
           Move-Item "$expanded\clang+llvm-22.1.8-x86_64-pc-windows-msvc" $llvm
           echo "LLVM_DIR=$llvm\lib\cmake\llvm" >> $env:GITHUB_ENV
           echo "$llvm\bin" >> $env:GITHUB_PATH
+      # A musl CLI ships tsc-ts's musl executable, and these jobs run on glibc
+      # runners, where pnpm installs only the glibc platform packages.
+      - name: Let pnpm install musl platform packages
+        if: endsWith(matrix.cli_target, '-musl')
+        run: |
+          printf 'supportedArchitectures:\n  libc: [current, musl]\n' >> pnpm-workspace.yaml
       - run: pnpm install --frozen-lockfile
       - name: Build native packages (POSIX)
         if: matrix.platform != 'windows-x64'
@@ -236,6 +292,28 @@ jobs:
       - name: Build host helper for cross-libc bootstrap
         if: matrix.seed_helper != ''
         run: pnpm --filter @scriptc/${{ matrix.seed_helper }} build:native
+      - name: Download the profile collected on this commit
+        id: cli-profile
+        if: matrix.cli != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-profile
+          path: ${{ runner.temp }}/cli-profile
+      # Without the artifact, SCRIPTC_NATIVE_PROFILE_USE stays unset and
+      # build-native-cli.mts uses the committed profile.
+      - name: Select the native compiler profile
+        if: matrix.cli != ''
+        shell: bash
+        env:
+          COLLECTED: ${{ steps.cli-profile.outcome == 'success' && format('{0}/cli-profile/cli.profdata.gz', runner.temp) || '' }}
+        run: |
+          if [ -n "$COLLECTED" ]; then
+            echo "SCRIPTC_NATIVE_PROFILE_USE=$COLLECTED" >> "$GITHUB_ENV"
+            echo "The native CLI builds with the profile collected on $GITHUB_SHA"
+          else
+            echo "::warning::No profile was collected on this commit; the native CLI builds with the committed profile"
+          fi
       - name: Build native CLI distribution
         if: matrix.cli != ''
         env:
@@ -380,7 +458,7 @@ jobs:
       - name: Check version sync
         run: |
           VERSION="${{ needs.check-release.outputs.version }}"
-          for pkg in packages/runtime packages/runtime-* packages/llvm-* packages/compiler packages/cli packages/cli-*; do
+          for pkg in packages/runtime packages/runtime-* packages/llvm-* packages/compiler packages/experimental packages/threads packages/types packages/cli packages/cli-*; do
             if [ "$(node -p "require('./$pkg/package.json').private === true")" = "true" ]; then
               continue
             fi
@@ -477,6 +555,9 @@ jobs:
           publish_dir packages/llvm-win32-x64-msvc
           for pkg in packages/cli-*; do publish_dir "$pkg"; done
           publish_dir packages/compiler
+          publish_dir packages/experimental
+          publish_dir packages/threads
+          publish_dir packages/types
           publish_dir packages/cli
           echo "All package uploads accepted; npm registry propagation may continue after this job." >> "$GITHUB_STEP_SUMMARY"
 
@@ -547,6 +628,21 @@ jobs:
 
       - name: Package standalone compilers
         run: node scripts/package-native-cli.mjs packages /tmp/scriptc-release-assets
+
+      # The profile the native CLIs were built with. Runs that reuse native
+      # builds from before the cli-profile job, or whose profile job failed,
+      # have none; their CLIs used the committed profile.
+      - name: Download the native compiler profile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN: ${{ needs.check-release.outputs.artifact_run }}
+          VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          if gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name cli-profile --dir "$RUNNER_TEMP/cli-profile"; then
+            mv "$RUNNER_TEMP/cli-profile/cli.profdata.gz" "/tmp/scriptc-release-assets/scriptc-$VERSION-cli.profdata.gz"
+          else
+            echo "Run $RUN has no cli-profile artifact"
+          fi
 
       - name: Create GitHub Release
         run: |

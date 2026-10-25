@@ -5,10 +5,19 @@ import type { SourceFile } from "./ast-types.js";
 import { Ts7SourceCache, type Ts7SnapshotChanges } from "./session-cache.js";
 
 const require = createRequire(import.meta.url);
-const { SourceFileCache } = require(join(dirname(require.resolve("typescript/package.json")), "dist/api/sourceFileCache.js")) as {
+const { SourceFileCache } = require(
+  join(dirname(require.resolve("typescript/package.json")), "dist/api/sourceFileCache.js"),
+) as {
   SourceFileCache: new () => {
     getRetained(path: string, snapshot: number, project: string): SourceFile | undefined;
-    set(path: string, file: SourceFile, options: string, hash: string, snapshot: number, project: string): SourceFile;
+    set(
+      path: string,
+      file: SourceFile,
+      options: string,
+      hash: string,
+      snapshot: number,
+      project: string,
+    ): SourceFile;
     retainForSnapshot(snapshot: number, previous: number, changes?: Ts7SnapshotChanges): void;
     releaseSnapshot(snapshot: number): void;
     clear(): void;
@@ -46,8 +55,13 @@ test("the cache separates content, parser options, paths and retention owners", 
 
 test("project-specific edits and removals preserve other projects and old snapshots", () => {
   const cache = new Ts7SourceCache();
-  for (const project of ["/a", "/b", "/removed"]) for (const path of ["/changed", "/deleted", "/stable"]) cache.set(path, source(path), 1, project);
-  cache.retain(2, 1, { changedProjects: { "/a": { changedFiles: ["/changed"], deletedFiles: ["/deleted"] } }, removedProjects: ["/removed"] });
+  for (const project of ["/a", "/b", "/removed"])
+    for (const path of ["/changed", "/deleted", "/stable"])
+      cache.set(path, source(path), 1, project);
+  cache.retain(2, 1, {
+    changedProjects: { "/a": { changedFiles: ["/changed"], deletedFiles: ["/deleted"] } },
+    removedProjects: ["/removed"],
+  });
   expect(cache.get("/changed", 2, "/a")).toBeUndefined();
   expect(cache.get("/deleted", 2, "/a")).toBeUndefined();
   expect(cache.get("/stable", 2, "/a")).toBe(cache.get("/stable", 1, "/a"));
@@ -67,25 +81,47 @@ test("retention and eviction agree with the pinned SDK through interleaved snaps
   const projects = ["/one.json", "/two.json", "/three.json"];
   const paths = ["/a.ts", "/b.ts", "/c.ts"];
   let seed = 117;
-  const random = () => { seed = (seed * 16807) % 2147483647; return seed; };
+  const random = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed;
+  };
   for (let snapshot = 1; snapshot <= 15; snapshot++) {
-    const changes: Ts7SnapshotChanges = { changedProjects: { "/one.json": { changedFiles: [paths[random() % 3]!] } }, removedProjects: snapshot % 4 === 0 ? ["/three.json"] : [] };
+    const changes: Ts7SnapshotChanges = {
+      changedProjects: { "/one.json": { changedFiles: [paths[random() % 3]!] } },
+      removedProjects: snapshot % 4 === 0 ? ["/three.json"] : [],
+    };
     cache.retain(snapshot, snapshot - 1, changes);
     sdk.retainForSnapshot(snapshot, snapshot - 1, changes);
-    for (const project of projects) for (const path of paths) {
-      if (cache.get(path, snapshot, project) !== undefined) continue;
-      const file = source(String(random() % 4), String(random() % 2));
-      expect(cache.set(path, file, snapshot, project)).toBe(sdk.set(path, file, file.file.wire.parseOptionsKey, file.file.wire.contentHash, snapshot, project));
-    }
+    for (const project of projects)
+      for (const path of paths) {
+        if (cache.get(path, snapshot, project) !== undefined) continue;
+        const file = source(String(random() % 4), String(random() % 2));
+        expect(cache.set(path, file, snapshot, project)).toBe(
+          sdk.set(
+            path,
+            file,
+            file.file.wire.parseOptionsKey,
+            file.file.wire.contentHash,
+            snapshot,
+            project,
+          ),
+        );
+      }
     if (snapshot > 2) {
-      const release = random() % (snapshot - 1) + 1;
+      const release = (random() % (snapshot - 1)) + 1;
       cache.release(release);
       sdk.releaseSnapshot(release);
     }
-    for (let id = 1; id <= snapshot; id++) for (const project of projects) for (const path of paths) expect(cache.get(path, id, project)).toBe(sdk.getRetained(path, id, project));
+    for (let id = 1; id <= snapshot; id++)
+      for (const project of projects)
+        for (const path of paths)
+          expect(cache.get(path, id, project)).toBe(sdk.getRetained(path, id, project));
     expect(cache.size).toBe(sdk.size);
   }
-  for (let id = 1; id <= 15; id++) { cache.release(id); sdk.releaseSnapshot(id); }
+  for (let id = 1; id <= 15; id++) {
+    cache.release(id);
+    sdk.releaseSnapshot(id);
+  }
   expect(cache.size).toBe(sdk.size);
   expect(cache.size).toBe(0);
 });

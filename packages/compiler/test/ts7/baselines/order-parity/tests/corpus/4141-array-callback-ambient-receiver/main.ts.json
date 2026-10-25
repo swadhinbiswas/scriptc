@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4141-array-callback-ambient-receiver/peek.mjs",
+  "<repo>/tests/corpus/4141-array-callback-ambient-receiver/mapper.ts",
+  "<repo>/tests/corpus/4141-array-callback-ambient-receiver/holder.mjs",
+  "<repo>/tests/corpus/4141-array-callback-ambient-receiver/main.ts"
+ ],
+ "diags": []
+}

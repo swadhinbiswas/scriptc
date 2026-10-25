@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5628-promisify-timers.ts"
+ ],
+ "diags": []
+}

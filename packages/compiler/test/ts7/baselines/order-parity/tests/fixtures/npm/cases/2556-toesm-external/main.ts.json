@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/2556-toesm-external/main.ts"
+ ],
+ "diags": []
+}

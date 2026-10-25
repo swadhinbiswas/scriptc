@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/native-object-for-in-minimal.js"
+ ],
+ "diags": []
+}

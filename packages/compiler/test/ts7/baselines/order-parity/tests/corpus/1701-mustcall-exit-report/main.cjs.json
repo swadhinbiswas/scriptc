@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1701-mustcall-exit-report/common.cjs",
+  "<repo>/tests/corpus/1701-mustcall-exit-report/main.cjs"
+ ],
+ "diags": []
+}

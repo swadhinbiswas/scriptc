@@ -1,0 +1,17 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/strictness/null-floor/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0002",
+   "message": "this project's tsconfig disables strictNullChecks, which scriptc requires (null and undefined are modeled as distinct static types; without the knob every type implicitly includes them)",
+   "loc": {
+    "file": "<repo>/tests/fixtures/strictness/null-floor/tsconfig.json",
+    "start": 0,
+    "end": 0
+   },
+   "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
+  }
+ ]
+}

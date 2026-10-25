@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-deferred-field-initializers.js"
+ ],
+ "diags": []
+}

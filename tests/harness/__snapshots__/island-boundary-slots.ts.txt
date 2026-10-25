@@ -1,8 +1,0 @@
-island-boundary-slots.ts:9:12 - error SC1100: passing 'any'-typed values where '() => void' is expected (argument 1 of timers.setTimeout) is not supported yet
-
-   8 | const cb: any = () => {};
-   9 | setTimeout(cb, 1);
-     |            ^~
-  10 | 
-
-  hint: validate with 'as <type>' first — the cast checks the dynamic value at runtime and throws on mismatch

@@ -56,6 +56,7 @@ function writeBinHeader(buffer: Uint8Array, offset: number, length: number): num
  * would let one request consume another request's response. */
 export class Ts7Wire {
   private readonly input = new Uint8Array(65536);
+  private readonly output = new Uint8Array(4096);
   private inputOffset = 0;
   private inputLength = 0;
   private closed = false;
@@ -65,8 +66,14 @@ export class Ts7Wire {
     readonly maxPayloadBytes = 512 * 1024 * 1024,
     readonly maxMethodBytes = 65536,
   ) {
-    if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes < 0 || maxPayloadBytes > 0xffffffff ||
-        !Number.isSafeInteger(maxMethodBytes) || maxMethodBytes < 0 || maxMethodBytes > 0xffffffff) {
+    if (
+      !Number.isSafeInteger(maxPayloadBytes) ||
+      maxPayloadBytes < 0 ||
+      maxPayloadBytes > 0xffffffff ||
+      !Number.isSafeInteger(maxMethodBytes) ||
+      maxMethodBytes < 0 ||
+      maxMethodBytes > 0xffffffff
+    ) {
       throw new RangeError("TypeScript API frame limits must be unsigned 32-bit lengths");
     }
   }
@@ -85,7 +92,11 @@ export class Ts7Wire {
 
   private fail(message: string): never {
     // Preserve the protocol failure if cleanup also fails.
-    try { this.close(); } catch { /* cleanup cannot repair framing */ }
+    try {
+      this.close();
+    } catch {
+      /* cleanup cannot repair framing */
+    }
     throw new Ts7ProtocolError(message);
   }
 
@@ -111,7 +122,11 @@ export class Ts7Wire {
       length = this.readByte() * 256 + this.readByte();
     } else if (marker === 0xc6) {
       // Arithmetic keeps the unsigned upper half positive.
-      length = this.readByte() * 16777216 + this.readByte() * 65536 + this.readByte() * 256 + this.readByte();
+      length =
+        this.readByte() * 16777216 +
+        this.readByte() * 65536 +
+        this.readByte() * 256 +
+        this.readByte();
     } else {
       this.fail(`expected binary ${label}, got marker ${marker}`);
     }
@@ -131,7 +146,8 @@ export class Ts7Wire {
         offset += take;
       } else if (length - offset >= this.input.length) {
         const count = this.io.read(result, offset, length - offset);
-        if (!Number.isSafeInteger(count) || count < 0 || count > length - offset) this.fail("invalid read count");
+        if (!Number.isSafeInteger(count) || count < 0 || count > length - offset)
+          this.fail("invalid read count");
         if (count === 0) this.fail("unexpected end of stream");
         offset += count;
       } else {
@@ -141,11 +157,12 @@ export class Ts7Wire {
     return result;
   }
 
-  private writeBytes(bytes: Uint8Array): void {
+  private writeBytes(bytes: Uint8Array, length: number): void {
     let offset = 0;
-    while (offset < bytes.length) {
-      const count = this.io.write(bytes, offset, bytes.length - offset);
-      if (!Number.isSafeInteger(count) || count <= 0 || count > bytes.length - offset) this.fail("invalid write count");
+    while (offset < length) {
+      const count = this.io.write(bytes, offset, length - offset);
+      if (!Number.isSafeInteger(count) || count <= 0 || count > length - offset)
+        this.fail("invalid write count");
       offset += count;
     }
   }
@@ -160,30 +177,51 @@ export class Ts7Wire {
       if (kind < TS7_REQUEST || kind > TS7_CALLBACK) this.fail(`invalid message kind ${kind}`);
       const name = this.readBytes(this.readLength(this.maxMethodBytes, "method"));
       const payload = this.readBytes(this.readLength(this.maxPayloadBytes, "payload"));
-      return { kind, method: Buffer.from(name).toString("utf8"), payload };
+      return {
+        kind,
+        method: Buffer.from(name.buffer, name.byteOffset, name.byteLength).toString("utf8"),
+        payload,
+      };
     } catch (error) {
-      try { this.close(); } catch { /* preserve the original read failure */ }
+      try {
+        this.close();
+      } catch {
+        /* preserve the original read failure */
+      }
       throw error;
     }
   }
 
   write(kind: number, method: string, payload: Uint8Array): void {
     this.ensureOpen();
-    if (!Number.isInteger(kind) || kind < TS7_REQUEST || kind > TS7_CALLBACK) throw new Ts7ProtocolError(`invalid message kind ${kind}`);
+    if (!Number.isInteger(kind) || kind < TS7_REQUEST || kind > TS7_CALLBACK)
+      throw new Ts7ProtocolError(`invalid message kind ${kind}`);
     const name = Buffer.from(method, "utf8");
-    if (name.length > this.maxMethodBytes || payload.length > this.maxPayloadBytes) throw new Ts7ProtocolError("outgoing frame exceeds channel limits");
-    const header = new Uint8Array(2 + binHeaderSize(name.length) + name.length + binHeaderSize(payload.length));
+    if (name.length > this.maxMethodBytes || payload.length > this.maxPayloadBytes)
+      throw new Ts7ProtocolError("outgoing frame exceeds channel limits");
+    const headerLength =
+      2 + binHeaderSize(name.length) + name.length + binHeaderSize(payload.length);
+    const length = headerLength + payload.length;
+    // Small synchronous requests need one transfer and reuse bounded
+    // framing storage. Large payloads keep the direct, uncopied write path.
+    const combined = length <= this.output.length;
+    const header = combined ? this.output : new Uint8Array(headerLength);
     header[0] = 0x93;
     header[1] = kind;
     let offset = writeBinHeader(header, 2, name.length);
     header.set(name, offset);
     offset += name.length;
     writeBinHeader(header, offset, payload.length);
+    if (combined) header.set(payload, headerLength);
     try {
-      this.writeBytes(header);
-      this.writeBytes(payload);
+      this.writeBytes(header, combined ? length : headerLength);
+      if (!combined) this.writeBytes(payload, payload.length);
     } catch (error) {
-      try { this.close(); } catch { /* preserve the original write failure */ }
+      try {
+        this.close();
+      } catch {
+        /* preserve the original write failure */
+      }
       throw error;
     }
   }

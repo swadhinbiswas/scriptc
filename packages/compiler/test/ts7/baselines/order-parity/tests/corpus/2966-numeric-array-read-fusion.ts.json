@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2966-numeric-array-read-fusion.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5752-string-number-concat.ts"
+ ],
+ "diags": []
+}

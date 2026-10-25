@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3074-discriminated-intersections.ts"
+ ],
+ "diags": []
+}

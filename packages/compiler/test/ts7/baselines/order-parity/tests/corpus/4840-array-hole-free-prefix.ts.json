@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4840-array-hole-free-prefix.ts"
+ ],
+ "diags": []
+}

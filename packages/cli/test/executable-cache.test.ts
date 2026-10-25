@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import { precompiledRuntimePackTarget } from "../../compiler/src/startup-cache.js";
 import { platformLinkerSupportsPersistentCache } from "../../compiler/src/backend/linker.js";
+import { toolchainEnvironmentCachePolicy } from "../../compiler/src/backend/toolchain-environment.js";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -14,7 +15,8 @@ const repoRoot = join(import.meta.dirname, "../../..");
 const cliEntry = join(repoRoot, "packages/cli/src/main.ts");
 const tsxLoader = join(dirname(require.resolve("tsx/package.json")), "dist/loader.mjs");
 const helperTarget = precompiledRuntimePackTarget();
-const persistentExecutable = helperTarget === null || platformLinkerSupportsPersistentCache(process.env, helperTarget);
+const persistentExecutable =
+  helperTarget === null || platformLinkerSupportsPersistentCache(process.env, helperTarget);
 
 test("exact executable repeats skip lowering while edits and damaged outputs stay correct", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-cli-executable-cache-"));
@@ -86,10 +88,73 @@ test("exact executable repeats skip lowering while edits and damaged outputs sta
     expect(await run()).toBe("two\n");
     expect((await build(["--optimization", "dev"])).stderr).not.toContain("scriptc lowering");
     expect(await readFile(tuPath, "utf8")).toContain("define i32 @main");
+
+    // Speed shares release's -O2 class but links different code: it can
+    // consume neither the release nor the dev entry, and neither can
+    // consume its entry afterwards.
+    expect((await build(["--optimization", "speed"])).stderr).toContain("scriptc lowering");
+    expect(await run()).toBe("two\n");
+    expect((await build(["--optimization", "speed"])).stderr).not.toContain("scriptc lowering");
+    expect((await build(["--optimization", "release"])).stderr).not.toContain("scriptc lowering");
+    expect(await run()).toBe("two\n");
+    expect((await build(["--optimization", "speed"])).stderr).not.toContain("scriptc lowering");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }, 120_000);
+
+// Sanitize builds compile the LLVM text with the C driver rather than linking a precompiled
+// runtime pack, and that route's native cache proof records the output directory.
+test.skipIf(process.platform === "win32")(
+  "sanitize builds compile uncached and keep the executable on unchanged repeats",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cli-executable-sanitize-"));
+    const cacheRoot = join(dir, "cache");
+    const entry = join(dir, "main.ts");
+    const outPath = join(dir, "program");
+    const build = async (env: NodeJS.ProcessEnv = {}): Promise<{ stderr: string }> => {
+      const { stderr } = await execFileAsync(
+        process.execPath,
+        ["--import", tsxLoader, cliEntry, "build", entry, "--sanitize", "-o", outPath],
+        {
+          env: { ...process.env, SCRIPTC_CACHE_DIR: cacheRoot, SCRIPTC_TIMING: "1", ...env },
+          maxBuffer: 4 * 1024 * 1024,
+        },
+      );
+      return { stderr };
+    };
+    const run = async (): Promise<string> =>
+      (await execFileAsync(outPath, [], { maxBuffer: 1024 * 1024 })).stdout;
+    try {
+      await mkdir(cacheRoot, { mode: 0o700 });
+      await writeFile(entry, 'console.log("sanitized");\n');
+
+      // With the native cache off, clang compiles the build's private copy of the LLVM text.
+      await build({ SCRIPTC_NO_CACHE: "1" });
+      expect(await run()).toBe("sanitized\n");
+
+      expect((await build()).stderr).toContain("scriptc lowering");
+      expect(await run()).toBe("sanitized\n");
+      const built = await stat(outPath);
+      const tuTime = (await stat(join(dir, "main.ll"))).mtimeMs;
+
+      // The output directory does not change after the native cache proof is recorded, so an
+      // unchanged repeat keeps the executable instead of linking it again.
+      expect((await build()).stderr).not.toContain("scriptc lowering");
+      if (toolchainEnvironmentCachePolicy(process.env).completeArtifacts) {
+        const repeated = await stat(outPath);
+        expect(repeated.ino).toBe(built.ino);
+        expect(repeated.mtimeMs).toBe(built.mtimeMs);
+      }
+      expect(await run()).toBe("sanitized\n");
+      expect((await stat(join(dir, "main.ll"))).mtimeMs).toBe(tuTime);
+      expect((await readdir(dir)).sort()).toEqual(["cache", "main.ll", "main.ts", "program"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+  240_000,
+);
 
 test.skipIf(process.platform === "win32")(
   "an executable appearing earlier on unchanged PATH invalidates the early binary",

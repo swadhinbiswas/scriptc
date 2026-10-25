@@ -1,25 +1,66 @@
+import { keyedHelperName } from "./stable-names.js";
+import { dynUndefinedExpr, boolLit } from "../../ir/build.js";
 /* The dgram/dns-surface lowering (node:dgram + node:dns — a spoke module
  * like lower-server.ts): module-function calls (dgram createSocket, dns
- * lookup), method calls on dgramSocket receivers (bind/connect/send/
- * address/close/unref/ref and the message/listening/close/connect/error
- * events), and the AddressInfo record materialization behind address().
- * Everything the lib declares beyond these shapes fences member-qualified
- * — never a generic rejection, never silence. Multicast has no lowering
- * (portless's mDNS publishes through dns-sd/avahi child processes, not
- * dgram multicast); its members fence with a named hint. */
+ * lookup), method calls on dgramSocket receivers (bind/connect/
+ * disconnect/send/address/close/unref/ref, the socket options in
+ * DGRAM_OPTIONS and the message/listening/close/connect/error events), and
+ * the AddressInfo record materialization behind address(). Everything the
+ * lib declares beyond these shapes fences member-qualified — never a
+ * generic rejection, never silence. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { ladderFenceExpr } from "./lowerer.js";
 import { isJsSourceFile, locOf } from "../program.js";
-import { BOOL, canBoxFuncIntoDyn, DGRAMSOCK_T, DYN, F64, type IrExpr, type IrLibFn, type IrType, type SrcLoc, STRING, UNDEFINED_T, VOID } from "../../ir/ir.js";
-import { DNS_LOOKUP_DOCUMENTED_OPTIONS, fenceOrDropOptionKey } from "./surfaces.js";
-import { boolLit } from "../../ir/build.js";
+import {
+  BOOL,
+  canBoxFuncIntoDyn,
+  canDynCheckTo,
+  typeKey,
+  DGRAMSOCK_T,
+  DYN,
+  F64,
+  type IrExpr,
+  type IrLibFn,
+  type IrType,
+  type SrcLoc,
+  STRING,
+  VOID,
+} from "../../ir/ir.js";
 import { resultIsDiscarded } from "./call-position.js";
 import { lowerCallbackArg as lowerCallbackArgShared } from "./callback-arg.js";
+import { documentedParameter } from "./call-signatures.js";
 
 const DGRAM_SURFACE_HINT =
-  "bind, connect, send, address, close, unref/ref, and on/once of " +
-  "message/listening/close/connect/error are the supported dgram.Socket members";
+  "bind, connect, disconnect, send, address, close, unref/ref, the socket " +
+  "options, and on/once of message/listening/close/connect/error are the " +
+  "supported dgram.Socket members";
+
+/** The IR type each declared parameter type lowers to. */
+const DGRAM_OPTION_PARAMS = { boolean: BOOL, number: F64, string: STRING } as const;
+
+/** The socket options: each takes fixed typed arguments (the trailing
+ * `optional` count may be omitted) and calls one runtime function. A
+ * `value` result answers what the runtime returns; the others are
+ * statements, like Node's undefined. */
+const DGRAM_OPTIONS: Record<
+  string,
+  { fn: IrLibFn; params: (keyof typeof DGRAM_OPTION_PARAMS)[]; optional?: number; value?: IrType }
+> = {
+  setBroadcast: { fn: "dgram.setBroadcast", params: ["boolean"] },
+  setTTL: { fn: "dgram.setTTL", params: ["number"], value: F64 },
+  setMulticastTTL: { fn: "dgram.setMulticastTTL", params: ["number"], value: F64 },
+  setMulticastLoopback: { fn: "dgram.setMulticastLoopback", params: ["boolean"], value: BOOL },
+  setMulticastInterface: { fn: "dgram.setMulticastInterface", params: ["string"] },
+  addMembership: { fn: "dgram.addMembership", params: ["string", "string"], optional: 1 },
+  dropMembership: { fn: "dgram.dropMembership", params: ["string", "string"], optional: 1 },
+  getRecvBufferSize: { fn: "dgram.getRecvBufferSize", params: [], value: F64 },
+  getSendBufferSize: { fn: "dgram.getSendBufferSize", params: [], value: F64 },
+  setRecvBufferSize: { fn: "dgram.setRecvBufferSize", params: ["number"] },
+  setSendBufferSize: { fn: "dgram.setSendBufferSize", params: ["number"] },
+  getSendQueueSize: { fn: "dgram.getSendQueueSize", params: [], value: F64 },
+  getSendQueueCount: { fn: "dgram.getSendQueueCount", params: [], value: F64 },
+  disconnect: { fn: "dgram.disconnect", params: [] },
+};
 
 /** Dgram's callback policy: validate every positional parameter and require
  * callbacks to return void; raw dyn values adapt only to zero-arg slots. */
@@ -54,31 +95,30 @@ function requireStatementPosition(lowerer: Lowerer, call: ts.CallExpression, wha
  * return, at most `maxParams` parameters, each parameter's IR kind
  * satisfying `paramOk` (indexed). The lower-server helper's shape,
  * re-stated here so the spoke stays self-contained. */
-/** True iff `t` is the `Error | null` union — dns.lookup's first callback
- * parameter (NodeJS.ErrnoException maps to %Error in type-mapper.ts). */
-function isErrorOrNullUnion(lowerer: Lowerer, t: IrType): boolean {
-  if (t.kind !== "union") return false;
-  const def = lowerer.unions.get(t.unionId);
-  if (!def || def.arms.length !== 2) return false;
-  const hasNull = def.arms.some((a) => a.kind === "nullT");
-  const hasError = def.arms.some((a) => a.kind === "object" && a.className === "%Error");
-  return hasNull && hasError;
-}
-
 /** True iff `t` is a record of exactly the given (name-sorted) string/f64
  * fields — the AddressInfo/RemoteInfo shape check. */
-function isRecordOfFields(lowerer: Lowerer, t: IrType, fields: [string, "string" | "f64"][]): boolean {
+function isRecordOfFields(
+  lowerer: Lowerer,
+  t: IrType,
+  fields: [string, "string" | "f64"][],
+): boolean {
   if (t.kind !== "record") return false;
   const shape = lowerer.shapes.get(t.shapeId);
-  if (!shape || shape.tuple || shape.indexValue || shape.fields.length !== fields.length) return false;
+  if (!shape || shape.tuple || shape.indexValue || shape.fields.length !== fields.length)
+    return false;
   return shape.fields.every((f, i) => f.name === fields[i]![0] && f.type.kind === fields[i]![1]);
 }
 
 const ADDRINFO_FIELDS: [string, "string" | "f64"][] = [
-  ["address", "string"], ["family", "string"], ["port", "f64"],
+  ["address", "string"],
+  ["family", "string"],
+  ["port", "f64"],
 ];
 const RINFO_FIELDS: [string, "string" | "f64"][] = [
-  ["address", "string"], ["family", "string"], ["port", "f64"], ["size", "f64"],
+  ["address", "string"],
+  ["family", "string"],
+  ["port", "f64"],
+  ["size", "f64"],
 ];
 
 /** Module-function calls on dgram/dns import bindings (named imports AND
@@ -86,12 +126,16 @@ const RINFO_FIELDS: [string, "string" | "f64"][] = [
  * reuseAddr? }), dns.lookup(hostname, { family: 4 }, cb). Null for other
  * modules (the caller falls through); every dgram/dns member lands here —
  * unlowered ones fence with their module-qualified name. */
-export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
+export function lowerDgramDnsModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
   bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr | null {
+  loc: SrcLoc,
+): IrExpr | null {
   if (bi.module === "dns") return lowerDnsModuleCall(lowerer, expr, bi, loc);
+  if (bi.module === "dns/promises") return lowerDnsPromisesCall(lowerer, expr, bi, loc);
   if (bi.module !== "dgram") return null;
-  const args = expr.arguments;
+  const args = expr.arguments.nodes;
   if (bi.member === "createSocket") {
     if (args.length !== 1) {
       lowerer.noLowering(
@@ -105,12 +149,19 @@ export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpressio
     const argT = lowerer.typeOf(arg);
     if (argT.isStringLiteralType()) {
       if (argT.value !== "udp4") {
-        lowerer.noLowering(`createSocket("${argT.value}")`, arg, '"udp4" is the supported socket type');
+        lowerer.noLowering(
+          `createSocket("${argT.value}")`,
+          arg,
+          '"udp4" is the supported socket type',
+        );
       }
       lowerer.lowerExpr(arg); // side-effect order (a call producing the literal type)
       return {
-        kind: "libCall", fn: "dgram.createSocket",
-        args: [boolLit(false, loc)], type: DGRAMSOCK_T, loc,
+        kind: "libCall",
+        fn: "dgram.createSocket",
+        args: [boolLit(false, loc)],
+        type: DGRAMSOCK_T,
+        loc,
       };
     }
     // createSocket({ type: "udp4", reuseAddr?: <bool> }) — an OBJECT
@@ -124,7 +175,7 @@ export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpressio
     }
     let sawType = false;
     let reuseAddr: IrExpr | null = null;
-    for (const prop of arg.properties) {
+    for (const prop of arg.properties.nodes) {
       if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) {
         lowerer.noLowering(
           "createSocket options with computed keys, spreads, or shorthand entries",
@@ -145,14 +196,18 @@ export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpressio
         sawType = true;
       } else if (name === "reuseAddr") {
         reuseAddr = lowerer.lowerExprExpecting(prop.initializer, BOOL);
-      } else if (name === "signal" && isJsSourceFile(expr.getSourceFile())) {
+      } else if (name === "signal" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         // A provably-non-AbortSignal signal (the invalid-input probes:
         // strings, numbers, plain records) throws Node's
         // validateAbortSignal ladder; plausible signal values keep the
         // fence — abort-driven close has no lowering yet.
         const raw = lowerer.lowerExpr(prop.initializer);
-        const provablyNot = raw.type.kind === "string" || raw.type.kind === "f64" ||
-          raw.type.kind === "bool" || raw.type.kind === "record" || raw.type.kind === "array" ||
+        const provablyNot =
+          raw.type.kind === "string" ||
+          raw.type.kind === "f64" ||
+          raw.type.kind === "bool" ||
+          raw.type.kind === "record" ||
+          raw.type.kind === "array" ||
           ts.isObjectLiteralExpression(prop.initializer);
         if (provablyNot && lowerer.dynConvertible(raw.type)) {
           return {
@@ -188,8 +243,11 @@ export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpressio
       );
     }
     return {
-      kind: "libCall", fn: "dgram.createSocket",
-      args: [reuseAddr ?? boolLit(false, loc)], type: DGRAMSOCK_T, loc,
+      kind: "libCall",
+      fn: "dgram.createSocket",
+      args: [reuseAddr ?? boolLit(false, loc)],
+      type: DGRAMSOCK_T,
+      loc,
     };
   }
   lowerer.noLowering(
@@ -200,102 +258,295 @@ export function lowerDgramDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpressio
   );
 }
 
-/** dns.lookup(hostname, { family: 4 }, (err, address[, family]) => ...) —
- * the ONE lowered dns member. getaddrinfo runs at call time; the callback
- * defers to the next loop turn (SEMANTICS.md documents the split). */
-function lowerDnsModuleCall(lowerer: Lowerer, expr: ts.CallExpression,
-  bi: { module: string; member: string },
-  loc: SrcLoc,): IrExpr {
-  if (bi.member !== "lookup") {
-    lowerer.noLowering(
-      `dns.${bi.member}`,
-      expr,
-      "lookup is the lowered dns module function",
-      ts.isIdentifier(expr.expression) ? lowerer.resolveValueSymbol(expr.expression) : undefined,
-    );
+/** A dns callback the runtime calls through the checked-dynamic boundary:
+ * a dyn function as is, or a typed function boxed with per-argument
+ * checks. */
+function lowerDnsCallback(lowerer: Lowerer, node: ts.Expression, what: string): IrExpr {
+  const cb = lowerer.lowerExpr(node);
+  if (cb.type.kind === "dyn") return cb;
+  if (
+    cb.type.kind === "func" &&
+    canBoxFuncIntoDyn(
+      cb.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
+    return { kind: "dynFrom", value: cb, type: DYN, loc: locOf(node) };
   }
-  requireStatementPosition(lowerer, expr, "dns.lookup(...)");
-  const args = expr.arguments;
-  if (args.length !== 3) {
-    lowerer.noLowering(
-      `lookup with ${args.length} arguments`,
-      expr,
-      "the supported form is lookup(hostname, { family: 4 }, callback)",
-    );
-  }
-  const hostname = lowerer.lowerExprExpecting(args[0]!, STRING);
-  // The options: an object literal whose one meaningful entry is the
-  // IPv4 pin — `{ family: 4 }`. Node's family-less and family-6 lookups
-  // have no lowering (the runtime resolves over getaddrinfo/AF_INET).
-  const opts = args[1]!;
-  if (!ts.isObjectLiteralExpression(opts)) {
-    lowerer.noLowering(
-      "lookup with a non-literal options argument",
-      opts,
-      "pass the options as an object literal: lookup(hostname, { family: 4 }, cb)",
-    );
-  }
-  let family: IrExpr | null = null;
-  for (const prop of opts.properties) {
-    if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) {
-      lowerer.noLowering(
-        "lookup options with computed keys, spreads, or shorthand entries",
-        prop,
-        "each option must be a plain `name: value` entry with a literal key",
-      );
-    }
-    if (prop.name.text !== "family") {
-      // The options-record stance: hints/all/order/verbatim are
-      // documented dns.lookup knobs with no lowering — they fence by
-      // name; undocumented keys drop like Node drops them.
-      fenceOrDropOptionKey(
-        lowerer, prop, prop.name.text, "lookup", DNS_LOOKUP_DOCUMENTED_OPTIONS,
-        "family: 4 is the supported option",
-        {
-          all: "the all-addresses callback shape has no lowering — the lowered callback is (err, address, family) over one IPv4 answer",
-        },
-      );
-      continue; // an undocumented key, dropped like Node drops it
-    }
-    const t = lowerer.typeOf(prop.initializer);
-    if (!t.isNumberLiteralType() || t.value !== 4) {
-      lowerer.noLowering(
-        "lookup with a family other than the literal 4",
-        prop.initializer,
-        "IPv4 lookups ({ family: 4 }) are the supported form",
-      );
-    }
-    family = lowerer.lowerExprExpecting(prop.initializer, F64);
-  }
-  if (!family) {
-    lowerer.noLowering(
-      "lookup options without a family",
-      opts,
-      "the supported form is lookup(hostname, { family: 4 }, cb)",
-    );
-  }
-  const { cb } = lowerCallbackArg(
-    lowerer, args[2]!, "lookup callbacks", 3,
-    (p, i) =>
-      i === 0 ? isErrorOrNullUnion(lowerer, p)
-      : i === 1 ? p.kind === "string"
-      : p.kind === "f64",
-    "use (err, address) — err is Error | null, address a string",
+  lowerer.noLowering(
+    `${what} that cannot cross the checked-dynamic boundary`,
+    node,
+    "the callback's parameters must have checked-dynamic conversions",
   );
-  return { kind: "libCall", fn: "dns.lookup", args: [hostname, family, cb], type: VOID, loc };
+}
+
+/** node:dns/promises calls (and dns.promises members): lookup(hostname[,
+ * options]) and lookupService(address, port) as promises over the callback
+ * forms' runtime (argument errors throw synchronously, as Node validates
+ * before it creates the promise), plus the shared getServers and result
+ * order functions. A typed result (Promise<LookupAddress>) checks the
+ * settled value through the checked-dynamic boundary. */
+function lowerDnsPromisesCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  bi: { module: string; member: string },
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
+  const dyn = (node: ts.Expression): IrExpr =>
+    lowerer.coerceToExpected(lowerer.lowerExpr(node), DYN);
+  if (bi.member === "lookup" || bi.member === "lookupService") {
+    const service = bi.member === "lookupService";
+    if (service ? args.length !== 2 : args.length !== 1 && args.length !== 2) {
+      lowerer.noLowering(
+        `dnsPromises.${bi.member} with ${args.length} arguments`,
+        expr,
+        service
+          ? "the form is lookupService(address, port)"
+          : "the supported forms are lookup(hostname) and lookup(hostname, options)",
+      );
+    }
+    const promise: IrExpr = {
+      kind: "libCall",
+      fn: service ? "dns.promisesLookupService" : "dns.promisesLookup",
+      args: [dyn(args[0]!), args.length === 2 ? dyn(args[1]!) : dynUndefinedExpr(loc)],
+      type: { kind: "promise", inner: DYN },
+      loc,
+    };
+    const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+    if (declared === null || declared.kind !== "promise" || declared.inner.kind === "dyn") {
+      return promise;
+    }
+    return checkedDynPromise(lowerer, promise, declared, expr, loc);
+  }
+  if (["getServers", "getDefaultResultOrder", "setDefaultResultOrder"].includes(bi.member)) {
+    return lowerDnsModuleCall(lowerer, expr, { module: "dns", member: bi.member }, loc);
+  }
+  lowerer.noLowering(
+    `dnsPromises.${bi.member}`,
+    expr,
+    "lookup, lookupService, getServers, getDefaultResultOrder, and setDefaultResultOrder are the lowered dns/promises functions",
+    ts.isIdentifier(expr.expression) ? lowerer.resolveValueSymbol(expr.expression) : undefined,
+  );
+}
+
+/** A promise<dyn> as the call site's typed promise: an interned async
+ * helper awaits it and checks the settled value into the declared inner
+ * type (a mismatch rejects with the checked-dynamic TypeError). */
+function checkedDynPromise(
+  lowerer: Lowerer,
+  promise: IrExpr,
+  declared: IrType & { kind: "promise" },
+  node: ts.Node,
+  loc: SrcLoc,
+): IrExpr {
+  const inner = declared.inner;
+  if (
+    !canDynCheckTo(
+      inner,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
+    lowerer.noLowering(
+      `a dns/promises result typed '${lowerer.fmt(declared)}'`,
+      node,
+      "the settled value must have a checked-dynamic conversion (type it as the documented LookupAddress shape or unknown)",
+    );
+  }
+  const key = `dns.promise:${typeKey(declared)}`;
+  let helper = lowerer.valueHelpers.get(key);
+  if (!helper) {
+    helper = keyedHelperName(lowerer, "%dns.promise", key);
+    lowerer.valueHelpers.set(key, helper);
+    const promiseT: IrType = { kind: "promise", inner: DYN };
+    lowerer.liftedFns.push({
+      name: helper,
+      params: [{ localId: "promise", name: "promise", type: promiseT }],
+      returnType: inner,
+      locals: [
+        { id: "promise", name: "promise", type: promiseT, mutable: false },
+        { id: "settled", name: "settled", type: DYN, mutable: false },
+      ],
+      body: [
+        {
+          kind: "varDecl",
+          localId: "settled",
+          init: {
+            kind: "awaitExpr",
+            value: { kind: "varRef", localId: "promise", type: promiseT, loc },
+            type: DYN,
+            loc,
+          },
+          loc,
+        },
+        {
+          kind: "return",
+          value: {
+            kind: "dynCheck",
+            value: { kind: "varRef", localId: "settled", type: DYN, loc },
+            type: inner,
+            loc,
+          },
+          loc,
+        },
+      ],
+      loc,
+      async: true,
+    });
+  }
+  return { kind: "call", callee: helper, args: [promise], type: declared, loc };
+}
+
+/** dns module calls: lookup(hostname[, options], callback) with Node's
+ * option forms, lookupService(address, port, callback), getServers() and
+ * get/setDefaultResultOrder(). The runtime validates the arguments as
+ * lib/dns.js does; getaddrinfo runs at call time and the callback comes
+ * with the other lookup deliveries (literal addresses on the next tick). */
+function lowerDnsModuleCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  bi: { module: string; member: string },
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
+  const dyn = (node: ts.Expression): IrExpr => {
+    // `opts as dns.LookupOneOptions` over a checked-dynamic value (the
+    // overload-satisfying cast of a pass-through lookup): the cast changes
+    // no value, so the options reach the runtime as they are.
+    let inner = node;
+    while (ts.isAsExpression(inner) || ts.isParenthesizedExpression(inner))
+      inner = inner.expression;
+    if (inner !== node && lowerer.mapTypeOf(lowerer.typeOf(inner))?.kind === "dyn")
+      return lowerer.lowerExpr(inner);
+    return lowerer.coerceToExpected(lowerer.lowerExpr(node), DYN);
+  };
+  // A callback whose second parameter is typed (string, LookupAddress[])
+  // cannot take the undefined Node passes after an error.
+  const typedResult = (node: ts.Expression): IrExpr => {
+    const sig = lowerer.checker.getCallSignatures(lowerer.typeOf(node))[0];
+    const second = sig?.getParameters()[1];
+    const t = second ? lowerer.mapTypeOf(lowerer.checker.getTypeOfSymbol(second)) : null;
+    return boolLit(t !== null && t.kind !== "dyn", loc);
+  };
+  if (bi.member === "lookup") {
+    requireStatementPosition(lowerer, expr, "dns.lookup(...)");
+    if (args.length !== 2 && args.length !== 3) {
+      lowerer.noLowering(
+        `lookup with ${args.length} arguments`,
+        expr,
+        "the supported forms are lookup(hostname, callback) and lookup(hostname, options, callback)",
+      );
+    }
+    const hostname = dyn(args[0]!);
+    const options = args.length === 3 ? dyn(args[1]!) : dynUndefinedExpr(loc);
+    const last = args[args.length - 1]!;
+    // Options known only at run time (a checked-dynamic value, or one cast
+    // to an overload's option type) decide between Node's two callback
+    // shapes there: the address is a string, or an address list with
+    // `all: true`. An inline callback then binds its parameters as
+    // checked-dynamic values, whatever the overload the checker picked
+    // says, and its body tests what actually arrived.
+    let runtimeOptions = false;
+    if (args.length === 3) {
+      let inner: ts.Expression = args[1]!;
+      while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner))
+        inner = inner.expression;
+      runtimeOptions = lowerer.mapTypeOf(lowerer.typeOf(inner))?.kind === "dyn";
+    }
+    let callbackNode: ts.Expression = last;
+    while (ts.isParenthesizedExpression(callbackNode)) callbackNode = callbackNode.expression;
+    const dynCallback =
+      runtimeOptions && (ts.isArrowFunction(callbackNode) || ts.isFunctionExpression(callbackNode));
+    const typed = dynCallback ? boolLit(false, loc) : typedResult(last);
+    if (dynCallback) lowerer.dynParamLambdas.add(callbackNode);
+    let cb: IrExpr;
+    try {
+      cb = lowerDnsCallback(lowerer, last, "lookup callbacks");
+    } finally {
+      if (dynCallback) lowerer.dynParamLambdas.delete(callbackNode);
+    }
+    return {
+      kind: "libCall",
+      fn: "dns.lookupDyn",
+      args: [hostname, options, cb, typed],
+      type: VOID,
+      loc,
+    };
+  }
+  if (bi.member === "lookupService") {
+    requireStatementPosition(lowerer, expr, "dns.lookupService(...)");
+    if (args.length !== 3) {
+      lowerer.noLowering(
+        `lookupService with ${args.length} arguments`,
+        expr,
+        "the form is lookupService(address, port, callback)",
+      );
+    }
+    const typed = typedResult(args[2]!);
+    const cb = lowerDnsCallback(lowerer, args[2]!, "lookupService callbacks");
+    return {
+      kind: "libCall",
+      fn: "dns.lookupService",
+      args: [dyn(args[0]!), dyn(args[1]!), cb, typed],
+      type: VOID,
+      loc,
+    };
+  }
+  if (bi.member === "getServers" && args.length === 0) {
+    const value: IrExpr = { kind: "libCall", fn: "dns.getServers", args: [], type: DYN, loc };
+    const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+    return declared === null || declared.kind === "dyn"
+      ? value
+      : lowerer.coerceInto(expr, value, declared);
+  }
+  if (bi.member === "getDefaultResultOrder" && args.length === 0) {
+    return { kind: "libCall", fn: "dns.getDefaultResultOrder", args: [], type: STRING, loc };
+  }
+  if (bi.member === "setDefaultResultOrder" && args.length === 1) {
+    requireStatementPosition(lowerer, expr, "dns.setDefaultResultOrder(...)");
+    return {
+      kind: "libCall",
+      fn: "dns.setDefaultResultOrder",
+      args: [dyn(args[0]!)],
+      type: VOID,
+      loc,
+    };
+  }
+  lowerer.noLowering(
+    `dns.${bi.member}`,
+    expr,
+    "lookup, lookupService, getServers, getDefaultResultOrder, and setDefaultResultOrder are the lowered dns module functions",
+    ts.isIdentifier(expr.expression) ? lowerer.resolveValueSymbol(expr.expression) : undefined,
+  );
+}
+
+/** A listener JavaScript leaves untyped: a function literal with a
+ * parameter that has neither an annotation nor JSDoc (paramShape makes it
+ * checked-dynamic), or any other untyped value. */
+function untypedJsListener(lowerer: Lowerer, node: ts.Expression): boolean {
+  let e = node;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (ts.isArrowFunction(e) || ts.isFunctionExpression(e))
+    return e.parameters.nodes.some((param) => !documentedParameter(param));
+  return (lowerer.typeOf(e).flags & ts.TypeFlags.Any) !== 0;
 }
 
 /** Method calls on dgram.Socket receivers — one entry in lower-calls.ts's
  * intrinsic chain (after lowerServerMethodCall). Null for other
  * receivers. */
-export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
+export function lowerDgramMethodCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
   if (call.questionDotToken || access.questionDotToken) return null;
   if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "dgramSocket") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const name = access.name.text;
   const loc = locOf(call);
-  const args = call.arguments;
+  const args = call.arguments.nodes;
   if (name === "bind" || name === "connect") {
     requireStatementPosition(lowerer, call, `socket.${name}(...)`);
     // bind(port[, address][, cb]) / connect(port[, address][, cb]) — the
@@ -328,11 +579,7 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const fn: IrLibFn = name === "bind" ? "dgram.bind" : "dgram.connect";
       return { kind: "libCall", fn, args: [receiver, port, host], type: VOID, loc };
     }
-    const { cb } = lowerCallbackArg(
-      lowerer, cbNode, `${name} callbacks`, 0,
-      () => false,
-      "use ()",
-    );
+    const { cb } = lowerCallbackArg(lowerer, cbNode, `${name} callbacks`, 0, () => false, "use ()");
     const fn: IrLibFn = name === "bind" ? "dgram.bindCb" : "dgram.connectCb";
     return { kind: "libCall", fn, args: [receiver, port, host, cb], type: VOID, loc };
   }
@@ -341,17 +588,21 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     // send(msg, port, address) — one datagram to an explicit destination
     // (the static fast path). Every OTHER shape in a JS source rides the
     // checked-dynamic ladder (dgram.sendChk): Node's signature shuffle,
-    // slice bounds, list/type contracts, port/address validation, and
-    // the connected-state errors — with the compiler-rendered fence as
-    // the post-validation tail for the callback/list/connected forms.
+    // slice bounds, list/type contracts, port/address validation, the
+    // connected-state errors, then the send itself — lists, connected
+    // sends and completion callbacks included.
     const staticShape =
-      args.length === 3 && !args.some(ts.isSpreadElement) &&
+      args.length === 3 &&
+      !args.some(ts.isSpreadElement) &&
       (() => {
         const dataT = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
         const portT = lowerer.mapTypeOf(lowerer.typeOf(args[1]!));
         const hostT = lowerer.mapTypeOf(lowerer.typeOf(args[2]!));
-        return (dataT?.kind === "string" || (dataT?.kind === "bytes" && dataT.elem === "u8")) &&
-               portT?.kind === "f64" && hostT?.kind === "string";
+        return (
+          (dataT?.kind === "string" || (dataT?.kind === "bytes" && dataT.elem === "u8")) &&
+          portT?.kind === "f64" &&
+          hostT?.kind === "string"
+        );
       })();
     if (staticShape) {
       const receiver = lowerer.lowerExpr(access.expression);
@@ -361,26 +612,34 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       const fn: IrLibFn = data.type.kind === "string" ? "dgram.sendStr" : "dgram.sendBytes";
       return { kind: "libCall", fn, args: [receiver, data, port, host], type: VOID, loc };
     }
-    if (isJsSourceFile(call.getSourceFile()) && args.length <= 5 && !args.some(ts.isSpreadElement)) {
+    // TypeScript reaches the ladder for the completion-callback form
+    // send(msg, port, address, callback) (the hot-shots package shim).
+    if (
+      (isJsSourceFile(ts.getSourceFileOfNode(call)) || args.length === 4) &&
+      args.length <= 6 &&
+      !args.some(ts.isSpreadElement)
+    ) {
       const receiver = lowerer.lowerExpr(access.expression);
       const slots: IrExpr[] = [];
       let ok = true;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 6; i++) {
         const n = args[i];
         if (!n) {
-          slots.push({
-            kind: "dynFrom",
-            value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
-            type: DYN,
-            loc,
-          });
+          slots.push(dynUndefinedExpr(loc));
           continue;
         }
         const raw = lowerer.lowerExpr(n);
         if (raw.type.kind === "dyn") slots.push(raw);
-        else if (raw.kind === "unitLit" || lowerer.dynConvertible(raw.type) ||
-                 (raw.type.kind === "func" &&
-                  canBoxFuncIntoDyn(raw.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id)))) {
+        else if (
+          raw.kind === "unitLit" ||
+          lowerer.dynConvertible(raw.type) ||
+          (raw.type.kind === "func" &&
+            canBoxFuncIntoDyn(
+              raw.type,
+              (id) => lowerer.shapes.get(id),
+              (id) => lowerer.unions.get(id),
+            ))
+        ) {
           slots.push({ kind: "dynFrom", value: raw, type: DYN, loc });
         } else {
           ok = false;
@@ -391,8 +650,7 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
         return {
           kind: "libCall",
           fn: "dgram.sendChk",
-          args: [receiver, ...slots, ladderFenceExpr(lowerer, `send in this form`, call,
-            "send(msg, port, address) — one string or Buffer datagram — is the lowered form; callback, list, and connected sends have no lowering yet")],
+          args: [receiver, ...slots],
           type: VOID,
           loc,
         };
@@ -406,7 +664,11 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if (name === "address") {
     if (args.length !== 0) {
-      lowerer.noLowering(`address with ${args.length} arguments`, call, "address() takes no arguments");
+      lowerer.noLowering(
+        `address with ${args.length} arguments`,
+        call,
+        "address() takes no arguments",
+      );
     }
     // The declared AddressInfo return must map to the {address, family,
     // port} record — the runtime fills exactly those three fields.
@@ -424,7 +686,11 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   if (name === "close") {
     requireStatementPosition(lowerer, call, "socket.close(...)");
     if (args.length > 1) {
-      lowerer.noLowering(`close with ${args.length} arguments`, call, "the supported form is close([callback])");
+      lowerer.noLowering(
+        `close with ${args.length} arguments`,
+        call,
+        "the supported form is close([callback])",
+      );
     }
     const receiver = lowerer.lowerExpr(access.expression);
     if (args.length === 0) {
@@ -436,7 +702,11 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   if (name === "unref" || name === "ref") {
     requireStatementPosition(lowerer, call, `socket.${name}()`);
     if (args.length !== 0) {
-      lowerer.noLowering(`${name} with ${args.length} arguments`, call, `${name}() takes no arguments`);
+      lowerer.noLowering(
+        `${name} with ${args.length} arguments`,
+        call,
+        `${name}() takes no arguments`,
+      );
     }
     const receiver = lowerer.lowerExpr(access.expression);
     const fn: IrLibFn = name === "unref" ? "dgram.unref" : "dgram.ref";
@@ -444,34 +714,72 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
   }
   if ((name === "on" || name === "once") && args.length === 2) {
     requireStatementPosition(lowerer, call, `socket.${name}(...)`);
+    // A JavaScript listener whose parameters are untyped registers through
+    // the socket's checked-dynamic handle, which hands it untyped values.
+    if (isJsSourceFile(ts.getSourceFileOfNode(call)) && untypedJsListener(lowerer, args[1]!)) {
+      return {
+        kind: "dynInvoke",
+        recv: lowerer.coerceToExpected(lowerer.lowerExpr(access.expression), DYN),
+        method: name,
+        calleeName: ts.getTextOfNode(access),
+        args: [
+          lowerer.lowerExprExpecting(args[0]!, DYN),
+          lowerer.lowerExprExpecting(args[1]!, DYN),
+        ],
+        type: DYN,
+        loc,
+      };
+    }
     const once = boolLit(name === "once", loc);
     const evT = lowerer.typeOf(args[0]!);
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = lowerer.lowerExpr(access.expression);
     if (event === "message") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "message listeners", 2,
+        lowerer,
+        args[1]!,
+        "message listeners",
+        2,
         (p, i) =>
-          i === 0 ? p.kind === "bytes" && p.elem === "u8"
-          : isRecordOfFields(lowerer, p, RINFO_FIELDS),
+          i === 0
+            ? p.kind === "bytes" && p.elem === "u8"
+            : isRecordOfFields(lowerer, p, RINFO_FIELDS),
         "use (msg: Buffer, rinfo) or (msg: Buffer) or ()",
       );
-      return { kind: "libCall", fn: "dgram.onMessage", args: [receiver, cb, once], type: VOID, loc };
+      return {
+        kind: "libCall",
+        fn: "dgram.onMessage",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
     }
     if (event === "error") {
       const { cb } = lowerCallbackArg(
-        lowerer, args[1]!, "error listeners", 1,
+        lowerer,
+        args[1]!,
+        "error listeners",
+        1,
         (p) => p.kind === "object" && p.className === "%Error",
         "use (err) or ()",
       );
       return { kind: "libCall", fn: "dgram.onError", args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "listening" || event === "close" || event === "connect") {
-      const { cb } = lowerCallbackArg(lowerer, args[1]!, `${event} listeners`, 0, () => false, "use ()");
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        `${event} listeners`,
+        0,
+        () => false,
+        "use ()",
+      );
       const fn: IrLibFn =
-        event === "listening" ? "dgram.onListening"
-        : event === "close" ? "dgram.onClose"
-        : "dgram.onConnect";
+        event === "listening"
+          ? "dgram.onListening"
+          : event === "close"
+            ? "dgram.onClose"
+            : "dgram.onConnect";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
     }
     lowerer.noLowering(
@@ -480,14 +788,39 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
       '"message", "listening", "close", "connect", and "error" are the supported socket events (as literals)',
     );
   }
-  if (name.startsWith("setMulticast") || name === "addMembership" || name === "dropMembership" ||
-      name === "setBroadcast" || name === "setTTL") {
-    lowerer.noLowering(
-      `dgram.Socket.${name}`,
-      call,
-      `multicast/TTL options have no lowering (${DGRAM_SURFACE_HINT})`,
-      lowerer.checker.getSymbolAtLocation(access.name),
+  const option = Object.hasOwn(DGRAM_OPTIONS, name) ? DGRAM_OPTIONS[name]! : null;
+  if (option !== null) {
+    const min = option.params.length - (option.optional ?? 0);
+    const kinds = args.map((arg) =>
+      ts.isSpreadElement(arg) ? undefined : lowerer.mapTypeOf(lowerer.typeOf(arg))?.kind,
     );
+    if (
+      args.length < min ||
+      args.length > option.params.length ||
+      kinds.some((kind, i) => kind !== DGRAM_OPTION_PARAMS[option.params[i]!].kind)
+    ) {
+      lowerer.noLowering(
+        `socket.${name} with these arguments`,
+        call,
+        option.params.length === 0
+          ? `${name}() takes no arguments`
+          : `pass ${option.params.join(", ")} arguments, as the declaration types them`,
+      );
+    }
+    if (option.value === undefined) requireStatementPosition(lowerer, call, `socket.${name}(...)`);
+    const receiver = lowerer.lowerExpr(access.expression);
+    const lowered: IrExpr[] = [receiver];
+    option.params.forEach((param, i) => {
+      lowered.push(
+        args[i] !== undefined
+          ? lowerer.lowerExprExpecting(args[i]!, DGRAM_OPTION_PARAMS[param])
+          : { kind: "strLit", value: "", type: STRING, loc },
+      );
+    });
+    // the membership calls pass whether the interface argument was given
+    if (option.optional !== undefined)
+      lowered.push(boolLit(args.length === option.params.length, loc));
+    return { kind: "libCall", fn: option.fn, args: lowered, type: option.value ?? VOID, loc };
   }
   lowerer.noLowering(
     `dgram.Socket.${name}`,
@@ -495,4 +828,99 @@ export function lowerDgramMethodCall(lowerer: Lowerer, call: ts.CallExpression,
     DGRAM_SURFACE_HINT,
     lowerer.checker.getSymbolAtLocation(access.name),
   );
+}
+
+/** True for a dns callback function util.promisify converts. */
+export function isPromisifiedDnsMember(member: string): boolean {
+  return member === "lookup" || member === "lookupService";
+}
+
+/** A call through `promisify(dns.lookup)` or `promisify(dns.lookupService)`:
+ * the callback form runs with a callback that settles a promise of the
+ * checked-dynamic `{ address, family }` (the address array with
+ * options.all) or `{ hostname, service }`, which Node's custom promisified
+ * forms produce. An argument error rejects the promise instead of
+ * throwing. A declared result type other than `unknown` is reached through
+ * an async helper that awaits that promise and checks the value. */
+export function lowerPromisifiedDnsCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  member: string,
+  loc: SrcLoc,
+): IrExpr {
+  const args = expr.arguments.nodes;
+  if (args.some(ts.isSpreadElement)) {
+    lowerer.noLowering(`the promisified dns.${member} with spread arguments`, expr);
+  }
+  const service = member === "lookupService";
+  if (service ? args.length !== 2 : args.length < 1 || args.length > 2) {
+    lowerer.noLowering(
+      `the promisified dns.${member} with ${args.length} arguments`,
+      expr,
+      service
+        ? "the form is lookupService(address, port)"
+        : "the supported forms are lookup(hostname) and lookup(hostname, options)",
+    );
+  }
+  const dyn = (node: ts.Expression | undefined): IrExpr =>
+    node ? lowerer.coerceToExpected(lowerer.lowerExpr(node), DYN) : dynUndefinedExpr(loc);
+  const promiseDyn: IrType = { kind: "promise", inner: DYN };
+  const call: IrExpr = {
+    kind: "libCall",
+    fn: service ? "dns.lookupServicePromise" : "dns.lookupPromise",
+    args: [dyn(args[0]), dyn(args[1])],
+    type: promiseDyn,
+    loc,
+  };
+  const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+  if (declared?.kind !== "promise") {
+    lowerer.noLowering(`the promisified dns.${member} with this result type`, expr);
+  }
+  const value = declared.inner;
+  if (value.kind === "dyn") return call;
+  if (
+    !canDynCheckTo(
+      value,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
+    lowerer.noLowering(
+      `the promisified dns.${member} with a '${lowerer.fmt(declared)}' result`,
+      expr,
+      "the result type must have a checked conversion from the lookup's value",
+    );
+  }
+  const key = `dnsPromise:${JSON.stringify(value)}`;
+  let name = lowerer.valueHelpers.get(key);
+  if (!name) {
+    name = keyedHelperName(lowerer, "%dnsPromise", key);
+    lowerer.valueHelpers.set(key, name);
+    lowerer.liftedFns.push({
+      name,
+      params: [{ localId: "p.0", name: "p", type: promiseDyn }],
+      returnType: value,
+      async: true,
+      locals: [{ id: "p.0", name: "p", type: promiseDyn, mutable: false }],
+      body: [
+        {
+          kind: "return",
+          value: {
+            kind: "dynCheck",
+            value: {
+              kind: "awaitExpr",
+              value: { kind: "varRef", localId: "p.0", type: promiseDyn, loc },
+              type: DYN,
+              loc,
+            },
+            type: value,
+            loc,
+          },
+          loc,
+        },
+      ],
+      loc,
+    });
+  }
+  return { kind: "call", callee: name, args: [call], type: declared, loc };
 }

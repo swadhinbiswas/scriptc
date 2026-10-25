@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4870-array-pipeline-fusion.ts"
+ ],
+ "diags": []
+}

@@ -7,8 +7,6 @@
 import * as http from "node:http";
 import * as tls from "node:tls";
 import * as fs from "node:fs";
-import * as dns from "node:dns";
-import * as readline from "node:readline";
 
 // The Agent lowers to a checked-dynamic handle now — but only from a
 // LITERAL options object; a runtime options value cannot be walked.
@@ -42,18 +40,10 @@ tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => 
 fs.watch("/tmp", { recursive: true }, () => {});
 fs.watch("/tmp", { persistent: false }, () => {});
 
-// dns.lookup: hints/all are documented knobs with no lowering.
-dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
-dns.lookup("localhost", { family: 4, all: true }, () => {});
-
-// readline: a finite crlfDelay is not the lowered splitter; completer
-// needs an interactive terminal.
-readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
-readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
 
 // A bare __proto__: value entry is not an ordinary undocumented key: it
 // changes the options record's prototype, and Node reads inherited options.
-// These must fence instead of silently dropping an inherited flag or mode.
+// These must fence instead of dropping an inherited flag or mode without a diagnostic.
 fs.writeFileSync("/tmp/proto-sync", "x", { __proto__: { flag: "a" } });
 void fs.promises.writeFile("/tmp/proto-promise", "x", { __proto__: { mode: 0o600 } });
 // Both calls must terminate in the explicit prototype-options fence.

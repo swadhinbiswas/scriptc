@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5714-cycle-large-candidate-buffers.ts"
+ ],
+ "diags": []
+}

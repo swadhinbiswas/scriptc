@@ -3,7 +3,7 @@
  * 7.0.2 world (this adapter, over the real "typescript" dependency) must
  * never exchange AST or checker objects: the enums
  * renumbered between worlds, so a node that crosses carries kinds and flags
- * that MEAN something else on the other side, silently.
+ * that MEAN something else on the other side, without any error.
  *
  * The fence is nominal enum typing: every node interface carries a
  * `kind`/`flags` member typed by its own package's enum declaration, and

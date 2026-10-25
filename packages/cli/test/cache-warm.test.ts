@@ -14,12 +14,15 @@ test("cache warm accepts focused profiles and rejects unknown ones", async () =>
   const dir = await mkdtemp(join(tmpdir(), "scriptc-cli-cache-warm-"));
   const cacheRoot = join(dir, "cache");
   try {
-    const env = { ...process.env, SCRIPTC_CACHE_DIR: cacheRoot, SCRIPTC_CC: "/unavailable/compiler" };
-    const warmed = await execFileAsync(
-      process.execPath,
-      [bootstrap, "cache", "warm", "runtime"],
-      { env, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const env = {
+      ...process.env,
+      SCRIPTC_CACHE_DIR: cacheRoot,
+      SCRIPTC_CC: "/unavailable/compiler",
+    };
+    const warmed = await execFileAsync(process.execPath, [bootstrap, "cache", "warm", "runtime"], {
+      env,
+      maxBuffer: 4 * 1024 * 1024,
+    });
     expect(warmed.stdout).toContain(`${cacheRoot}\n`);
     expect(warmed.stdout).toMatch(/runtime\t\d+ms/);
     expect(warmed.stdout).not.toContain("tls\t");
@@ -44,11 +47,10 @@ test("the runtime npm tarball excludes legacy package-local vendor caches", asyn
   try {
     await mkdir(fixture, { recursive: true });
     await writeFile(join(fixture, "foreign-native-object.o"), "must not ship\n");
-    const packed = await execFileAsync(
-      "pnpm",
-      ["pack", "--dry-run", "--json"],
-      { cwd: runtimePackageRoot, maxBuffer: 16 * 1024 * 1024 },
-    );
+    const packed = await execFileAsync("pnpm", ["pack", "--dry-run", "--json"], {
+      cwd: runtimePackageRoot,
+      maxBuffer: 16 * 1024 * 1024,
+    });
     const manifest = JSON.parse(packed.stdout) as { files: { path: string }[] };
     expect(manifest.files.some(({ path }) => path.startsWith("vendor/.cache/"))).toBe(false);
   } finally {

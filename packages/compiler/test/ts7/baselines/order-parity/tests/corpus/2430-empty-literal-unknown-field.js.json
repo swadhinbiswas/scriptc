@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2430-empty-literal-unknown-field.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2492-loose-null-compare-unions.ts"
+ ],
+ "diags": []
+}

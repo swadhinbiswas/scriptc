@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2751-buffer-concat-sparse-list.ts"
+ ],
+ "diags": []
+}

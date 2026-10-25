@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2280-builtin-namespace-destructure.cjs"
+ ],
+ "diags": []
+}

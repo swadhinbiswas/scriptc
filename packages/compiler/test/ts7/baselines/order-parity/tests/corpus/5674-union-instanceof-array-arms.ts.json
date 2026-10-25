@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5674-union-instanceof-array-arms.ts"
+ ],
+ "diags": []
+}

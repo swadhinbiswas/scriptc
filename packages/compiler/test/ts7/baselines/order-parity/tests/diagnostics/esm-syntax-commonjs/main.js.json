@@ -1,0 +1,18 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/esm-syntax-commonjs/main.js"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "Node classifies this file as CommonJS, where this ES-module syntax marker is a SyntaxError",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/esm-syntax-commonjs/main.js",
+    "start": 0,
+    "end": 10
+   },
+   "milestone": "later",
+   "hint": "use a .mjs/.mts extension or set the nearest package.json's \"type\" to \"module\""
+  }
+ ]
+}

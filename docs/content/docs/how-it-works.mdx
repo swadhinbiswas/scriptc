@@ -2,7 +2,7 @@
 title: "How It Works"
 ---
 
-scriptc uses TypeScript's type checker, a typed intermediate representation, and LLVM to compile programs. Executable builds link the generated code with a native runtime.
+This page describes how scriptc turns a TypeScript program into an executable: the compiler stages, the outputs you can inspect at each stage, the native runtime that executables link, and how the compiler is tested.
 
 ## Compiler pipeline
 
@@ -25,10 +25,70 @@ LLVM helper -------------> assembly / object (--emit=asm|obj)
 Runtime pack and linker -> executable
 ```
 
-1. **Frontend:** TypeScript parses and checks the program against `es2025`, scriptc's ambient declarations, and available project declarations. `tsconfig.json` controls checker strictness. The compiler uses the checked types and narrowing information to lower supported operations; unsupported operations produce diagnostics.
+1. **Frontend:** TypeScript parses and checks the program against `es2025`, scriptc's ambient declarations, and available project declarations. `tsconfig.json` controls checker strictness. The compiler uses the checked types and narrowing information to lower supported operations; unsupported operations produce diagnostics. JavaScript files that TypeScript checks (a `// @ts-check` comment, or `checkJs` in `tsconfig.json`) report values that do not match their JSDoc types as errors, and their classes use those types the way TypeScript classes use annotations.
 2. **Typed IR:** A validated, serializable intermediate representation connects the frontend and backend. Types are concrete: generic functions are specialized, unions use tags, and closures have explicit captures. `--emit=ir` writes this representation as JSON.
-3. **LLVM backend:** `--emit=llvm` writes textual LLVM IR. The matching LLVM 22 helper generates assembly or objects on supported macOS, Linux, and Windows hosts, including output targeting WASI. Executable and library builds use this backend.
-4. **Linking:** Runtime packs contain precompiled C objects and vendor archives. A hashed manifest selects artifacts for the program's features, optimization mode, and library state model. The target linker and SDK or sysroot produce the executable. Sanitizer builds use an instrumented C runtime.
+3. **LLVM backend:** `--emit=llvm` writes textual LLVM IR. The matching LLVM 22 helper generates assembly or objects on supported macOS, Linux, and Windows hosts, including output targeting WASI. Executable and library builds use this backend. Large executables, native and WASI alike, are divided into partitions that are optimized and compiled in parallel; see [Build parallelism](#build-parallelism).
+4. **Linking:** Runtime packs contain the precompiled C runtime and vendored libraries. A hashed manifest selects the artifacts the program needs for its features, optimization mode, and (for libraries) state model. The target linker and SDK or sysroot produce the executable. Sanitizer builds use an instrumented C runtime.
+
+`comptime` calls run during the frontend stage in an isolated evaluator inside the compiler, based on QuickJS. Their results are embedded in the program as constants.
+
+## Build parallelism
+
+Most of a build runs on one CPU core. The LLVM helper uses more cores only when it compiles an executable in partitions.
+
+### Frontend
+
+Parsing, type checking, lowering, and LLVM IR generation run one after another on one thread. The type checker runs in a separate process that the compiler waits on. When none of a build's inputs has changed since an earlier build, the frontend's results come from the build cache and this stage is skipped. A change to any input runs the whole stage again.
+
+### Partitions
+
+The LLVM helper divides an executable's LLVM IR into partitions by its size. Up to 1 MiB of LLVM text is one partition, and up to 2 MiB is four. Larger programs get one partition per 4 MiB of LLVM text, rounded up to a power of two, and at least 8 and at most 64. `--emit=llvm` writes this text, so its file size shows how many partitions a program gets.
+
+<table>
+  <thead>
+    <tr><th>LLVM text</th><th>Partitions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Up to 1 MiB</td><td>1</td></tr>
+    <tr><td>Over 1 MiB, up to 2 MiB</td><td>4</td></tr>
+    <tr><td>Over 2 MiB, up to 32 MiB</td><td>8</td></tr>
+    <tr><td>Over 32 MiB, up to 64 MiB</td><td>16</td></tr>
+    <tr><td>Over 64 MiB, up to 128 MiB</td><td>32</td></tr>
+    <tr><td>Over 128 MiB</td><td>64</td></tr>
+  </tbody>
+</table>
+
+The count depends only on the size of the LLVM text, so a program has the same partitions, and builds the same executable, on every host. In programs with 32 partitions or more, functions from the same source file are placed in the same partition, so that their calls to each other stay inside it; a file larger than 1 MiB of LLVM text or than an average partition is divided into parts by function name. Other functions, and the functions of smaller programs, are placed by their name, and a small internal function goes with the one function that calls it. An edit leaves almost every other function in its partition.
+
+These builds are not divided into partitions and compile on one thread: `--emit=asm`, `--emit=obj`, and `--print=native-link-info` output, library builds (`--lib`; `dev` library builds are compiled in pieces, one after another), and `--sanitize` builds, which compile the LLVM IR with the C compiler.
+
+The helper compiles partitions on a pool with one thread per hardware thread of the host, so an executable with four partitions uses at most four cores in the backend. A program of one partition is optimized and compiled on one thread.
+
+How partitions are compiled depends on `--optimization`:
+
+- `dev` compiles each partition on its own, all in parallel.
+- `release` and `speed` optimize each partition and write a summary of its functions, all in parallel. Then a serial step reads every summary and decides which small functions each partition imports from the others, so that calls between partitions can still be inlined. Last, the partitions are optimized with their imports and compiled, again in parallel.
+
+Reading the LLVM text and dividing it into partitions, and the import step, run on one thread.
+
+### Rebuilds
+
+With two or more partitions, the helper keeps each partition's summary and object in the build cache (see `SCRIPTC_CACHE_DIR` in the [CLI reference](/docs/cli#environment-variables)). A rebuild after an edit compiles again only the partitions whose functions changed and, in `release` and `speed` builds, the partitions that import a changed function; the others come from the cache. Dividing the program, the import step, and linking run on every build. A cold build, with nothing cached, compiles every partition.
+
+A program of one partition has no partition cache: a rebuild after an edit compiles the whole program again, and a rebuild that leaves the LLVM text unchanged takes the compiled code from the build cache.
+
+When the LLVM text grows past a partition boundary (4, 8, 16 MiB, and so on), the partition count doubles, functions move to new partitions, and the next build compiles every partition again.
+
+### Profile-guided optimization
+
+Building with a profile adds these costs (see [Profile-guided optimization](/docs/cli#profile-guided-optimization)):
+
+- `--profile-generate` builds an instrumented executable, which runs slower while it records the profile.
+- The profile's contents are part of every partition's cache key. A new or changed profile compiles every partition again; builds without a profile keep their own cache entries.
+- With a profile, the import step lets a hot call import a function of up to twice the usual size limit. LLVM's default limits for profiled calls are 10 and 100 times as large, and on large programs they tripled the build's time and memory without making the program measurably faster.
+- The profile does not change which partition a function is in.
+
+Collecting a profile takes an instrumented build, the training runs, and the merge. With a committed profile, later builds skip those steps and are one optimized build each.
 
 ## Inspect compiler output
 
@@ -68,33 +128,29 @@ Without `-o`, artifacts are written to `.scriptc/` next to the input. Different 
 
 ### External linking
 
-Program objects define `main` and leave selected `scr_*` runtime functions undefined. A strong reference to `scr_runtime_abi_v6` checks runtime compatibility at link time.
+Program objects define `main` and leave selected `scr_*` runtime functions undefined. A strong reference to `scr_runtime_abi_v21` checks runtime compatibility at link time.
 
 `--print=native-link-info` emits the program object and a JSON recipe containing the runtime pack and link order for external builds. This object ABI is experimental and requires an exact runtime version. See [Native Program Objects](/docs/native-objects) for examples.
 
 ## Native runtime
 
-- **Memory:** Values use reference counting. Acyclic values are freed when their last reference is released, and a cycle collector runs at defined collection points. Some cycles involving opaque native values or the embedded engine can remain allocated.
-- **Concurrency:** `async`/`await` uses stackful fibers. The native event loop schedules microtasks, timers, and I/O, using kqueue on macOS and epoll on Linux. Static tasks and embedded-engine jobs use separate queues; their interleaving can differ from Node.js.
+- **Memory:** Values use reference counting. Acyclic values are freed when their last reference is released, and a cycle collector runs at defined collection points. Some cycles involving opaque native values can remain allocated. When the main thread's script ends, the process exits without freeing what the program still holds, and the operating system reclaims it; worker threads free their heaps when they exit. Builds with `--sanitize`, and processes run with `SCRIPTC_EXIT_FREE=1` (for external leak checkers), free everything at exit.
+- **Concurrency:** An `async` function that suspends only at its own `await` expressions compiles to a stackless coroutine whose heap frame holds the values live across those awaits; other suspending `async` functions and async generators use stackful fibers. The native event loop schedules microtasks, timers, and I/O, using kqueue on macOS and epoll on Linux.
 - **Networking:** Supported `net`, `http`, `https`, `tls`, `dgram`, and `dns` APIs use native implementations. TLS uses vendored mbedTLS.
 - **Numbers:** Values use JavaScript's double-precision representation. Number-to-string formatting uses shortest-roundtrip output and is tested against Node.js.
-- **Regular expressions:** The runtime uses QuickJS's regular-expression bytecode interpreter, linked into programs that use regex operations.
+- **Regular expressions and Unicode:** The runtime uses QuickJS's regular-expression and Unicode libraries, linked into programs that use them.
 
 See [Limitations](/docs/limitations) for runtime differences and the [Node.js compatibility reference](/compatibility) for API support.
 
 ## Testing
 
-The differential corpus runs programs under Node.js and as compiled executables, comparing stdout, stderr, and exit codes. Server tests use client drivers against both implementations. Number formatting also has fuzz-test coverage against Node.js's `String(x)`.
+The test suite runs each test program under Node.js and as a compiled executable, and compares stdout, stderr, and exit codes. Server tests drive both implementations with the same clients. Number formatting is also fuzz-tested against Node.js's `String(x)`.
 
-The sanitizer lane runs the corpus with AddressSanitizer and a reference-count audit at exit to detect leaks and memory errors. Supported executable builds can enable these checks with `--sanitize`.
+The same tests also run with AddressSanitizer and a reference-count audit at exit, to catch leaks and memory errors. You can enable these checks in your own executable builds with `--sanitize`.
 
 Test coverage provides evidence for the cases exercised. It does not establish complete compatibility with Node.js.
 
-## Embedded JavaScript engine
-
-`--dynamic` includes quickjs-ng for npm dependencies and supported `any`-typed code. The engine has its own heap and microtask queue. Conversions between static and dynamic values copy data, and conversions to static types validate it at runtime. A mismatched value raises a catchable `TypeError`.
-
-See [npm Dependencies](/docs/dependencies) for package execution, value conversion, and experimental static package options.
+<span id="embedded-javascript-engine" />
 
 ## Repository layout
 
@@ -116,7 +172,7 @@ See [npm Dependencies](/docs/dependencies) for package execution, value conversi
     </tr>
     <tr>
       <td><code>packages/runtime</code></td>
-      <td>C runtime, reference counting and cycle collection, fibers, event loop, networking, and engine integration.</td>
+      <td>C runtime, reference counting and cycle collection, fibers, event loop, networking, and the Node.js API implementations.</td>
     </tr>
     <tr>
       <td><code>packages/runtime-*</code></td>

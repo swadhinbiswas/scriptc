@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3001-caught-typeof-object.js"
+ ],
+ "diags": []
+}

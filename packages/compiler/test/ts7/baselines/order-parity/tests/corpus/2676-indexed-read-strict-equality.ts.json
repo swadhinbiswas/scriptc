@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2676-indexed-read-strict-equality.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1961-namespace-nested.ts"
+ ],
+ "diags": []
+}

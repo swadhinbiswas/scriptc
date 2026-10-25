@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2038-evolving-array-js.cjs"
+ ],
+ "diags": []
+}

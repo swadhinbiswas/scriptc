@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5047-generator-delegation-iterables-typed.ts"
+ ],
+ "diags": []
+}

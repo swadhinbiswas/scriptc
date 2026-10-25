@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2421-float-lane-inference.ts"
+ ],
+ "diags": []
+}

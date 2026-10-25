@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2663-top-level-await-dependency-errors/listener.ts",
+  "<repo>/tests/corpus/2663-top-level-await-dependency-errors/async-bad.ts",
+  "<repo>/tests/corpus/2663-top-level-await-dependency-errors/sync-bad.ts",
+  "<repo>/tests/corpus/2663-top-level-await-dependency-errors/main.ts"
+ ],
+ "diags": []
+}

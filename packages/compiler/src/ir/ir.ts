@@ -1,5 +1,6 @@
 import { InternalCompilerError } from "../errors.js";
-import { everyModuleNode, everyExprChild, everyStmtChild } from "./traverse.js";
+import type { IrLibFn } from "./builtin-signatures.js";
+export type { IrLibFn } from "./builtin-signatures.js";
 /* scriptc IR — the only interface between frontend and backends.
  *
  * Design rules (see docs/ir.md for node-by-node semantics):
@@ -13,7 +14,7 @@ import { everyModuleNode, everyExprChild, everyStmtChild } from "./traverse.js";
  * - The type union is deliberately written for extension (`dyn` shipped
  *   with JSON, `promise` with async). All switches over IrType/IrExpr/
  *   IrStmt must have exhaustive `never` default arms so adding a member
- *   turns into compile errors, not silent misbehavior.
+ *   turns into compile errors at every switch that does not handle it.
  */
 
 /** Byte-offset span in the original source file. */
@@ -25,17 +26,49 @@ export interface SrcLoc {
 
 /* ── types ─────────────────────────────────────────────────────────────── */
 
-/** Numeric typed-array element kinds with a native representation. Float16
- * and BigInt typed arrays remain frontend-fenced. */
-export type IrBytesElem = "u8" | "u8c" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
+/** Numeric typed-array element kinds with a native representation. BigInt
+ * typed arrays remain frontend-fenced. */
+export type IrBytesElem =
+  | "u8"
+  | "u8c"
+  | "i8"
+  | "u16"
+  | "i16"
+  | "u32"
+  | "i32"
+  | "f16"
+  | "f32"
+  | "f64";
 
 export const BYTES_ELEMENT_SIZE: Record<IrBytesElem, number> = {
-  u8: 1, u8c: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, f64: 8,
+  u8: 1,
+  u8c: 1,
+  i8: 1,
+  u16: 2,
+  i16: 2,
+  u32: 4,
+  i32: 4,
+  f16: 2,
+  f32: 4,
+  f64: 8,
 };
 
+/** Integer element kinds: a valid element read is never NaN. */
+export function isIntegerBytesElem(elem: IrBytesElem): boolean {
+  return elem !== "f16" && elem !== "f32" && elem !== "f64";
+}
+
 export const BYTES_ELEMENT_NAME: Record<IrBytesElem, string> = {
-  u8: "Uint8Array", u8c: "Uint8ClampedArray", i8: "Int8Array", u16: "Uint16Array", i16: "Int16Array",
-  u32: "Uint32Array", i32: "Int32Array", f32: "Float32Array", f64: "Float64Array",
+  u8: "Uint8Array",
+  u8c: "Uint8ClampedArray",
+  i8: "Int8Array",
+  u16: "Uint16Array",
+  i16: "Int16Array",
+  u32: "Uint32Array",
+  i32: "Int32Array",
+  f16: "Float16Array",
+  f32: "Float32Array",
+  f64: "Float64Array",
 };
 
 export type IrType =
@@ -54,7 +87,16 @@ export type IrType =
   | { kind: "date" }
   | { kind: "string" } // heap, refcounted, UTF-8
   | { kind: "bool" }
-  | { kind: "array"; elem: IrType } // heap, refcounted, monomorphic elements
+  | {
+      kind: "array";
+      elem: IrType;
+      /** A `(T | undefined)[]` of a number, string or boolean T, stored as
+       * T elements (which hold a present undefined by their state). Not
+       * part of the type's identity (typeEquals, typeKey): it only lets a
+       * checked conversion from a dynamic value accept undefined
+       * elements. */
+      optionalElements?: true;
+    } // heap, refcounted, monomorphic elements
   /** ES `Map<K, V>` — heap, refcounted, insertion-ordered hash map with ONE
    * runtime representation (ScrMap) and type-directed key/value handling,
    * exactly the array pattern (never per-instantiation structs). Keys use
@@ -119,7 +161,8 @@ export type IrType =
    * elements (SCR_ELEM_REF identity semantics, the child precedent), and
    * Set elements (identity hashing, SCR_MAP_KEY_REF — the netServer
    * precedent); fenced out of map keys/values and JSON (JSON.stringify
-   * drops symbols in Node — silent divergence banned, reject instead).
+   * drops symbols in Node — rejected instead of diverging without a
+   * diagnostic).
    * Property KEYS stay frontend-fenced: static record/class shapes have
    * no symbol-keyed storage. */
   | { kind: "symbol" }
@@ -134,6 +177,11 @@ export type IrType =
    * open descriptor, matching Node's ownership safety without its GC
    * warning. Holds no references and cannot participate in a cycle. */
   | { kind: "fileHandle" }
+  /** An fs.Dir (opendirSync / fs.promises.opendir): heap, refcounted,
+   * MUTABLE — aliases share one directory stream, read an entry at a time;
+   * close() closes it for every alias, and the final release closes a
+   * still-open stream. Holds no references and cannot be part of a cycle. */
+  | { kind: "dir" }
   /** A child_process.spawnSync result (scr_child.c): heap, refcounted,
    * IMMUTABLE — the reaped child's status plus its captured utf8 stdout/
    * stderr. Holds only strings — never part of a cycle, no trace. Same
@@ -195,7 +243,7 @@ export type IrType =
    * MUTABLE like child: the loop's reap pass services the pipe and fires
    * 'data'/'end' listeners, which drop at EOF (the settle-releases-
    * listeners story), so lean allocation, no trace header. Same container
-   * rules as child: union arms fine (the checker's `Readable | null`), 
+   * rules as child: union arms fine (the checker's `Readable | null`),
    * arrays/maps/JSON fenced. */
   | { kind: "childStream" }
   /** A piped child-input stream (child.stdin — spawn with a piped stdin
@@ -236,15 +284,21 @@ export type IrType =
   /** Heap, refcounted closure. `rest` marks a variadic function value.
    * `restAbi: "typed"` spells one trailing typed array in `params`; static
    * call sites pack their surplus arguments into it before `callValue`.
-   * `restAbi: "jsval"` similarly spells one trailing engine array for an
-   * island host callback. An absent `restAbi` is the legacy checked-dynamic
+   * An absent `restAbi` is the checked-dynamic
    * JS form: `params` stays the declared non-rest list and the lifted
    * function has one hidden trailing ScrDyn array filled by its boxed call
    * thunk. `argumentsAll` keeps that hidden ABI but fills it with every
    * actual argument, including named positions. The backends therefore
    * still see one fixed native closure ABI;
    * only the frontend's call completion observes variadic source arity. */
-  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true; restAbi?: "jsval" | "typed"; argumentsAll?: true }
+  | {
+      kind: "func";
+      params: IrType[];
+      ret: IrType;
+      rest?: true;
+      restAbi?: "typed";
+      argumentsAll?: true;
+    }
   | { kind: "object"; className: string } // heap, refcounted class instance
   /** The class STATIC side as a value — `typeof C`, the type of the class
    * name itself and of `new (…) => T` constructor-typed slots. Runtime
@@ -258,7 +312,7 @@ export type IrType =
    * completion against C's one signature sound. Allowed in locals,
    * globals, params, returns, class/record fields, capture boxes, array
    * elements, Map VALUES, and union arms; fenced out of Map keys, Set
-   * elements, JSON, jsval conversion, and ToString. Unknown slots retain
+   * elements, JSON, and ToString. Unknown slots retain
    * class identity and allow an exact typed constructor round trip. */
   | { kind: "classval"; className: string }
   /** An ECMAScript module namespace object for one statically-known module.
@@ -292,21 +346,26 @@ export type IrType =
    * <type>' first" hint — or, in JavaScript sources, met with per-site
    * checked lowerings (SEMANTICS.md 115-117). */
   | { kind: "dyn" }
-  /** An island value handle — the type of `any` under --dynamic. Runtime
-   * representation is a refcounted cell (ScrJsval) owning one embedded-
-   * engine value. It can live in locals, globals, parameters, returns,
-   * arrays, class fields, and ambient AbortSignal/AbortController record
-   * fields. Operations on jsval compile to engine calls (jsOp) with
-   * JS-exact semantics; exits back to static types are validated (jsExit).
-   * This kind exists only with the dynamic option. */
+  /** A dynamic-tier value (two-tier design §5.1, stage S3): one 64-bit
+   * NaN-boxed word. Numbers, booleans, undefined and null are immediates
+   * (no allocation); strings and BigInts are the static tier's own objects
+   * under a pointer tag; every other value is a `dyn` cell under the cell
+   * tag. Only dynamic-tier functions operate on it (ir/tiers.ts, I1), and
+   * only through the `js.*` builtins, locals and moves: the jsval pass
+   * (ir/jsval.ts) introduces it after lowering, never the frontend. Static
+   * functions see it only as the operand or result of a boundary
+   * conversion. Refcounted: retain/release skip immediates. 32-bit targets
+   * represent it as a boxed `dyn` cell. */
   | { kind: "jsval" }
   /** A catch binding or its closure capture (never parameters, returns,
-   * fields, arms, elements or globals).
+   * fields, arms or elements). The one global form is a module's recorded
+   * evaluation error, written only from that module's catch binding and
+   * read only by `rethrow`.
    * Runtime representation is a refcounted snapshot box (ScrCaught) holding
    * the taken exception: a kind tag plus the payload. Even NARROWER than
    * dyn: the only expressions a caught value may appear in are `caughtTest`
-   * (kind/instanceof tests), `caughtNarrow` (checker-trusted extraction
-   * under a proven test), and the `rethrow` statement — the frontend
+   * (kind/instanceof tests), `caughtNarrow` (extraction under a proven
+   * test, verified at run time), and the `rethrow` statement — the frontend
    * rejects every other use with the narrowing hint. */
   | { kind: "caught" }
   | { kind: "promise"; inner: IrType } // heap, refcounted, settled-once
@@ -343,6 +402,7 @@ export type IrType =
 const POINTER_HANDLE_KINDS = [
   "stats",
   "fileHandle",
+  "dir",
   "spawnRes",
   "child",
   "netServer",
@@ -372,11 +432,8 @@ function irKindSet<const K extends readonly IrType["kind"][]>(kinds: K): IrKindS
 
 /** The opaque runtime handle kinds. procStream is the one scalar handle;
  * every other handle has pointer representation. */
-const HANDLE_KIND_LIST = [
-  ...POINTER_HANDLE_KINDS,
-  "procStream",
-] as const;
-export type HandleKind = typeof HANDLE_KIND_LIST[number];
+const HANDLE_KIND_LIST = [...POINTER_HANDLE_KINDS, "procStream"] as const;
+export type HandleKind = (typeof HANDLE_KIND_LIST)[number];
 type HandleType = Extract<IrType, { kind: HandleKind }>;
 export const HANDLE_KINDS = irKindSet(HANDLE_KIND_LIST);
 
@@ -392,6 +449,7 @@ const POINTER_KIND_LIST = [
   "url",
   "searchParams",
   "symbol",
+  "date",
   ...POINTER_HANDLE_KINDS,
   "func",
   "object",
@@ -405,7 +463,7 @@ const POINTER_KIND_LIST = [
   "promise",
   "generator",
 ] as const;
-export type PointerKind = typeof POINTER_KIND_LIST[number];
+export type PointerKind = (typeof POINTER_KIND_LIST)[number];
 export const POINTER_KINDS = irKindSet(POINTER_KIND_LIST);
 
 /** Runtime RC symbol stem for each IR type kind. An empty stem means the
@@ -415,7 +473,7 @@ export const POINTER_KINDS = irKindSet(POINTER_KIND_LIST);
 export const RUNTIME_RC_STEMS: Record<IrType["kind"], string> = {
   f64: "",
   bigint: "scr_bigint",
-  date: "",
+  date: "scr_date",
   string: "scr_str",
   bool: "",
   array: "scr_arr",
@@ -428,6 +486,7 @@ export const RUNTIME_RC_STEMS: Record<IrType["kind"], string> = {
   symbol: "scr_sym",
   stats: "scr_stats",
   fileHandle: "scr_file_handle",
+  dir: "scr_dir",
   spawnRes: "scr_spawn_res",
   child: "scr_child",
   netServer: "scr_net_server",
@@ -453,7 +512,7 @@ export const RUNTIME_RC_STEMS: Record<IrType["kind"], string> = {
   record: "",
   union: "scr_union",
   dyn: "scr_dyn",
-  jsval: "scr_jsval",
+  jsval: "scr_js",
   caught: "scr_caught",
   promise: "scr_promise",
   generator: "scr_gen",
@@ -469,6 +528,8 @@ export function runtimeRcStem(t: IrType): string | null {
     if (RUNTIME_ERROR_CLASSES.has(t.className)) return "scr_error";
     if (t.className === RUNTIME_EMITTER_CLASS) return "scr_emitter";
     if (RUNTIME_STREAM_CLASSES.has(t.className)) return "scr_stream";
+    if (t.className === RUNTIME_EVENT_TARGET_CLASS) return "scr_event_target_obj";
+    if (t.className === RUNTIME_EVENT_CLASS) return "scr_event_obj";
     return null;
   }
   const stem = RUNTIME_RC_STEMS[t.kind];
@@ -483,9 +544,39 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
   // symbol is not a JS object, but every symbol is truthy — the same
   // constant-true answer.
   "symbol",
-  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "fileHandle", "spawnRes", "child",
-  "netServer", "netSocket", "http2Session", "http2Stream", "dgramSocket", "testCtx", "httpReq", "httpRes", "httpClientReq",
-  "secureCtx", "cryptoHash", "cryptoHmac", "fsWatcher", "childStream", "childWriter", "procStream", "bytes", "func", "object", "record", "promise",
+  "date",
+  "array",
+  "map",
+  "set",
+  "regex",
+  "url",
+  "searchParams",
+  "stats",
+  "fileHandle",
+  "dir",
+  "spawnRes",
+  "child",
+  "netServer",
+  "netSocket",
+  "http2Session",
+  "http2Stream",
+  "dgramSocket",
+  "testCtx",
+  "httpReq",
+  "httpRes",
+  "httpClientReq",
+  "secureCtx",
+  "cryptoHash",
+  "cryptoHmac",
+  "fsWatcher",
+  "childStream",
+  "childWriter",
+  "procStream",
+  "bytes",
+  "func",
+  "object",
+  "record",
+  "promise",
   // A generator object is a JS object: always truthy.
   "generator",
   // A class object is a JS object (constructors are functions): always truthy.
@@ -506,6 +597,7 @@ export const SEARCH_PARAMS_T: IrType = { kind: "searchParams" };
 export const SYMBOL_T: IrType = { kind: "symbol" };
 export const STATS_T: IrType = { kind: "stats" };
 export const FILEHANDLE_T: IrType = { kind: "fileHandle" };
+export const DIR_T: IrType = { kind: "dir" };
 export const SPAWNRES_T: IrType = { kind: "spawnRes" };
 export const CHILD_T: IrType = { kind: "child" };
 export const NETSERVER_T: IrType = { kind: "netServer" };
@@ -562,10 +654,13 @@ export function isSupportedArrayElem(t: IrType): boolean {
     case "union":
     case "func":
     case "promise":
-    case "jsval":
     case "regex":
+    case "date":
     case "child":
     case "netServer":
+    // fs.Stats snapshots (`await Promise.all(paths.map(stat))`): immutable
+    // refcounted handles with their own retain/release adapters.
+    case "stats":
     case "symbol":
     case "classval":
     case "moduleNs":
@@ -595,16 +690,82 @@ export function setOf(elem: IrType): IrType {
  * classes and arrays can point back at their collection, so constructors
  * must carry key tracing as well as retain/release adapters. */
 export function isIdentityCollectionKey(t: IrType): boolean {
-  return t.kind === "record" || t.kind === "object" || t.kind === "array" ||
-    t.kind === "netServer" || t.kind === "symbol";
+  return (
+    t.kind === "record" ||
+    t.kind === "object" ||
+    t.kind === "array" ||
+    t.kind === "netServer" ||
+    t.kind === "symbol" ||
+    // A function value is one closure for its whole life (top-level
+    // functions intern one immortal closure, inner closures allocate once
+    // per evaluation), so pointer identity is JS function identity.
+    // Closures are cycle-headered and traced like records.
+    t.kind === "func" ||
+    t.kind === "date"
+  );
 }
 
-/** Numbers use SameValueZero, strings use content, and reference keys use
- * identity. A union of identity arms hashes its payload, never its temporary
- * wrapper. Mixed scalar/reference unions remain outside this contract. */
+/** Primitive keys compare by value and reference keys by identity. Union
+ * wrappers carry either domain without becoming observable key identities;
+ * null and undefined are distinct tag-only keys inside a union. */
+export function isPrimitiveCollectionKey(t: IrType, unionArms?: IrType[]): boolean {
+  if (t.kind === "union")
+    return !!unionArms?.length && unionArms.every((arm) => isPrimitiveCollectionKey(arm));
+  return (
+    t.kind === "f64" ||
+    t.kind === "string" ||
+    t.kind === "bigint" ||
+    t.kind === "bool" ||
+    t.kind === "symbol" ||
+    isUnitType(t)
+  );
+}
+
 export function isSupportedMapKey(t: IrType, unionArms?: IrType[]): boolean {
-  return t.kind === "f64" || t.kind === "string" || t.kind === "dyn" || isIdentityCollectionKey(t) ||
-    (t.kind === "union" && unionArms !== undefined && unionArms.length > 0 && unionArms.every(isIdentityCollectionKey));
+  return (
+    isCollectionValueKey(t) ||
+    t.kind === "dyn" ||
+    (t.kind === "union" &&
+      unionArms !== undefined &&
+      unionArms.length > 0 &&
+      unionArms.every((arm) => isCollectionValueKey(arm) || isUnitType(arm)))
+  );
+}
+
+function isCollectionValueKey(t: IrType): boolean {
+  return (
+    t.kind === "f64" ||
+    t.kind === "string" ||
+    t.kind === "bigint" ||
+    t.kind === "bool" ||
+    isIdentityCollectionKey(t)
+  );
+}
+
+/** The element type of an ITERABLE union (`Iterable<T>`,
+ * iterableUnionType): its one generator arm — a synchronous generator over
+ * T that returns nothing and takes no `.next()` values — beside source arms
+ * (T[], Set<T>, a Map of [K, V] entries, a string), and the undefined and
+ * null arms of an optional Iterable. A generator arm is legal only in such
+ * a union. Null for every other union. */
+export function iterableArmsElem(arms: readonly IrType[]): IrType | null {
+  let elem: IrType | null = null;
+  for (const arm of arms) {
+    if (arm.kind !== "generator") continue;
+    if (elem !== null || arm.async || arm.retT.kind !== "void" || arm.nextT.kind !== "undefinedT")
+      return null;
+    elem = arm.yieldT;
+  }
+  if (elem === null) return null;
+  for (const arm of arms) {
+    if (arm.kind === "generator" || arm.kind === "undefinedT" || arm.kind === "nullT") continue;
+    if (arm.kind === "array" || arm.kind === "set") {
+      if (!typeEquals(arm.elem, elem)) return null;
+    } else if (arm.kind === "string") {
+      if (elem.kind !== "string") return null;
+    } else if (arm.kind !== "map") return null;
+  }
+  return elem;
 }
 
 /** Set elements and Map keys share storage, equality and ownership rules. */
@@ -612,13 +773,14 @@ export function isSupportedSetElem(t: IrType, unionArms?: IrType[]): boolean {
   return isSupportedMapKey(t, unionArms);
 }
 
-/** The Map VALUE fence: scalars, supported native references and checked
- * values. Functions require checked-value boxing; jsval has no native slot.
+/** The Map VALUE fence: scalars, supported native references, closures
+ * and checked values.
  * Record/object/union values can point back at the map holding them, which
  * is exactly why ref-valued maps are cycle-capable (see the backend's
  * cycle analysis and docs/memory.md). Shared frontend/validator. */
 export function isSupportedMapValue(t: IrType): boolean {
   switch (t.kind) {
+    case "bytes":
     case "dyn":
     case "f64":
     case "bigint":
@@ -647,6 +809,9 @@ export function isSupportedMapValue(t: IrType): boolean {
     // the pre-settle closures.
     case "secureCtx":
       return true;
+    // A Date object: immutable, holds no references.
+    case "date":
+      return true;
     // A promise (Map<string, Promise<SecureContext>> — the SNI callback's
     // in-flight dedupe map): refcounted, with trace/cycle support already
     // in place (scr_promise_trace_v — the race machinery's refcounting).
@@ -666,6 +831,12 @@ export function isSupportedMapValue(t: IrType): boolean {
     // a regex holds no references), map form.
     case "regex":
       return true;
+    // A closure (Map<string, (x: T) => U> — the factory/handler registry):
+    // the index-signature overflow story (scr_closure adapters; closures
+    // are cycle-headered and traced, so a handler capturing its own
+    // registry collects).
+    case "func":
+      return true;
     default:
       return false;
   }
@@ -681,25 +852,31 @@ export function isSupportedMapValue(t: IrType): boolean {
  * Nested index-signature RECORDS ride the record kind like any other.
  * Shared frontend (mapType) / validator. */
 export function isSupportedIndexValue(t: IrType): boolean {
-  return (
-    t.kind === "dyn" ||
-    t.kind === "func" ||
-    isSupportedMapValue(t)
-  );
+  return t.kind === "dyn" || isSupportedMapValue(t);
 }
 
 export function funcOf(params: IrType[], ret: IrType): IrType {
   return { kind: "func", params, ret };
 }
 
-/** Maps, sets and promises may share a union with null/undefined only.
- * Unit tag tests can narrow nullable containers without losing identity;
- * arbitrary data siblings require a separate runtime narrowing operation.
- * Share this rule across checker mapping, synthesized unions and validation. */
+/** Maps and sets use tagged union storage and retain their native identity.
+ * Joined unions (inferred joins of member reads and array elements) keep
+ * promises nullable-only; declared maybe-promise unions are admitted by
+ * maybePromiseUnionArmsOk. */
 export function unionContainerArmsOk(arms: IrType[]): boolean {
   return arms.every(
-    (a, i) => (a.kind !== "map" && a.kind !== "set" && a.kind !== "promise") || arms.every((b, j) => j === i || isUnitType(b)),
+    (a, i) => a.kind !== "promise" || arms.every((b, j) => j === i || isUnitType(b)),
   );
+}
+
+/** The MAYBE-PROMISE union (`T | Promise<T>`, `Promise<R | void> | R |
+ * void`): at most one promise arm, beside unit or data arms. The union tag
+ * is the `instanceof Promise` test, and `await` / async `return` branch on
+ * it (the promise arm awaits or adopts, the other arms take the
+ * non-thenable path). Data arms must not be thenable; the type mapper
+ * checks that against the checker types before minting such a union. */
+export function maybePromiseUnionArmsOk(arms: IrType[]): boolean {
+  return arms.filter((a) => a.kind === "promise").length <= 1;
 }
 
 /** Canonical, injective text form of an IrType — the building block of
@@ -738,7 +915,7 @@ export function typeKey(t: IrType): string {
     case "set":
       return `set<${typeKey(t.elem)}>`;
     case "func":
-      return `func(${[...t.params.map(typeKey), ...(t.rest ? [t.restAbi === "jsval" ? "...jsval[]" : t.restAbi === "typed" ? "...typed[]" : t.argumentsAll ? "arguments[]" : "...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
+      return `func(${[...t.params.map(typeKey), ...(t.rest ? [t.restAbi === "typed" ? "...typed[]" : t.argumentsAll ? "arguments[]" : "...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
     case "object":
       return `object:${t.className}`;
     case "classval":
@@ -761,14 +938,45 @@ export function typeKey(t: IrType): string {
   }
 }
 
+/** The type a CALL SITE (or function value) receives from a module
+ * function: an async body's returnType is the promise's INNER type, so
+ * calls and closures over it see Promise<T>; a generator body's is the
+ * TReturn channel, so call sites see the generator type. The one place
+ * the body/call-site split is spelled out, for the validator and lowering. */
+export function callSiteReturnType(fn: IrFunction): IrType {
+  if (fn.async && fn.generator !== undefined) {
+    return {
+      kind: "generator",
+      async: true,
+      yieldT: fn.generator.yieldT,
+      retT: fn.returnType,
+      nextT: fn.generator.nextT,
+    };
+  }
+  if (fn.async) return { kind: "promise", inner: fn.returnType };
+  if (fn.generator !== undefined) {
+    return {
+      kind: "generator",
+      yieldT: fn.generator.yieldT,
+      retT: fn.returnType,
+      nextT: fn.generator.nextT,
+    };
+  }
+  return fn.returnType;
+}
+
 export function typeEquals(a: IrType, b: IrType): boolean {
   // Dispatch once: a chain of negative narrowing checks repeatedly retags
   // the remaining variants when this comparator runs in the native compiler.
   switch (a.kind) {
-    case "array": return b.kind === "array" && typeEquals(a.elem, b.elem);
-    case "bytes": return b.kind === "bytes" && a.elem === b.elem;
-    case "map": return b.kind === "map" && typeEquals(a.key, b.key) && typeEquals(a.value, b.value);
-    case "set": return b.kind === "set" && typeEquals(a.elem, b.elem);
+    case "array":
+      return b.kind === "array" && typeEquals(a.elem, b.elem);
+    case "bytes":
+      return b.kind === "bytes" && a.elem === b.elem;
+    case "map":
+      return b.kind === "map" && typeEquals(a.key, b.key) && typeEquals(a.value, b.value);
+    case "set":
+      return b.kind === "set" && typeEquals(a.elem, b.elem);
     case "func":
       return (
         b.kind === "func" &&
@@ -779,13 +987,19 @@ export function typeEquals(a: IrType, b: IrType): boolean {
         a.params.every((p, i) => typeEquals(p, b.params[i]!)) &&
         typeEquals(a.ret, b.ret)
       );
-    case "object": return b.kind === "object" && a.className === b.className;
-    case "classval": return b.kind === "classval" && a.className === b.className;
-    case "moduleNs": return b.kind === "moduleNs" && a.moduleId === b.moduleId;
+    case "object":
+      return b.kind === "object" && a.className === b.className;
+    case "classval":
+      return b.kind === "classval" && a.className === b.className;
+    case "moduleNs":
+      return b.kind === "moduleNs" && a.moduleId === b.moduleId;
     // Shapes and unions are interned, so their ids determine equality.
-    case "record": return b.kind === "record" && a.shapeId === b.shapeId;
-    case "union": return b.kind === "union" && a.unionId === b.unionId;
-    case "promise": return b.kind === "promise" && typeEquals(a.inner, b.inner);
+    case "record":
+      return b.kind === "record" && a.shapeId === b.shapeId;
+    case "union":
+      return b.kind === "union" && a.unionId === b.unionId;
+    case "promise":
+      return b.kind === "promise" && typeEquals(a.inner, b.inner);
     case "generator":
       return (
         b.kind === "generator" &&
@@ -794,7 +1008,8 @@ export function typeEquals(a: IrType, b: IrType): boolean {
         typeEquals(a.retT, b.retT) &&
         typeEquals(a.nextT, b.nextT)
       );
-    default: return a.kind === b.kind;
+    default:
+      return a.kind === b.kind;
   }
 }
 
@@ -811,7 +1026,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 13;
+  irVersion: 17;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -827,31 +1042,6 @@ export interface IrModule {
    * per-file `%init.<i>` functions; ids live in a distinct "%g." namespace so
    * they can never collide with function-local ids. */
   globals?: IrGlobal[];
-  /** The embedded npm runtime graph (--dynamic builds with npm imports):
-   * every reached module's SOURCE, keyed by resolved path, plus the
-   * (importer, specifier) → target edges the island's module loader and
-   * require shim resolve against. Emitted as static strings — binaries
-   * never read node_modules at runtime. Edge targets are module keys or
-   * "node:*" builtins (island-shimmed). */
-  embedded?: {
-    /** `esm` (CommonJS modules only) is the synthesized ESM facade the
-     * island loader evaluates when an ES module imports the CJS file:
-     * default plus the named exports LEXED from the source at build time
-     * (cjs-lexer.ts — the compiler's port of Node's vendored CJS lexer). */
-    modules: {
-      key: string;
-      source: string;
-      format: "esm" | "cjs" | "json";
-      esm?: string;
-      /** Parsed/bound embedded source reaches the engine's global fetch. */
-      usesFetch?: true;
-    }[];
-    /** `kind` picks Node's "exports" condition set per CALL FORM: one
-     * (from, specifier) can name a dual package's ESM entry behind an
-     * "import" edge AND its CJS entry behind a "require" edge; "any"
-     * serves both lookups (relative files, builtins). */
-    edges: { from: string; specifier: string; to: string; kind: "any" | "import" | "require" }[];
-  };
   /** Record shapes, in first-seen (`r0`, `r1`, ...) order. Fields are in
    * CANONICAL order (sorted by name) — the shape's identity; a `recordLit`'s
    * fields stay in source order (evaluation order) independently. The
@@ -867,6 +1057,35 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
+  /** Executable roots run in isolated native worker contexts. */
+  workers?: boolean;
+  /** The program has declaration-typed boundary casts (decl-projection.ts):
+   * closures boxed for package code return records and arrays as live
+   * capsules, so a value that comes back keeps its identity. */
+  declBoundary?: true;
+  /** The program constructs LifetimeRegion (@scriptc/experimental): every
+   * ProgramLifetime instance lives in a counted region (the region.*
+   * intrinsics; backend/llvm/regions.ts). */
+  lifetimeRegions?: true;
+  /** Classes used as ThreadSlots keys (@scriptc/experimental): the root of
+   * each one's hierarchy carries a slot word (the slots.* intrinsics;
+   * backend/llvm/thread-slots.ts). */
+  threadSlotKeys?: string[];
+  /** typeKeys of the array types whose values the program may freeze
+   * (frontend frozen-records.ts): their writes test the array's frozen bit
+   * (SCR_ARR_FROZEN) and throw Node's TypeError when it is set. */
+  freezableArrays?: string[];
+  /** The program freezes, seals or prevents extensions of untyped values
+   * (frontend frozen-records.ts noteUntypedIntegrity). Class hierarchies
+   * that can be held there carry an integrity word, which the runtime sets
+   * through the commit of the instance's checked view. */
+  untypedIntegrity?: true;
+  /** The entry module is CommonJS under Node's classification. Node runs a
+   * CommonJS main synchronously and drains process.nextTick callbacks
+   * before promise jobs at the first checkpoint; an ES-module main's
+   * evaluation is itself awaited, so promise jobs queued by its body run
+   * first. The event loop selects the matching first checkpoint. */
+  commonJsEntry?: boolean;
   /** Outbound native FFI declarations used by `ffiCall` expressions.
    * These are link-time C ABI imports, not runtime dynamic-library handles:
    * executable builds resolve their symbols from the manifest's archive
@@ -878,9 +1097,103 @@ export interface IrModule {
    * emissions stay conformance-identical by construction. Absent on every
    * executable build (the backends emit main() exactly as always). */
   lib?: IrLibSection;
+  /** Contract types (@scriptc/types) the frontend verified against every
+   * write in the program (ir/contract-check.ts). Backends may rely on them
+   * unconditionally. Absent when the program writes no contract. */
+  contracts?: IrContracts;
+  /** Local number arrays (`function\0local`) the backend may store as
+   * int32 slots, proposed by ir/int32-arrays.ts after their element-reader
+   * calls were inlined; the int32 slot analysis keeps the ones whose every
+   * stored element it proves an int32, and those whose stores are exact
+   * integers with checked stores. Absent when there is none. */
+  int32ArrayCandidates?: string[];
+  /** The WebAssembly modules translated into this program (wasm/
+   * translate.ts), present exactly when the program uses the WebAssembly
+   * API (possibly empty). The backend appends each module's translation
+   * and emits the registry the runtime looks modules up in. */
+  wasmModules?: IrWasmModule[];
+  /** The modules the build saw but does not translate, with the reason,
+   * present with wasmModules. The backend emits them in a second table, so
+   * loading one rejects with a CompileError that names the reason. */
+  wasmUntranslated?: IrWasmUntranslated[];
+  /** The program calls WebAssembly.Module.customSections, so translated
+   * modules keep their custom sections (otherwise they carry none, and
+   * debug sections cost nothing). */
+  wasmCustomSections?: boolean;
 }
 
-export type IrFfiValueParamClass = "f64" | "f32" | "bool" | "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "i64" | "u64" | "pointer" | "string" | "bytes" | "mutable-bytes";
+/** A WebAssembly module whose bytes the build saw, validated within the
+ * translatable feature level. */
+export interface IrWasmModule {
+  /** Hex SHA-256 of the bytes. */
+  sha256: string;
+  /** The bytes, base64. */
+  bytes: string;
+}
+
+/** A WebAssembly module whose bytes the build saw but does not translate. */
+export interface IrWasmUntranslated {
+  /** Hex SHA-256 of the bytes. */
+  sha256: string;
+  /** The byte length. */
+  size: number;
+  /** Why the module is not translated, as a clause ("it uses simd, ..."). */
+  reason: string;
+}
+
+/** Verified contract facts, keyed by IR names. */
+export interface IrContracts {
+  /** Int32 class field families: `${topmost declaring class}\0${field}`. */
+  int32Fields?: string[];
+  /** Int32 parameters: `${function}\0${localId}`. */
+  int32Params?: string[];
+  /** Functions whose every return is an int32. */
+  int32Returns?: string[];
+  /** Int32 locals (`${function}\0${localId}`, including every capture of a
+   * captured binding) and module globals (`\0${globalId}`). */
+  int32Locals?: string[];
+  /** Number-array slots whose arrays hold only int32 elements (Int32[]):
+   * every element store into any array that can reach them was proven an
+   * int32, so a present element read through them is an int32 (holes and
+   * missing indices still read as undefined). Keys: `l:${function}\0${localId}`
+   * (locals and parameters), `g:${globalId}`, `f:${field family}`,
+   * `s:${shapeId}\0${field}` (record fields) and `r:${function}` (results);
+   * see int32-slots.ts int32ElementSlot. */
+  int32Elements?: string[];
+  /** Functions that cannot throw (NoThrow). */
+  noThrow?: string[];
+  /** Acyclic classes and object types, as cycle-analysis units
+   * (`object:<class>`, `record:<id>`, `union:<id>`): proven unable to lie
+   * on a reference cycle, so they carry no cycle header. */
+  acyclic?: string[];
+  /** Immutable module constants built from fresh literals: the backend
+   * makes their graphs immortal once initialized, and reads through them
+   * need no reference counting. */
+  immortalGlobals?: string[];
+  /** Root classes declared `implements ProgramLifetime`: instances of every
+   * class in their hierarchies are never freed (no collector header, a
+   * reference count that publication alone turns into SIZE_MAX), their
+   * static reference counting is elided, and the cycle analysis treats them
+   * as leaves. */
+  programLifetime?: string[];
+}
+
+export type IrFfiValueParamClass =
+  | "f64"
+  | "f32"
+  | "bool"
+  | "u8"
+  | "i8"
+  | "u16"
+  | "i16"
+  | "u32"
+  | "i32"
+  | "i64"
+  | "u64"
+  | "pointer"
+  | "string"
+  | "bytes"
+  | "mutable-bytes";
 export type IrFfiCallbackParamClass =
   | "f64"
   | "f32"
@@ -897,7 +1210,20 @@ export type IrFfiCallbackParamClass =
   | "cstring"
   | "string"
   | "bytes";
-export type IrFfiReturnClass = "f64" | "f32" | "bool" | "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "i64" | "u64" | "pointer" | "void";
+export type IrFfiReturnClass =
+  | "f64"
+  | "f32"
+  | "bool"
+  | "u8"
+  | "i8"
+  | "u16"
+  | "i16"
+  | "u32"
+  | "i32"
+  | "i64"
+  | "u64"
+  | "pointer"
+  | "void";
 
 export interface IrFfiContextParam {
   /** Manifest-local id of the callback whose ScrClosure* occupies this ABI slot. */
@@ -1025,8 +1351,19 @@ export interface IrLibExport {
   /** i64/u64 (ask 4): int64_t/uint64_t at the C edge — inbound values
    * range-check in the wrapper (`inboundIntTrap`), internal call sites
    * and returns are compile-time proven before this lands on the IR. */
-  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32" | "i64" | "u64")[];
-  returns: "f64" | "bool" | "string" | "bytes" | "void" | "i64" | "u64";
+  params: (
+    | "f64"
+    | "bool"
+    | "string"
+    | "cstring"
+    | "bytes"
+    | "u8"
+    | "u32"
+    | "i32"
+    | "i64"
+    | "u64"
+  )[];
+  returns: "f64" | "bool" | "string" | "cstring" | "bytes" | "void" | "i64" | "u64";
   /** The exact sink-message bytes this wrapper passes to the inbound-bytes
    * marshalling helper's trap — present exactly when a parameter is
    * bytes-classed. Already the assembled structured trap-teaching form
@@ -1041,6 +1378,10 @@ export interface IrLibExport {
    * value cannot ride f64 exactly (|v| past 2^53−1). Same assembled
    * structured form and the same SC4012 code — one host-contract story. */
   inboundIntTrap?: string;
+  /** The sibling message for a NULL cstring parameter: present exactly
+   * when a parameter is cstring-classed, passed to scr_library_cstr_in.
+   * Same assembled structured form and the same SC4012 code. */
+  inboundCstringTrap?: string;
 }
 
 /** One runtime-trap overlay row: the profile's teaching (replaces the
@@ -1067,7 +1408,7 @@ export interface IrLibCallback {
   name: string;
   /** The runtime channel slot (profile declaration order). */
   slot: number;
-  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
+  params: ("f64" | "bool" | "string" | "cstring" | "bytes" | "u8" | "u32" | "i32")[];
   returns: "f64" | "bool" | "u8" | "u32" | "i32" | "i64" | "u64" | "pointer" | "void";
   /** The unregistered-call trap text (a DETECTED trap: plain bytes the
    * library funnel classifies SC4025 and assembles with the current
@@ -1099,7 +1440,7 @@ export interface IrLibSection {
   /** The host-callback registration symbol; present exactly when
    * `callbacks` is (the profile pairs them — SC4001 otherwise). Both
    * fields stay ABSENT on callback-free profiles so their serialized IR
-   * and emitted TU are unchanged byte-for-byte. */
+   * and emitted TU stay identical. */
   callbackRegisterSymbol?: string;
   /** The resolved host-callback channels, slot-ordered. */
   callbacks?: IrLibCallback[];
@@ -1151,17 +1492,35 @@ export interface IrClassDef {
   jsName?: string;
   /** JavaScript constructor arity, ending before the first default or rest parameter. */
   jsLength?: number;
+  /** The class declares public static fields. util.inspect prints them
+   * after the class tag; a class object reached through `unknown` does
+   * not carry them unless the runtime holds its static table. */
+  ownStaticFields?: true;
   /** Zero-argument native helper returning the shared prototype data object.
    * Used when materializing an instance's own-property view. */
   prototypeDataHelper?: string;
   /** Native instance to its actual prototype, including factory captures and subclasses. */
   instancePrototypeHelper?: string;
+  /** Native instance to the string its inherited Symbol.toStringTag getter
+   * answers, read by the runtime for an instance seen as `unknown`. */
+  stringTagHelper?: string;
   /** Public JavaScript fields record their creation in the shared property
    * bag. Its descriptors preserve presence and insertion order independently
    * of native layout order; field values remain in their native slots. */
   tracksOwnFields?: boolean;
-  /** Stable module symbol identities for public instance layout fields. */
-  symbolFields?: { field: string; globalId: string }[];
+  /** Error subclasses: the field an instance's own `name` follows among its
+   * own properties, or null when it precedes every field. Absent when no
+   * class of the chain sets `name` during construction, and then an own
+   * `name` follows every other own property. */
+  errorNameAfter?: string | null;
+  /** JavaScript Error subclasses with a property bag: a view committed by a
+   * dynamic write keeps `name` and `message` where the bag recorded them
+   * (scr_error_dyn_follow_bag). */
+  errorBagOrder?: boolean;
+  /** Stable symbol identities for public instance layout fields: the
+   * module global holding the key, or the name of the well-known symbol
+   * (`toStringTag` for `Symbol.toStringTag`). */
+  symbolFields?: ({ field: string } & ({ globalId: string } | { wellKnown: string }))[];
   /** RUNTIME-PROVIDED class (the builtin Error hierarchy): the struct, RC
    * helpers, and vtable live in the runtime (ScrError / scr_error_*), so
    * backends emit no definitions for it — only the preorder-interval
@@ -1187,6 +1546,10 @@ export interface IrClassDef {
    * `get:<prop>` / `set:<prop>` entries — names no user identifier can
    * spell — and behave as ordinary methods here. */
   methods?: string[];
+  /** String names of the methods and accessors this class declares on its
+   * prototype (not inherited), independent of method reachability. A
+   * reflective `in` over an instance seen as `unknown` answers them. */
+  prototypeNames?: string[];
   /** Declared `abstract class` — never instantiated (tsc rejects `new` on
    * it, including through class values), so its own vtable entries for
    * abstract slots may stay empty. */
@@ -1198,14 +1561,9 @@ export interface IrClassDef {
    * identical), and tsc guarantees each instantiable class in the
    * declaring subtree implements them. */
   abstractMethods?: string[];
-  /** GENERIC-CLASS INSTANTIATIONS only (`Box%0` for `Box<number>` — the
-   * generic-fn mangle): the FAMILY class's IR name — the synthetic,
-   * never-constructed ancestor registered under the generic class's own
-   * name that every instantiation extends. JS has ONE `Box` at runtime, so
-   * the instantiation's emitted CLASS OBJECT carries the family's preorder
-   * interval (instanceof through a class value answers for the whole
-   * family, exactly Node); everything else about the instantiation is an
-   * ordinary class. The validator checks the family is an ancestor. */
+  /** Generic family identity, separate from the concrete layout base.
+   * Type arguments specialize storage; JavaScript class identity remains
+   * shared by every specialization and its derived instances. */
   genericOf?: string;
   loc: SrcLoc;
 }
@@ -1219,23 +1577,38 @@ export interface IrClassDef {
  * program's preorder numbering always covers them — the runtime's own
  * throws (JSON/dynCheck/regex) mint instances of these classes whether or
  * not user code mentions Error. */
-export const RUNTIME_ERROR_CLASSES: ReadonlyMap<string, { lib: string; kind: number; base: string | null }> =
-  new Map([
-    ["%Error", { lib: "Error", kind: 0, base: null }],
-    ["%TypeError", { lib: "TypeError", kind: 1, base: "%Error" }],
-    ["%RangeError", { lib: "RangeError", kind: 2, base: "%Error" }],
-    ["%SyntaxError", { lib: "SyntaxError", kind: 3, base: "%Error" }],
-    // DOMException — the web-standard error shape (a Node global since
-    // v17). Its extra state (the legacy numeric code, the options form's
-    // cause) lives in runtime-side slots BEYOND the ScrError prefix the IR
-    // fields describe, reached only through the error.dom* libCalls — so
-    // user `extends DOMException` is fenced (the subclass layout would
-    // overlap the hidden slots), while the standard Error classes extend freely.
-    ["%DOMException", { lib: "DOMException", kind: 4, base: "%Error" }],
-    ["%ReferenceError", { lib: "ReferenceError", kind: 5, base: "%Error" }],
-    ["%EvalError", { lib: "EvalError", kind: 6, base: "%Error" }],
-    ["%URIError", { lib: "URIError", kind: 7, base: "%Error" }],
-  ]);
+export const RUNTIME_ERROR_CLASSES: ReadonlyMap<
+  string,
+  { lib: string; kind: number; base: string | null }
+> = new Map([
+  ["%Error", { lib: "Error", kind: 0, base: null }],
+  ["%TypeError", { lib: "TypeError", kind: 1, base: "%Error" }],
+  ["%RangeError", { lib: "RangeError", kind: 2, base: "%Error" }],
+  ["%SyntaxError", { lib: "SyntaxError", kind: 3, base: "%Error" }],
+  // DOMException — the web-standard error shape (a Node global since
+  // v17). Its extra state (the legacy numeric code, the options form's
+  // cause) lives in runtime-side slots BEYOND the ScrError prefix the IR
+  // fields describe, reached only through the error.dom* libCalls — so
+  // user `extends DOMException` is fenced (the subclass layout would
+  // overlap the hidden slots), while the standard Error classes extend freely.
+  ["%DOMException", { lib: "DOMException", kind: 4, base: "%Error" }],
+  ["%ReferenceError", { lib: "ReferenceError", kind: 5, base: "%Error" }],
+  ["%EvalError", { lib: "EvalError", kind: 6, base: "%Error" }],
+  ["%URIError", { lib: "URIError", kind: 7, base: "%Error" }],
+  // AggregateError — Promise.any's rejection and its own constructor. Its
+  // `errors` list lives in a runtime-side slot beyond the ScrError prefix
+  // (the DOMException arrangement), read through error.aggregateErrors, so
+  // user `extends AggregateError` is fenced too.
+  ["%AggregateError", { lib: "AggregateError", kind: 8, base: "%Error" }],
+  // node:assert's AssertionError — every assertion failure and its own
+  // constructor. The Error layout; actual, expected, operator,
+  // generatedMessage and diff are properties of the error's dyn view.
+  ["%AssertionError", { lib: "AssertionError", kind: 9, base: "%Error" }],
+  // SuppressedError — the error a `using` disposal raises over a pending
+  // error, and its own constructor. The Error layout; error and suppressed
+  // are non-enumerable properties of the error's dyn view.
+  ["%SuppressedError", { lib: "SuppressedError", kind: 10, base: "%Error" }],
+]);
 
 /** The runtime-provided node:events EventEmitter class (ScrEmitter /
  * scr_emitter_*, scr_events_emitter.c — link-gated by moduleUsesEmitter,
@@ -1248,6 +1621,49 @@ export const RUNTIME_ERROR_CLASSES: ReadonlyMap<string, { lib: string; kind: num
  * The emitter hierarchy is UNCONDITIONALLY cycle-capable: the registry
  * owns listener closures, whatever the subclass fields say. */
 export const RUNTIME_EMITTER_CLASS = "%EventEmitter";
+
+/** The function that construction through a class value calls, and the
+ * index of its first argument. A program class constructs through
+ * `%C.constructor(this, ...)` after the thunk allocates; a runtime-provided
+ * class (EventEmitter, the stream and error classes) through the
+ * frontend's `%C.construct(...)`, which allocates through the runtime and
+ * returns the new instance. */
+export function classValueConstructor(def: { name: string; runtime?: true }): {
+  fn: string;
+  firstArg: number;
+} {
+  return def.runtime
+    ? { fn: `%${def.name}.construct`, firstArg: 0 }
+    : { fn: `%${def.name}.constructor`, firstArg: 1 };
+}
+
+/** Whether construction through a class value typed as `sup` may call
+ * `sub`'s construct thunk: both class-value constructors exist and take the
+ * same argument types after the receiver. The classval upcast rule and the
+ * checked class-value boundary both rest on it. */
+export function classValueAbiEquals(
+  sub: { name: string; runtime?: true },
+  sup: { name: string; runtime?: true },
+  functions: ReadonlyMap<string, IrFunction>,
+): boolean {
+  const subValueCtor = classValueConstructor(sub);
+  const supValueCtor = classValueConstructor(sup);
+  const subCtor = functions.get(subValueCtor.fn);
+  const supCtor = functions.get(supValueCtor.fn);
+  if (!subCtor || !supCtor) return false;
+  const subArgs = subCtor.params.slice(subValueCtor.firstArg);
+  const supArgs = supCtor.params.slice(supValueCtor.firstArg);
+  return (
+    subArgs.length === supArgs.length &&
+    subArgs.every((p, i) => typeEquals(p.type, supArgs[i]!.type))
+  );
+}
+
+/** The JavaScript `.name` of a class: its jsName, or the runtime-provided
+ * class's own name (`%TypeError` is TypeError). */
+export function classJsName(def: { name: string; runtime?: true; jsName?: string }): string {
+  return def.jsName ?? (def.runtime ? def.name.replace(/^%/, "") : "");
+}
 
 /** The runtime-provided node:stream classes (ScrStream / scr_stream_*,
  * scr_stream.c — link-gated by moduleUsesStream). They root at the
@@ -1272,6 +1688,35 @@ export const RUNTIME_STREAM_CLASSES: ReadonlyMap<
   ["%Duplex", { lib: "Duplex", base: "%Readable", sides: "rw" }],
   ["%Transform", { lib: "Transform", base: "%Duplex", sides: "rw" }],
   ["%PassThrough", { lib: "PassThrough", base: "%Transform", sides: "rw" }],
+]);
+
+/** The runtime-provided EventTarget and Event bases of compiled
+ * subclasses (`class Bus extends EventTarget`, `class Ping extends
+ * Event`; scr_event_target.c, link-gated with the rest of the EventTarget
+ * surface). Plain `new EventTarget()` / `new Event()` values stay
+ * checked-dynamic handles; these classes exist only as roots of program
+ * hierarchies. Like the emitter, backends emit no struct/RC/vtable for
+ * them: subclass structs embed the runtime prefix (the engine-state
+ * pointer created by super() and the display-name slot stamped by the
+ * emitted allocation), and the instances' checked-dynamic capsules use
+ * the runtime RC adapters, which is how the engine recognizes them. */
+export const RUNTIME_EVENT_TARGET_CLASS = "%EventTarget";
+export const RUNTIME_EVENT_CLASS = "%Event";
+
+/** node:zlib's stream classes and their node_zlib_mode numbers. Instances
+ * are runtime Transform streams (`%Transform` values built by the
+ * zlib.streamNew libCall, scr_zlib_stream.c); the class name only sets
+ * the display name. */
+export const ZLIB_STREAM_MODES: ReadonlyMap<string, number> = new Map([
+  ["Deflate", 1],
+  ["Inflate", 2],
+  ["Gzip", 3],
+  ["Gunzip", 4],
+  ["DeflateRaw", 5],
+  ["InflateRaw", 6],
+  ["Unzip", 7],
+  ["BrotliDecompress", 8],
+  ["BrotliCompress", 9],
 ]);
 
 export interface IrRecordShape {
@@ -1301,6 +1746,10 @@ export interface IrRecordShape {
    * dynCheck), and JSON serialization appends overflow entries after the
    * declared fields in insertion order. */
   indexValue?: IrType;
+  /** Values of this shape may be frozen (frozen-records.ts): their rc word
+   * can carry the frozen bit, which their release ignores, and every write
+   * to them checks it. */
+  freezable?: true;
   /** Field names in FIRST-SEEN declaration order (the checker's property
    * order of the first ts.Type interned to this shape) — metadata, NOT
    * part of the interned identity: a later structurally-equal type with a
@@ -1313,6 +1762,44 @@ export interface IrRecordShape {
    * fields carry that declaredOrder OMITS are internal '%'-fields (Dirent's
    * %dtype) — hidden from every key-order surface, JSON included. */
   declaredOrder?: string[];
+  /** Shapes with accessor slots: every own key in declaration order, with
+   * an accessor property named once (see accessorSlotProp). The
+   * checked-dynamic copy lists its keys in this order. */
+  accessorOrder?: string[];
+  /** Every order the shape's values enumerate their keys in, when its
+   * object literals write the keys in more than one order (see
+   * key-order-witness.ts); declaredOrder is the first. Each value holds the
+   * index of its order in the hidden number field KEY_ORDER_FIELD: the
+   * literal that wrote it stores its order's index, a copy its source's,
+   * and every other construction leaves 0. Each key-order surface
+   * dispatches on that field. */
+  orderVariants?: string[][];
+}
+
+/** The hidden field of a shape with orderVariants: the index of the value's
+ * key order. */
+export const KEY_ORDER_FIELD = "%order";
+
+/** The orders a record shape's values enumerate their keys in: each order
+ * of a shape with orderVariants, or its one table. */
+export function shapeKeyOrders(shape: IrRecordShape): readonly (readonly string[])[] {
+  return shape.orderVariants ?? [shape.declaredOrder ?? shape.fields.map((f) => f.name)];
+}
+
+/** fs.Dirent rows: the hidden %dtype entry kind (libuv's UV_DIRENT
+ * encoding), then name and parentPath (type-mapper's interned shape). */
+export function isDirentShape(shape: IrRecordShape): boolean {
+  return (
+    !shape.tuple &&
+    shape.indexValue === undefined &&
+    shape.fields.length === 3 &&
+    shape.fields[0]!.name === "%dtype" &&
+    shape.fields[0]!.type.kind === "f64" &&
+    shape.fields[1]!.name === "name" &&
+    shape.fields[1]!.type.kind === "string" &&
+    shape.fields[2]!.name === "parentPath" &&
+    shape.fields[2]!.type.kind === "string"
+  );
 }
 
 /** Codec records have private native state, not a structurally checkable
@@ -1321,6 +1808,34 @@ export function recordTextCodecClass(shape: IrRecordShape): "TextEncoder" | "Tex
   if (shape.fields.some((f) => f.name === "%TextEncoder")) return "TextEncoder";
   if (shape.fields.some((f) => f.name === "%TextDecoder")) return "TextDecoder";
   return null;
+}
+
+/** The class of a record that crosses checked-dynamic slots as a native
+ * handle: the codecs, and a StringDecoder (type-mapper.ts: its canonical
+ * encoding and the packing of its pending bytes). */
+export function recordHandleCodecClass(
+  shape: IrRecordShape,
+): "TextEncoder" | "TextDecoder" | "StringDecoder" | null {
+  const codec = recordTextCodecClass(shape);
+  if (codec !== null) return codec;
+  return shape.fields.length === 2 &&
+    shape.fields[0]!.name === "%enc" &&
+    shape.fields[1]!.name === "%pending"
+    ? "StringDecoder"
+    : null;
+}
+
+/** The codec class of a TextEncoder, TextDecoder or StringDecoder record
+ * type, else null. Such a record crosses an `unknown` slot as a native
+ * handle that holds the record itself (scr_text_codec_dyn.c), never as a
+ * copy or a field view. */
+export function textCodecRecordClass(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+): "TextEncoder" | "TextDecoder" | "StringDecoder" | null {
+  if (t.kind !== "record") return null;
+  const shape = getRecord(t.shapeId);
+  return shape ? recordHandleCodecClass(shape) : null;
 }
 
 /** Object-literal ACCESSOR properties (`{ get x() {...}, set x(v) {...} }`)
@@ -1371,6 +1886,11 @@ export interface IrFunction {
   /** Generated reflection dispatch contains speculative source-member edges.
    * Target-only host operations behind those edges retain runtime refusals. */
   speculativeDispatch?: boolean;
+  /** A read helper the backend can answer directly for dyn arrays and live
+   * array capsules, calling the helper only when that read has no answer.
+   * `index`: a computed read `(value, key)` whose callers pass a number
+   * converted to a string as the key. */
+  fastRead?: "index";
   params: IrParam[];
   returnType: IrType;
   /** All locals including params, pre-collected and scope-flat: ids are
@@ -1402,7 +1922,8 @@ export interface IrFunction {
    * completion verdict instead of a build-time-selected member. */
   asyncCycleCacheGlobal?: string;
   /** Generator (`function*` / `async function*`): the body runs on a fiber created SUSPENDED
-   * (nothing runs until the first `.next()`); `returnType` is the
+   * (nothing runs until the first `.next()`; backends may instead compile a
+   * synchronous body as a stackless coroutine with the same protocol); `returnType` is the
    * generator's TReturn (VOID when it carries no value — `return;`
    * completes with the undefined arm) while call sites receive the
    * generator type `{ async?, yieldT, retT: returnType, nextT }` from an emitted
@@ -1410,11 +1931,36 @@ export interface IrFunction {
    * out, `nextT` what `.next(v)` sends in (the yield expression's result
    * type). `async` alongside this field marks an async generator: its
    * resume methods queue requests and return promises. */
-  generator?: { yieldT: IrType; nextT: IrType; resultType: IrType & { kind: "record" } };
+  generator?: {
+    yieldT: IrType;
+    nextT: IrType;
+    resultType: IrType & { kind: "record" };
+    /** The first parameter is a generator this one reads from (an
+     * iterator helper's source): `.return()` before the first `.next()`
+     * closes it. */
+    closesSource?: true;
+    /** The @@toStringTag the object prints with (util.inspect,
+     * Object.prototype.toString) when it is not a generator object:
+     * "Iterator Helper", "Array Iterator", "String Iterator". A tag that
+     * starts with '!' marks a generator standing in for an object of
+     * another class, which those refuse to print. */
+    tag?: string;
+    /** The first parameter is a generator this one adapts: it prints with
+     * that generator's tag. */
+    inheritsTag?: true;
+  };
   /** Source function name for native error stack frames. */
   sourceName?: string;
   /** Ordinary authored function declarations/expressions own a prototype. */
   ownsPrototype?: true;
+  /** The function's execution tier (ir/tiers.ts). Absent means static: the
+   * function may use dynamic values only through boundary operations
+   * (dynFrom, dynCheck, kind tests) and moves, which the validator enforces
+   * (invariant I1). "dynamic" admits the dynamic operation vocabulary
+   * (dynKeyGet, dynCall, dyn.* builtins, ...). Lowering assigns the field
+   * from the body (assignLegacyTiers); stage S2 of the two-tier design
+   * keeps it out of serialized IR, so loaders derive it again. */
+  tier?: "dynamic";
   body: IrStmt[];
   loc: SrcLoc;
 }
@@ -1423,6 +1969,9 @@ export interface IrParam {
   localId: string;
   name: string;
   type: IrType;
+  /** Callers pass an owned reference, which the body holds for its whole
+   * run, even when the parameter is never rebound. */
+  owned?: true;
 }
 
 export interface IrGlobal {
@@ -1434,6 +1983,11 @@ export interface IrGlobal {
   /** Lexical record/function/checked-value bindings use their initially-null
    * pointer as a TDZ sentinel. Reads and later writes throw until initializing assign. */
   tdz?: true;
+  /** An import-cycle binding whose initialization state lives in this BOOL
+   * global instead: the declaration's store is the `assign` marked
+   * `initializes`, followed by the flag's set; accesses that can run
+   * earlier test it with the module.tdzCheck intrinsic. */
+  initFlag?: string;
   /** Original declaration and lexical scope, when this is a source binding. */
   source?: IrBindingSource;
 }
@@ -1462,7 +2016,10 @@ export interface IrLocal {
    * empty throws JS's catchable ReferenceError ("Cannot access 'name'
    * before initialization"), exactly Node's temporal dead zone. Always
    * paired with `boxed`; scalar payloads use a one-element array cell so
-   * the NULL slot remains the TDZ sentinel. Capture entries inherit the flag. */
+   * the NULL slot remains the TDZ sentinel. Backends whose values of the
+   * binding's type can themselves be NULL (the LLVM backend's nullable
+   * unions, where NULL is `null`/`undefined`) mark the empty box with a
+   * distinct sentinel instead. Capture entries inherit the flag. */
   tdz?: true;
 }
 
@@ -1530,8 +2087,21 @@ export type IrStmt =
   | { kind: "arraySet"; arr: IrExpr; index: IrExpr; value: IrExpr; loc: SrcLoc }
   /** Writable `a.length = n`: growth creates holes and truncation releases
    * removed reference elements. Invalid array lengths raise a catchable
-   * RangeError from the runtime. */
-  | { kind: "arraySetLength"; arr: IrExpr; length: IrExpr; loc: SrcLoc }
+   * RangeError from the runtime. `pop` marks the stores that implement
+   * `pop()`: a frozen (published) array fails with pop's TypeError rather
+   * than the length assignment's, and pop's `length = 0` store on an empty
+   * array is dropped unless the array may be frozen. `reserve` marks a
+   * capacity hint instead: dense storage for `length` elements of a fresh
+   * array that statements fill next, with no change to its length and no
+   * observable effect. */
+  | {
+      kind: "arraySetLength";
+      arr: IrExpr;
+      length: IrExpr;
+      loc: SrcLoc;
+      pop?: boolean;
+      reserve?: boolean;
+    }
   /** Write an explicit present `undefined` state without shrinking length. */
   | { kind: "arraySetUndefined"; arr: IrExpr; index: IrExpr; loc: SrcLoc }
   /** Delete an indexed/property slot without changing Array.length. */
@@ -1548,12 +2118,38 @@ export type IrStmt =
    * length each iteration (JS-exact for arrays). `localId` is a fresh const
    * binding per iteration holding the element (for refcounted elements: an
    * owned +1 reference, released when the iteration's scope exits). */
-  | { kind: "forOf"; localId: string; iterable: IrExpr; body: IrStmt[]; labels?: string[]; loc: SrcLoc }
-  | { kind: "return"; value: IrExpr | null; loc: SrcLoc }
+  | {
+      kind: "forOf";
+      localId: string;
+      iterable: IrExpr;
+      body: IrStmt[];
+      labels?: string[];
+      loc: SrcLoc;
+    }
+  /** `awaited`: a return of an async generator that needs no Await of its
+   * own — its operand's await performed it (`return p` of a promise), or
+   * it has no operand (`return;`). The request settles as the body
+   * completes instead of one microtask turn later. */
+  | { kind: "return"; value: IrExpr | null; awaited?: true; loc: SrcLoc }
   /** Field write `obj.f = v` — statement-only, like `assign`/`arraySet`.
    * Evaluation order: obj, then value. The old value is released; ownership
-   * of a refcounted new value MOVES into the object. */
-  | { kind: "fieldSet"; obj: IrExpr; className: string; field: string; value: IrExpr; loc: SrcLoc }
+   * of a refcounted new value MOVES into the object. `sloppy` marks a write
+   * in sloppy-mode code, which skips a read-only field instead of throwing.
+   * `define` marks a class field initializer, which defines the property
+   * (a non-extensible instance rejects it). `attributesChecked` marks a
+   * write that already honors the instance's property attributes
+   * (CLASS_ATTRIBUTES). */
+  | {
+      kind: "fieldSet";
+      obj: IrExpr;
+      className: string;
+      field: string;
+      value: IrExpr;
+      sloppy?: true;
+      define?: true;
+      attributesChecked?: true;
+      loc: SrcLoc;
+    }
   /** Record field write `r.f = v` — mirrors `fieldSet` exactly (evaluation
    * order obj then value; old value released; refcounted new value moved
    * in), with a shape id in place of a class name. */
@@ -1573,7 +2169,15 @@ export type IrStmt =
    * `overflowOnly` (a LITERAL key naming no declared field): a pure
    * overflow insert — no declared collision exists, so no validation, no
    * throw, and declared fields need not take the index-value type. */
-  | { kind: "recordKeySet"; obj: IrExpr; shapeId: string; key: IrExpr; value: IrExpr; overflowOnly?: true; loc: SrcLoc }
+  | {
+      kind: "recordKeySet";
+      obj: IrExpr;
+      shapeId: string;
+      key: IrExpr;
+      value: IrExpr;
+      overflowOnly?: true;
+      loc: SrcLoc;
+    }
   /** Statement-position `delete obj[k]` on a PURE index-signature shape
    * (no declared fields — the frontend fences hybrids: a struct slot
    * cannot be removed): drop the overflow entry, releasing its key and
@@ -1606,12 +2210,14 @@ export type IrStmt =
    * construct has no static lowering, and JS carries no annotations to
    * change that — so the fence fires when the statement RUNS instead of
    * failing the build (the JS-input design: inference gaps land where
-   * `any` lands — honest fences, never silent misbehavior). Executing it
-   * throws a catchable Error whose message names the construct and whose
-   * `code` carries the SC diagnostic code; unwinds exactly like `throw`.
+   * `any` lands — a runtime fence instead of undiagnosed misbehavior).
+   * Executing it throws a catchable Error whose message names the construct
+   * and whose `code` carries the SC diagnostic code; unwinds exactly like
+   * `throw`.
    * TypeScript sources produce it only as the tsc-unreachable fallthrough
-   * trap (appendImplicitUndefinedReturn's SC9002) — their construct fences
-   * stay compile errors. */
+   * trap (appendImplicitUndefinedReturn's SC9002) and for a typed-array
+   * store through an element index that is undefined at run time
+   * (undefined-index.ts); their construct fences stay compile errors. */
   | { kind: "runtimeFence"; code: string; message: string; loc: SrcLoc }
   /** Rethrow of a catch binding (`throw e` where e is the binding):
    * re-raises the SAVED exception exactly — kind and payload preserved,
@@ -1641,6 +2247,11 @@ export type IrStmt =
       /** Resource-management cleanup: if the guarded body and cleanup both
        * throw, raise a SuppressedError instead of replacing the first error. */
       suppressFinallyErrors?: true;
+      /** Iterator closing: if the guarded body threw and the cleanup throws
+       * too, the cleanup's error is dropped and the first one propagates.
+       * After a generator .return() the cleanup's error replaces it, and on
+       * normal exits it propagates. */
+      dropFinallyErrors?: true;
       loc: SrcLoc;
     };
 
@@ -1654,6 +2265,30 @@ export type IrStmt =
  * 0 / +Infinity, the strIntrinsic convention); ref elements retain into
  * the fresh array. */
 export type IrArrIntrinsicMethod =
+  /** Default String ordering for f64/bool/string payloads; no user callbacks. */
+  | "sortPrimitive"
+  | "toSortedPrimitive"
+  /** Internal stable comparator sort of a private, compacted snapshot:
+   * arguments are [value count, comparator]. Every slot below the count is
+   * a value of an `isSortValuesElement` type; the comparator is invoked
+   * with exactly its declared arity. Returns void; comparator exceptions
+   * propagate and leave the snapshot unchanged. Optional trailing
+   * arguments [order, key] describe a comparator that orders numbers
+   * ascending (order 1) or descending (-1), a numeric literal: the runtime
+   * may then sort by key without calling it. Number elements are their own
+   * keys; record and class elements pass the capture-free key reader
+   * `(elem) => number` both comparator operands apply. Keys the runtime
+   * does not order directly (NaN, -0) still sort through the comparator. */
+  | "sortValues"
+  /** Internal stable comparator sort of a dense array in place: arguments
+   * are [comparator, owned]. Returns false, without calling the comparator,
+   * when the receiver has holes, storage-level undefined or sparse slots, or
+   * is published; the caller then sorts a compacted snapshot. Otherwise the
+   * receiver's values are sorted outside it and written back only after
+   * success, as the spec's sort writes them, and it returns true. `owned`
+   * (a boolean literal) marks a private copy no user code can reach.
+   * Optional trailing arguments [order, key] as for sortValues. */
+  | "sortDense"
   | "length"
   /** Internal ToNumber(a[index]) for f64-backed arrays: one numeric index,
    * returning the stored number or NaN for a hole/undefined/missing key.
@@ -1685,6 +2320,10 @@ export type IrArrIntrinsicMethod =
   /** Mutating splice with evaluated insertion items; returns removed slots. */
   | "spliceInsert"
   | "reverse"
+  /** Evaluated numeric bounds; same-type fill values stay borrowed. */
+  | "copyWithin"
+  | "fill"
+  | "fillUndefined"
   /** ES2023 copying methods. `toSpliced` receives [start, deleteCount,
    * itemsArray], with omitted arguments completed by the frontend;
    * `with` receives [index, value] and throws Node's catchable RangeError
@@ -1702,7 +2341,22 @@ export type IrArrIntrinsicMethod =
 export const MAY_THROW_ARR_METHODS: ReadonlySet<IrArrIntrinsicMethod> = new Set([
   "with",
   "withUndefined",
+  "sortValues",
+  "sortDense",
 ]);
+
+/** Element types whose comparator sort can run in the runtime over raw
+ * slots: numbers, and reference-counted values passed to the comparator by
+ * pointer. Unions with an undefined arm order undefined last without a
+ * comparator call, and checked values have their own ABI; those
+ * keep the IR sort helper. */
+export function isSortValuesElement(elem: IrType, unionArms?: readonly IrType[]): boolean {
+  if (elem.kind === "f64") return true;
+  if (elem.kind === "dyn" || elem.kind === "caught") return false;
+  if (elem.kind === "union" && (!unionArms || unionArms.some((arm) => arm.kind === "undefinedT")))
+    return false;
+  return isRefCounted(elem);
+}
 
 /** The Map method/property surface (mirrors ambient/scriptc.d.ts) plus the
  * iteration primitives behind the forEach desugar. `forEach` itself is NOT
@@ -1713,6 +2367,10 @@ export const MAY_THROW_ARR_METHODS: ReadonlySet<IrArrIntrinsicMethod> = new Set(
  * `iterEnter`/`iterExit` — live-iteration semantics, Node-exact). The iter*
  * members are compiler-internal: no ambient declaration reaches them. */
 export type IrMapIntrinsicMethod =
+  /** Internal shallow-copy constructors over builtin collection storage. */
+  | "clone"
+  | "keySet"
+  | "valueSet"
   | "get"
   | "set"
   | "has"
@@ -1720,6 +2378,9 @@ export type IrMapIntrinsicMethod =
   | "size"
   | "clear"
   | "iterCount"
+  /** The first live index, or iterCount when none is live
+   * (scr_map_iter_start). for-of starts its index there. */
+  | "iterStart"
   | "iterLive"
   | "iterKey"
   | "iterValue"
@@ -1732,12 +2393,14 @@ export type IrMapIntrinsicMethod =
  * iterKey doubles as the element read (JS's Set forEach passes the element
  * as both `value` and `key`). */
 export type IrSetIntrinsicMethod =
+  | "clone"
   | "add"
   | "has"
   | "delete"
   | "size"
   | "clear"
   | "iterCount"
+  | "iterStart"
   | "iterLive"
   | "iterKey"
   | "iterEnter"
@@ -1757,7 +2420,7 @@ export type IrSetIntrinsicMethod =
  * regexIntrinsic): args[0] is the separator and args[1] the numeric limit
  * (an omitted source limit is completed to 2^32-1), result a fresh +1
  * string[] — the empty separator splits per UTF-16 code unit (astral
- * halves become U+FFFD, divergence 2). `padStart`/`padEnd` take (target
+ * halves become lone surrogates). `padStart`/`padEnd` take (target
  * length, fill) — the frontend completes an omitted fill to " ", Node's
  * default. `trimStart`/`trimEnd` are trim's one-sided halves. */
 export type IrStrIntrinsicMethod =
@@ -1780,9 +2443,8 @@ export type IrStrIntrinsicMethod =
   | "toLowerCase"
   | "toUpperCase"
   | "normalize"
-  // isWellFormed()/toWellFormed() — no-ops over the runtime's well-formed
-  // storage (lone surrogates became U+FFFD at their producers): constant
-  // true and the identity, per spec on well-formed input.
+  // isWellFormed()/toWellFormed(): whether the string holds a lone
+  // surrogate, and the copy with each one replaced by U+FFFD.
   | "isWellFormed"
   | "toWellFormed"
   // The string iterator's step: the full code-POINT character at a UTF-16
@@ -1849,6 +2511,19 @@ export type IrBytesIntrinsicMethod =
   /** In-place overlapping copy, [target, start, end] relative indices;
    * returns the receiver (+1). */
   | "copyWithin"
+  /** In-place numeric sort, [order]: a numeric literal 0 for the default
+   * TypedArray order (NaN last, -0 before +0), or 1 / -1 for a recognized
+   * ascending / descending numeric comparator. Returns true when sorted;
+   * a comparator order answers false, having written nothing, for a NaN
+   * or -0 float element, and the caller sorts through the comparator.
+   * Runs no script code. */
+  | "sortNumeric"
+  /** In-place comparator sort, [comparator]: a `(number, number) =>
+   * number` function of at most two parameters, called with the comparison
+   * schedule of Node's typed-array sort over a snapshot that is written
+   * back after the last comparison. Returns void; a comparator exception
+   * propagates and leaves the receiver unwritten. */
+  | "sortCompare"
   /** Fresh Uint8Array copying methods. `with` takes [index, value] and
    * throws a catchable RangeError for an invalid relative index. */
   | "toReversed"
@@ -1892,6 +2567,14 @@ export type IrBytesIntrinsicMethod =
   | "indexOfNum"
   | "lastIndexOfNum"
   | "includesNum"
+  /** TypedArray.prototype.indexOf / lastIndexOf / includes on any element
+   * kind: [f64 needle, f64 fromIndex]. indexOf and lastIndexOf compare
+   * with strict equality (NaN is never found, -0 matches 0), includes with
+   * SameValueZero (NaN is found). An omitted fromIndex is 0, or +Infinity
+   * for lastIndexOf (which clamps to the last index). */
+  | "indexOfElem"
+  | "lastIndexOfElem"
+  | "includesElem"
   | "fill"
   | "fillNum"
   | "fillStr"
@@ -1915,6 +2598,7 @@ export type IrBytesIntrinsicMethod =
   | "dvGetInt16"
   | "dvGetUint32"
   | "dvGetInt32"
+  | "dvGetFloat16"
   | "dvGetFloat32"
   | "dvGetFloat64"
   | "dvGetBigUint64Number"
@@ -1925,12 +2609,14 @@ export type IrBytesIntrinsicMethod =
   | "dvSetInt16"
   | "dvSetUint32"
   | "dvSetInt32"
+  | "dvSetFloat16"
   | "dvSetFloat32"
   | "dvSetFloat64";
 
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
 export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new Set([
+  "sortCompare",
   "toStringVar",
   "with",
   "setFrom",
@@ -1955,6 +2641,7 @@ export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new 
   "dvGetInt16",
   "dvGetUint32",
   "dvGetInt32",
+  "dvGetFloat16",
   "dvGetFloat32",
   "dvGetFloat64",
   "dvGetBigUint64Number",
@@ -1965,6 +2652,7 @@ export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new 
   "dvSetInt16",
   "dvSetUint32",
   "dvSetInt32",
+  "dvSetFloat16",
   "dvSetFloat32",
   "dvSetFloat64",
 ]);
@@ -1992,19 +2680,42 @@ export type IrRegexIntrinsicMethod =
   /** exec uses the same string-first operands but keeps the g/y
    * lastIndex refusal, independently of global String.match iteration. */
   | "exec"
+  /** exec whose result is read only by null tests and constant-index
+   * element reads: args[1] is a numeric literal whose bit k marks capture k
+   * as read (k < 53). Unmarked captures read as undefined and the result
+   * carries no index/input properties; the match, lastIndex transitions
+   * and null result are exec's. */
+  | "execGroups"
+  /** execGroups whose args[2] (a numeric literal, a subset of args[1])
+   * marks the captures read only through the regex.groupEquals/
+   * groupNumber/groupParseInt libCalls; the runtime may keep those as
+   * spans of the subject rather than strings. */
+  | "execSpans"
+  /** `s.match(re)` read like an execGroups result: a global regex answers
+   * match's whole-match array; otherwise execSpans with args[1], args[2]
+   * (args[2] is 0 until regex span folding marks lazy captures). */
+  | "matchGroups"
   | "lastIndex"
   /** `s.matchAll(re)` — every match as its honest string[] slice (match's
    * rule), drained EAGERLY into a fresh string[][]: the lazy iterator is
    * unobservable across the lowered surface (strings are immutable; the
    * spec clones the regex at the call, so lastIndex games can't reach the
    * drain either). Non-global regexes THROW Node's exact TypeError
-   * (catchable — replaceAll's stance). */
+   * (catchable — replaceAll's stance). Each row carries its index, input
+   * and groups properties. */
   | "matchAll"
+  /** matchAll whose rows are read only through their elements
+   * (matchAllRowsReadByElements): the rows carry no index, input or
+   * groups properties. Same result and throw contract as matchAll. */
+  | "matchAllCaptures"
   /** matchAll's companion-index form (the for-of-over-matchAll desugar):
    * args[1] is a number[] the drain ALSO fills with each match's UTF-16
    * start index — the row's `.index`, always present (every drained row
    * matched). Same result and throw contract as matchAll. */
   | "matchAllInto"
+  /** matchAllInto whose rows are read only through their elements and the
+   * companion index: the rows carry no index, input or groups properties. */
+  | "matchAllCapturesInto"
   /** `s.search(re)` — the first match's UTF-16 index, or -1. Symbol.search
    * neither reads nor writes lastIndex (a fresh exec from position 0), so
    * no g/y fence applies: /g is irrelevant and /y anchors at 0 — exactly
@@ -2017,2957 +2728,30 @@ export type IrRegexIntrinsicMethod =
   | "replaceAll"
   | "split";
 
-/** The complete standard-library surface (mirrors ambient/scriptc.d.ts: the
- * `process` and `JSON` globals and `declare module "node:fs"`). A closed
- * union — every member has a signature in the validator's LIB_FN_SIGS and a
- * scr_* implementation in the runtime (scr_lib.c / scr_json.c). fs.*
- * failures and json.parse syntax errors THROW (catchable, via the runtime
- * exception cell); process.* members never throw. JSON.stringify without a
- * callback lowers to the type-directed `jsonStringify` node below; callback
- * forms use the shared native JSON walker through libCall.
- * island.eval (the internal __island_eval testing hook) exists only in
- * --dynamic builds — the frontend rejects it otherwise, so backends may
- * assume the island runtime is linked when they see it; island exceptions
- * bridge into the exception cell as catchable strings (may-throw). */
-export type IrLibFn =
-  | "ffi.argument"
-  | "ffi.memoryModule"
-  | "intl.segmenterNew"
-  | "weakMap.is"
-  | "weakSet.is"
-  | "weakMap.new"
-  | "weakSet.new"
-  | "dyn.fromEntries"
-  | "bytes.constructor"
-  | "bytes.instanceOf"
-  | "bytes.construct"
-  | "arrayBuffer.constructor"
-  | "arrayBuffer.new"
-  | "arrayBuffer.is"
-  | "arrayBuffer.isView"
-  | "arrayBuffer.byteLengthGetter"
-  | "arrayBuffer.byteLengthDescriptor"
-  | "arrayBuffer.viewU8C"
-  | "arrayBuffer.viewI8"
-  | "arrayBuffer.viewU16"
-  | "arrayBuffer.viewI16"
-  | "arrayBuffer.viewU8"
-  | "arrayBuffer.viewU32"
-  | "arrayBuffer.viewI32"
-  | "arrayBuffer.viewF32"
-  | "arrayBuffer.viewF64"
-  | "arrayBuffer.viewDV"
-  /** Native static fetch and its Web-platform companions. fetch.start
-   * answers once the response head arrives; the response body readers
-   * consume the native body stream. AbortSignal and ReadableStream values
-   * are opaque checked-dynamic handles. */
-  | "fetch.start"
-  | "fetch.input"
-  | "fetch.function"
-  | "fetch.requestNew"
-  | "fetch.headersNew"
-  | "fetch.responseNew"
-  | "fetch.responseArrayBuffer"
-  | "fetch.responseJson"
-  | "fetch.responseText"
-  | "fetch.responseBytes"
-  | "fetch.abortControllerNew"
-  | "fetch.abortTimeout"
-  | "fetch.abortNow"
-  | "fetch.abortAny"
-  | "abort.controllerNew"
-  | "abort.timeout"
-  | "abort.now"
-  | "abort.any"
-  | "fetch.webIs"
-  | "fetch.streamIs"
-  | "fetch.streamNew"
-  | "fetch.streamFrom"
-  | "fetch.readerRead"
-  | "island.eval"
-  /** Load an embedded npm package's runtime entry in the island (cached by
-   * the engine's module registry) and take one export: args are the entry
-   * KEY (an embedded module's key, from IrModule.embedded) and the export
-   * name — "default" for default imports, "*" for the namespace object.
-   * --dynamic only, like island.eval; result is an owned jsval. May throw
-   * (a package's top-level code can), bridged catchably. */
-  | "island.import"
-  /** Dynamic `import(spec)`: load a module through the island's module
-   * system — an embedded module's key or a builtin shim's "node:x" key —
-   * and answer an ENGINE promise of its namespace object (always a
-   * promise, never a throw: load and evaluation failures REJECT it,
-   * Node's shape). The frontend wraps the result in jsBridgePromise, so
-   * awaiting parks the fiber and a rejection crosses catchably. --dynamic
-   * only; result is an owned jsval holding the engine promise. */
-  | "island.importDyn"
-  /** A checked cast the boundary can never satisfy, DEFERRED to runtime:
-   * `islandValue as Promise<T>` — the value is an ENGINE promise and T
-   * has no validated exit (Node-typed async APIs put class-shaped
-   * interfaces there), so instead of refusing the build the cast throws a
-   * catchable TypeError AT THE CAST naming the target type (args: the
-   * island value — evaluated, borrowed — and the type name). The result
-   * type is the cast's mapped target (a typed dummy; the exception is
-   * pending). Documented divergence: JS `as` never checks — like the dyn
-   * boundary, a conversion that cannot happen throws instead of lying.
-   * --dynamic only. */
-  | "island.castFail"
-  | "json.parse"
-  | "json.parseReviver"
-  | "json.stringifyReplacer"
-  | "json.stringifyValue"
-  /** Keyed WRITE on a dyn value — `h.onDone = cb` / `h["k"] = v` on a
-   * checked-dynamic object (args: receiver, key string, value — all
-   * borrowed; the runtime copies the key and retains the value in). An
-   * OBJ receiver sets the member (later writes win, insertion order
-   * preserved — JS exactly); undefined/null throws Node's catchable
-   * "Cannot set properties of undefined (setting 'k')"; every other kind
-   * throws Node's STRICT-mode "Cannot create property 'k' on <kind>" —
-   * primitives quoting their rendering, V8's "on number '5'"
-   * (sloppy mode would silently ignore — suite tests are 'use strict';
-   * SEMANTICS.md notes the sloppy divergence: loud, never silent). Void
-   * result; in the may-throw seed set. */
-  | "dyn.keySet"
-  | "dyn.keySetComputed"
-  /** Delete an ordinary checked-native object's own key. Borrows both
-   * arguments; other receiver representations retain a runtime refusal. */
-  | "dyn.keyDelete"
-  | "dyn.keyDeleteComputed"
-  | "dyn.hasKeyComputed"
-  | "dyn.hasOwnComputed"
-  | "dyn.propertyIsEnumerableComputed"
-  /** Native own properties on globalThis keyed by symbol identity. */
-  | "dyn.globalSymbolGet"
-  | "dyn.globalSymbolSet"
-  | "dyn.globalSymbolHas"
-  | "dyn.globalSymbolDelete"
-  /** Exact native class capsule identity, without materializing its fields. */
-  | "dyn.typedRefIs"
-  | "dyn.classIs"
-  /** Destructuring pack over a dyn source — `const [a, b] = d`, a
-   * destructured dyn callback param (args: the source and the STATIC
-   * TypeError spelling, "" when the source has none — both borrowed;
-   * result: a fresh dyn array, +1). Iterable kinds collect like spread
-   * (arrays element-by-element, strings by code point, bytes by byte);
-   * every other kind throws V8's destructuring TypeError — the spelling
-   * verbatim when non-empty, else the runtime kind wording ("number 5 is
-   * not iterable (cannot read property Symbol(Symbol.iterator))"). In the
-   * may-throw seed set. */
-  | "dyn.iterPack"
-  | "dyn.arrayFromIterator"
-  | "dyn.iterator"
-  | "dyn.iteratorResult"
-  | "dyn.mapSeedEntries"
-  | "dyn.mapSeedEntry"
-  /** The for-of-over-dyn pack accessors — the emitted index loop drives
-   * them over a dyn.iterPack result (ARR by construction). arrLen: the
-   * ARR length as f64 (0 for non-ARR kinds; arg borrowed). arrAt: the
-   * element at index (+1; the undefined singleton past the end). Neither
-   * throws. */
-  | "dyn.arrLen"
-  | "dyn.arrAt"
-  /** `key in v` with a RUNTIME (string) key on a checked-dynamic
-   * receiver (args: value dyn, key string; result bool): OBJ answers
-   * own-member presence, ARR answers 'length'/a valid index — exactly
-   * the literal-key dynHasKey path. Proxy has traps may throw. */
-  | "dyn.hasKey"
-  /** Object.defineProperties over dyn values (args: target, descriptors —
-   * both borrowed dyn; result: the target, +1 — JS's return value).
-   * Value descriptors become own properties on OBJ and FUNC targets;
-   * OBJ targets preserve data attributes. get/set
-   * descriptors and non-object targets/descriptors throw catchably
-   * (Node's TypeError texts; accessors the loud unsupported Error). In
-   * the may-throw seed set. */
-  | "dyn.defineProps"
-  | "dyn.defineProperty"
-  | "dyn.getOwnPropertyDescriptor"
-  | "dyn.arrayProtoCall"
-  | "dyn.promiseAll"
-  /** Bare `typeof v` on a dyn value AS A STRING (arg: the dyn value,
-   * borrowed; result: an owned string) — the dyn kind's JS answer:
-   * undefined→"undefined", null/object/array/bytes→"object" (JS's oldest
-   * wart preserved), boolean/number/string by kind, function→"function".
-   * Never throws. */
-  | "dyn.typeof"
-  /** Object.prototype.toString.call on a checked-dynamic value. */
-  | "dyn.objectTag"
-  | "dyn.freeze"
-  | "dyn.isFrozen"
-  | "dyn.nativeSetNew"
-  | "dyn.nativeSetIs"
-  | "dyn.nativeMapIs"
-  | "dyn.nativeUrlIs"
-  | "dyn.nativeDateIs"
-  | "date.nativeNew"
-  | "date.checkedValue"
-  | "dyn.nativeRegexIs"
-  /** toString() on a checked-dynamic receiver: runtime kind dispatch
-   * (bytes decode per the literal encoding — utf8 default; strings,
-   * numbers, booleans, arrays, objects answer JS-exactly; undefined and
-   * null throw the catchable TypeError). */
-  | "dyn.toString"
-  /** Engine-free CommonJS module graph. Module values are scalar f64
-   * handles; generated startup defines the registry, init wrappers update
-   * loading/cache state, and the read surface answers Node's live metadata. */
-  | "module.registryInit"
-  | "module.define"
-  | "module.enter"
-  | "module.link"
-  | "module.finish"
-  | "module.fail"
-  | "module.filename"
-  | "module.id"
-  | "module.path"
-  | "module.paths"
-  | "module.children"
-  | "module.parent"
-  | "module.loaded"
-  | "module.cacheGet"
-  | "module.cacheHas"
-  | "module.cacheKeys"
-  | "fs.readFileSync"
-  /** readFileSync(path) — the Buffer read (+1 bytes); throws catchably
-   * like the utf8 form. */
-  | "fs.readFileSyncBuf"
-  /** readFileSync(path, enc) with a RUNTIME encoding (an untyped JS
-   * parameter): undefined/null answer Buffers, utf8 a string, other real
-   * encodings fence loudly, unknown names throw ERR_UNKNOWN_ENCODING. */
-  | "fs.readFileSyncDyn"
-  | "fs.writeFileSync"
-  | "fs.appendFileSync"
-  | "fs.existsSync"
-  | "fs.mkdirSync"
-  | "fs.rmSync"
-  | "fs.rmdirSync"
-  | "fs.readdirSync"
-  /** node:path (scr_path.c ports BOTH of Node's implementations
-   * function-by-function): the `path.*` family is posix, the
-   * `path.win32*` family is Node v24's path.win32 byte-for-byte — the
-   * frontend binds the bare module to the TARGET platform's family
-   * (Node on Windows IS path.win32) and the path.posix / path.win32
-   * namespaces to their own family everywhere. join and resolve take ONE
-   * string[] arg — the frontend packs the variadic call's arguments into
-   * an array literal. basename always receives its suffix (the frontend
-   * completes an omitted one with "", a Node no-op). toNamespacedPath is
-   * the posix identity and the win32 \\?\-prefixer. None of these throw;
-   * the resolves consult the process cwd like Node's. */
-  | "path.join"
-  | "path.resolve"
-  | "path.normalize"
-  | "path.dirname"
-  | "path.basename"
-  | "path.extname"
-  | "path.isAbsolute"
-  | "path.relative"
-  | "path.toNamespacedPath"
-  | "path.win32Join"
-  | "path.win32Resolve"
-  | "path.win32Normalize"
-  | "path.win32Dirname"
-  | "path.win32Basename"
-  | "path.win32Extname"
-  | "path.win32IsAbsolute"
-  | "path.win32Relative"
-  | "path.win32ToNamespacedPath"
-  /** node:os: homedir is $HOME else getpwuid(3); tmpdir is Node's env
-   * cascade ($TMPDIR/$TMP/$TEMP else /tmp, one trailing slash trimmed).
-   * os.platform() lowers to process.platform — one implementation. */
-  | "os.homedir"
-  /** os.release(): uname(2)'s release field — Node's own implementation
-   * (the kernel version string, e.g. "24.6.0" on macOS 15). Interned; +1
-   * per read. Never throws. */
-  | "os.release"
-  /** The os.userInfo() field trio (uv_os_get_passwd's slices): pw_name,
-   * pw_shell, pw_dir — the PASSWD homedir, not os.homedir's $HOME-first
-   * cascade (Node's own split). The frontend assembles the UserInfo
-   * record from these plus getuid/getgid. +1 fresh strings; a passwd
-   * lookup failure aborts (Node throws a system error there — no
-   * compiled program path reaches it for the running uid). */
-  | "os.userName"
-  | "os.userShell"
-  | "os.userHomedir"
-  | "os.tmpdir"
-  /** os.networkInterfaces(): getifaddrs(3) → the Dict<NetworkInterfaceInfo[]>
-   * record, built inline by the emitter from a runtime snapshot (scr_lib.c).
-   * The result type is the CALL SITE's mapped @types/node shape — a pure
-   * index-signature record whose value is `Info[] | undefined`, Info a
-   * two-record union (IPv4: scopeid `number | undefined` holding undefined;
-   * IPv6: scopeid number) — verified structurally by the frontend. Rows
-   * match libuv's filter (IFF_UP && IFF_RUNNING, AF_INET/AF_INET6; loopback
-   * = internal; MACs from the interface's link-level sibling entry, zeros
-   * when absent; cidr from the netmask's contiguous prefix, the null arm
-   * when it is missing or non-contiguous). Key/row order follows the OS's
-   * getifaddrs enumeration — Node itself does not guarantee an order.
-   * Fresh +1 record; never throws (a getifaddrs failure yields {}). */
-  | "os.networkInterfaces"
-  /** `Math.max(...xs)` / `Math.min(...xs)` over one spread number[]
-   * (scr_number.c): the JS fold exactly — any NaN element poisons the
-   * result, ±0 order by the JS comparison (max prefers +0, min prefers
-   * -0), and the empty array yields -Infinity / +Infinity like the
-   * zero-argument calls. Borrows the array; never throws. */
-  | "math.maxArr"
-  | "math.minArr"
-  | "math.hypotArr"
-  /** `fs.readdirSync(path, { withFileTypes: true })` — Dirent rows over
-   * one readdir pass (scr_lib.c's scandir snapshot; DT_UNKNOWN falls back
-   * to lstat, Node's getDirents rule). The result type is the call site's
-   * interned Dirent record array (name, parentPath, hidden %dtype in
-   * libuv's UV_DIRENT encoding) — verified by the frontend; the emitter
-   * assembles the rows from the snapshot. OS order, no "."/"..". Throws
-   * Node's scandir errno error (may-throw seed set); fresh +1 array. */
-  | "fs.readdirTypesSync"
-  /** `Math.floor(x)` — C floor() IS the JS operation (NaN/±0/±Infinity
-   * pass through bit-exactly). Never throws. */
-  | "math.floor"
-  /** `Math.min(a, b)` / `Math.max(a, b)` — the two-argument scalar forms
-   * (scr_lib.c), JS-exact like the Arr folds: NaN poisons, max prefers +0
-   * over -0 (min the reverse). C fmin/fmax are NOT these (they drop NaN).
-   * Never throw. */
-  | "math.min"
-  | "math.max"
-  /** `Math.random()` — a uniform double in [0,1) with the spec's 53-bit
-   * granularity, drawn from arc4random_buf (the CSPRNG behind the crypto
-   * lowerings). Same distribution as Node, NECESSARILY different sequence
-   * (SEMANTICS.md 62 — no seeded sequence exists to match). Never throws. */
-  | "math.random"
-  /** Math.abs (C fabs — IS the JS operation) and Math.round (scr_lib.c:
-   * ECMA half-toward-+Infinity with the exact-fraction comparison — C
-   * round() is half-away-from-zero and floor(x+0.5) drifts at the
-   * epsilon boundary). Borrow nothing; never throw. */
-  | "math.abs"
-  | "math.round"
-  /** Math.trunc / Math.ceil — C trunc()/ceil() ARE the JS operations
-   * (NaN/±0/±Infinity pass through bit-exactly; ceil(-0.5) is -0 in IEEE
-   * round-toward-+Infinity exactly as ECMA says). Static like floor —
-   * they are ask-4's wholeness-discharge operators, so the library
-   * inference needs them compiled, not island-served. Never throw. */
-  | "math.trunc"
-  | "math.ceil"
-  | "math.sin"
-  | "math.sinh"
-  | "math.cos"
-  | "math.cosh"
-  | "math.tan"
-  | "math.tanh"
-  | "math.asin"
-  | "math.asinh"
-  | "math.acos"
-  | "math.acosh"
-  | "math.atan"
-  | "math.atanh"
-  | "math.cbrt"
-  | "math.clz32"
-  /** Return -1, +1, or the original NaN/zero. In particular, -0 remains -0. */
-  | "math.sign"
-  | "math.exp"
-  | "math.expm1"
-  | "math.fround"
-  | "math.sqrt"
-  | "math.log"
-  | "math.log1p"
-  | "math.log2"
-  | "math.log10"
-  | "math.atan2"
-  | "math.pow"
-  | "math.imul"
-  /** The static global parsers/tests (scr_string.c). num.parseInt is
-   * ECMA-262 19.2.5 exactly — JS whitespace, sign, ToInt32 radix (the
-   * frontend completes an omitted radix to 0 = the spec's "undefined":
-   * base 10 with the 0x hex escape), longest digit prefix, and the exact
-   * mathematical value correctly rounded (u64 fast path, bignum beyond —
-   * overflow is ±Infinity). num.isNaN is the NaN self-test on an
-   * already-number argument (tsc pins the argument to number, so no
-   * ToNumber coercion exists to model). Borrow; never throw. */
-  | "num.parseInt"
-  | "num.isNaN"
-  /** ES parseFloat (scr_string.c): the longest StrDecimalLiteral prefix
-   * of the trimmed input (no hex, "Infinity" exact-case), NaN when none —
-   * ECMA-262 19.2.4 over a string argument (non-string arguments keep the
-   * fence: Node would ToNumber-coerce). Borrows; never throws. */
-  | "num.parseFloat"
-  /* ToNumber(string) — ECMA-262 7.1.4.1 StringToNumber (scr_string.c):
-   * trim the JS StrWhiteSpace set, empty/whitespace-only → +0, then the
-   * whole span must be one StrNumericLiteral — signed decimal (Infinity
-   * included, strtod-over-validated-span correct rounding) or unsigned
-   * 0x/0o/0b (exact value, nearest-even; signed forms are NaN) — with
-   * any trailing garbage answering NaN. Number(aString), unary + on
-   * strings, and util.format %d over strings lower here. Borrows; never
-   * throws. */
-  | "num.fromString"
-  /** The static URI component codecs (scr_string.c), ECMA-262 Encode/
-   * Decode with the component sets over the runtime's UTF-8 strings.
-   * str.encodeUriComponent percent-encodes every byte outside the
-   * unreserved component set (ALPHA/DIGIT/- _ . ! ~ * ' ( )) as uppercase
-   * %XX — the spec's per-code-point UTF-8 encoding IS a byte scan here —
-   * and never throws (the spec's URIError case is an unpaired surrogate,
-   * which cannot exist in well-formed UTF-8). str.decodeUriComponent
-   * decodes %XX escapes bytewise (raw non-escape bytes copy through) and
-   * requires the escaped bytes to form strictly valid UTF-8 (overlong
-   * forms, surrogate code points, and >U+10FFFF refused, per UTF8-decode
-   * without replacement); bad hex or an invalid sequence THROWS the
-   * spec's URIError ("URI malformed"), catchable. Borrow; results +1. */
-  | "str.encodeUriComponent"
-  | "str.decodeUriComponent"
-  | "str.decodeUri"
-  /** RegExp.escape (ES2025): per-code-point EncodeForRegExpEscape —
-   * leading ASCII alphanumeric hex-escapes, syntax characters and '/'
-   * take a backslash, other punctuators/whitespace/line terminators
-   * hex-escape, the rest passes through. Total; borrows; result +1. */
-  | "regexp.escape"
-  /** encodeURI: the same Encode() keeping the reserved set and '#'
-   * unescaped — total like the component encoder. Borrow; result +1. */
-  | "str.encodeUri"
-  /** The WHATWG base64 globals (scr_string.c), Node-global since v16.
-   * Arguments are borrowed dyn values — WebIDL ToString runs in the
-   * runtime over the dyn kind (String(null) is "null": the html spec's
-   * coercion, which Node's atob(null) exercises). str.atob decodes
-   * forgiving-base64 (ASCII whitespace stripped, %4==0 strips up to two
-   * '=', %4==1 refuses, leftover bits discarded) into the latin1 code
-   * points as a string; a malformed input THROWS the catchable
-   * DOMException InvalidCharacterError ("The string to be decoded is not
-   * correctly encoded."). str.btoa encodes the string's code points as
-   * base64; any code point over U+00FF THROWS InvalidCharacterError
-   * ("Invalid character"). str.b64Missing is the zero-argument call of
-   * either: always throws Node's TypeError [ERR_MISSING_ARGS] "The
-   * \"input\" argument must be specified". Results +1. */
-  | "str.atob"
-  | "str.btoa"
-  | "str.b64Missing"
-  /** Number.prototype formatters (scr_lib.c), JS-exact:
-   * num.toExponential is toExponential() with the spec's "as many digits
-   * as necessary"; num.toFixed0 is the non-throwing omitted-argument
-   * toFixed() fast path; num.toFixed implements an explicit fractionDigits
-   * with exact binary-value rounding and THROWS RangeError outside 0..100.
-   * Successful results +1. */
-  | "num.toExponential"
-  | "num.toFixed0"
-  | "num.toFixed"
-  | "num.toStringRadix"
-  /** Object.is over two numbers — the spec's SameValue on doubles: NaN
-   * equals NaN, +0 differs from -0, everything else is `===`. Plain bool
-   * result; never throws. (Union-armed operands take unionEq's sameValue
-   * flag instead — this is the both-f64 fast path.) */
-  | "num.sameValue"
-  /** SameValue over checked values, including NaN, signed zero and reference identity. */
-  | "dyn.sameValue"
-  /** `new Intl.NumberFormat("en-US").format(x)` and
-   * `x.toLocaleString("en-US")` with DEFAULT options — the one locale
-   * whose data the runtime embeds (Node's default-build locale): decimal
-   * notation, 0–3 fraction digits rounded half-up on the SHORTEST
-   * round-tripping decimal (ICU's rounding input, probed vs Node —
-   * format(1.0005) is "1.001" though toFixed(3) answers "1.000"), ","
-   * grouping every three integer digits, "∞"/"NaN" texts, and "-0" for
-   * negative inputs rounding to zero. Result +1; never throws. */
-  | "intl.numFormatEnUs"
-  /** `delete process.env[NAME]` — unsetenv(3): the mutation is visible to
-   * every later read (process.envGet asks getenv fresh) and inherited by
-   * spawned children, exactly Node. Statement position only (JS's boolean
-   * result is constant true there). Borrows the name; never throws. */
-  | "process.envUnset"
-  /** node:url + the URL class (scr_url.c). url.new parses one absolute
-   * URL string into a mutable URL value (+1) — invalid input THROWS a
-   * catchable TypeError ("Invalid URL"), like Node's constructor. The
-   * getters (borrowed receiver, +1 string) never throw; url.href doubles
-   * as toString(). fileURLToPath has one libFn per receiver form (URL
-   * value / string) — both THROW Node's TypeErrors on non-file schemes,
-   * encoded slashes, and non-empty hosts. url.pathToFileURL resolves the
-   * path (getcwd) and never throws. */
-  | "url.new"
-  | "url.newBase"
-  /** Factories consume already-converted input/base strings. canParse
-   * answers a boolean; parse returns a checked native URL or null (+1).
-   * Parser failures are suppressed; conversion occurs before these calls. */
-  | "url.canParse"
-  | "url.canParseBase"
-  | "url.parse"
-  | "url.parseBase"
-  | "url.protocol"
-  | "url.origin"
-  | "url.username"
-  | "url.password"
-  | "url.host"
-  | "url.hostname"
-  | "url.port"
-  | "url.pathname"
-  | "url.href"
-  /** Selected component writes borrow the receiver and converted string.
-   * href replaces its parsed fields while retaining cached params identity. */
-  | "url.set"
-  | "url.setChecked"
-  | "url.fileURLToPathUrl"
-  | "url.fileURLToPathChecked"
-  | "url.fileURLToPathOptions"
-  | "url.fileURLToPathBuffer"
-  | "url.pathToFileURLChecked"
-  | "url.fileURLToPathStr"
-  | "url.pathToFileURL"
-  /** Explicit path syntax from the options.windows argument, independent
-   * of the executable's host platform. Windows UNC input can throw. */
-  | "url.pathToFileURLPlatform"
-  /** pathToFileURL under a win32 TARGET: the same scr_url_from_path call
-   * (the runtime selects the win32 arm by _WIN32), but a distinct IR name
-   * because that arm THROWS for malformed UNC inputs — may-throw seeds on
-   * it while posix pathToFileURL emission stays byte-identical. */
-  | "url.pathToFileURLWin32"
-  /** URLSearchParams (scr_url.c — always linked with the url unit).
-   * Construction: sp.new (empty), sp.parse (one borrowed init string —
-   * a single leading '?' strips, Node's constructor), sp.copy (snapshot
-   * of another list), sp.fromPairs (a string[][] value — THROWS Node's
-   * ERR_INVALID_TUPLE TypeError on a non-[name, value] row; the one
-   * throwing entry in the family), sp.with (the record-literal init
-   * desugar: append one pair, answer the same list +1 — chains fold
-   * `new URLSearchParams({...})` into nested calls). url.searchParams
-   * answers the URL's LIVE cached view (+1, one identity per URL);
-   * url.search is the WHATWG search getter ("" for no/empty query).
-   * Methods mirror the WHATWG surface: sp.get answers +1-or-NULL (the
-   * sym.desc union pattern, null arm), sp.getAll a fresh string[];
-   * sp.append/sp.set/sp.delete/sp.deleteValue/sp.sort mutate and
-   * re-serialize a live view's URL query; sp.has/sp.hasValue answer
-   * bools; sp.size/sp.toString are pure reads. sp.keyAt/sp.valAt are
-   * the for-of/forEach desugar's index reads (live — the loop re-reads
-   * sp.size each pass). */
-  | "sp.new"
-  | "sp.newChecked"
-  | "sp.parse"
-  | "sp.copy"
-  | "sp.fromPairs"
-  | "sp.with"
-  | "url.searchParams"
-  | "url.search"
-  | "url.hash"
-  | "sp.get"
-  | "sp.getAll"
-  | "sp.append"
-  | "sp.set"
-  | "sp.delete"
-  | "sp.deleteValue"
-  | "sp.has"
-  | "sp.hasValue"
-  | "sp.sort"
-  | "sp.size"
-  | "sp.toString"
-  | "sp.keyAt"
-  | "sp.valAt"
-  /** node:querystring (scr_qs.c — link-gated by moduleUsesQs; NOT
-   * URLSearchParams: the legacy codec's escaping and '+' rules differ).
-   * qs.escape is Node's qsEscape, which encodes exactly the component
-   * unreserved set — it emits the always-linked
-   * scr_str_encode_uri_component, so escape-only programs never pull the
-   * unit. qs.unescape is Node's qsUnescape: strict decodeURIComponent
-   * first, the lenient legacy unescapeBuffer fallback on failure (never
-   * throws). qs.parse takes (str, sep, eq, maxKeys) — the frontend
-   * completes omitted/null sep/eq to "&"/"=" and the omitted maxKeys
-   * option to Node's 1000 (0 and negatives mean unlimited, Node's rule) —
-   * and its result type is the CALL SITE's mapped ParsedUrlQuery shape (a
-   * pure index-signature record over `string | string[]`, an undefined
-   * arm tolerated — @types/node's Dict), verified structurally by the
-   * frontend (lowerQuerystringParseCall); the emitters construct the
-   * record and hand its overflow map to scr_qs_parse_into with the two
-   * union tags. qs.stringify takes (obj, sep, eq) with obj a dyn value
-   * (the frontend dynFroms the typed record; JS-world dyn values pass
-   * through) — Node's encodeStringified rules run in the runtime, so
-   * arrays expand to repeated keys and null/undefined/nested objects are
-   * empty values. Custom encoder/decoder options fence at compile time.
-   * All borrow; string results +1; none throw. */
-  | "qs.parse"
-  | "qs.stringify"
-  | "qs.escape"
-  | "qs.unescape"
-  /** node:util.parseArgs: one checked-dynamic config object in, one
-   * checked-dynamic ParsedResults tree out. Statically typed member reads
-   * validate their values when leaving that tree. The native parser may
-   * throw Node's coded validation/grammar TypeErrors. */
-  | "util.parseArgs"
-  | "util.parseEnv"
-  | "util.getSystemErrorName"
-  | "util.getSystemErrorMessage"
-  | "util.systemErrorEntries"
-  | "util.stripVTControlCharacters"
-  | "util.toUSVString"
-  | "util.isDeepStrictEqual"
-  | "util.styleText"
-  | "util.typeIs"
-  | "util.typeValue"
-  /** ES Symbol values (scr_symbol.c — link-gated by moduleUsesSymbol).
-   * sym.new: `Symbol(desc)` — a fresh runtime-unique identity (+1) whose
-   * one arg is the description string (borrowed); sym.newAnon is the
-   * description-less `Symbol()` form. sym.for: the Symbol.for global
-   * registry — one interned symbol per key (borrowed), +1 on every call.
-   * sym.toString: "Symbol(desc)" (+1 string; "Symbol()" when absent).
-   * sym.desc / sym.keyFor answer the interned `string | undefined` union
-   * (the runtime returns +1-or-NULL; the backend builds the union arms —
-   * the child.stdout pattern). None of these throw. */
-  | "sym.new"
-  | "sym.newAnon"
-  | "sym.for"
-  | "sym.wellKnown"
-  | "sym.keyFor"
-  | "sym.desc"
-  | "sym.toString"
-  /** Engine-free arbitrary-precision bigint operations (scr_bigint.c).
-   * parse accepts the ECMAScript BigInt string grammar; fromF64 accepts
-   * finite integral Numbers. Arithmetic returns fresh immutable values.
-   * cmp returns -1/0/1 as f64; toString accepts a numeric radix. */
-  | "bigint.parse"
-  | "bigint.fromF64"
-  | "bigint.neg"
-  | "bigint.not"
-  | "bigint.add"
-  | "bigint.sub"
-  | "bigint.mul"
-  | "bigint.div"
-  | "bigint.mod"
-  | "bigint.pow"
-  | "bigint.and"
-  | "bigint.or"
-  | "bigint.xor"
-  | "bigint.shl"
-  | "bigint.shr"
-  | "bigint.eq"
-  | "bigint.eqString"
-  | "bigint.cmp"
-  | "bigint.cmpNumber"
-  | "bigint.truthy"
-  | "bigint.toString"
-  | "bigint.inspect"
-  | "bigint.toF64"
-  | "bigint.asUintN"
-  | "bigint.asIntN"
-  | "bigint.bufferRead"
-  | "bigint.bufferWrite"
-  | "bigint.dataViewGet"
-  | "bigint.dataViewSet"
-  /** fs.statSync → a Stats value (may throw, like the other sync fs
-   * calls); the stats.* getters are pure reads on it. */
-  | "fs.statSync"
-  | "stats.isFile"
-  | "stats.isDirectory"
-  | "stats.size"
-  | "stats.dev"
-  | "stats.ino"
-  /** child_process.spawnSync (scr_child.c): posix_spawn + waitpid + piped
-   * utf8 capture — cmd borrowed, args one borrowed string[] (the frontend
-   * completes an omitted list to an empty literal), result an owned (+1)
-   * spawnRes. NEVER throws: spawn failure (nonexistent binary, EACCES) is
-   * data, like Node's error property — status null and empty outputs
-   * (SEMANTICS.md documents the divergence from Node's null stdout).
-   * The getters are pure reads: status is the interned `number | null`
-   * union (null = spawn failure or signal death, type-directed
-   * construction in the backend like process.envGet); stdout/stderr are
-   * +1 strings. */
-  | "cp.spawnSync"
-  | "spawnRes.status"
-  | "spawnRes.stdout"
-  | "spawnRes.stderr"
-  /** Node's spawn-failure carrier `error?: Error`: a fresh +1 %Error
-   * ("spawnSync <file> ENOENT", `code` stamped) when the spawn itself
-   * failed, the interned undefined arm otherwise — the result type is the
-   * call site's `Error | undefined` union, constructed type-directedly in
-   * the backend (the envGet convention). Never throws. */
-  | "spawnRes.error"
-  /** child_process.spawn (scr_child.c + the scr_async.c loop): posix_spawnp
-   * with per-slot ignore/inherit/pipe modes (and number output fds), the
-   * all-piped Node default, and the child registered with the event loop,
-   * which polls waitpid(WNOHANG) at quiescence like timers.
-   * NEVER throws: spawn failure defers to the "error" event, Node-exact
-   * (the error message is Node's "spawn <cmd> <ERRNO-NAME>"; an "error"
-   * event with no listener prints it and exits 1 like an EventEmitter).
-   * cmd/args borrowed; result an owned (+1) child handle. The loop will
-   * not exhaust while any spawned child is unreaped — Node's keep-alive.
-   *
-   * child.onExit / child.onClose / child.onError — terminal listener
-   * registration through child.on/once. Close uses the exit adapter shape
-   * but fires only after every piped stdio handle reaches EOF. The
-   * receiver is borrowed, the CALLBACK MOVES into the child's listener
-   * registry (released after the terminal event fires, or at reap for
-   * the event that never fires). Both are void (chaining is fenced).
-   * onExit's third emitted ingredient is an ADAPTER the backend interns
-   * per callback shape: the runtime invokes adapter(cb, has_code, code)
-   * and the adapter builds the `number | null` union (tags are program-
-   * dependent) or ignores the code for a zero-param callback. onError's
-   * adapters are runtime-provided (zero-param, or the %Error one-param
-   * shape — scr_error_new needs no program types). "exit" fires once
-   * with the code (f64 arm) or null (signal death); "error" fires only
-   * for spawn failure, exactly Node's split. */
-  | "cp.spawn"
-  /** Static-native fork startup and IPC. process.forkTarget initializes a
-   * re-executed child's inherited channel and returns its embedded target id
-   * (-1 in the parent). The remaining entries mirror Node's JSON channel. */
-  | "process.forkTarget"
-  | "cp.fork"
-  | "child.connected"
-  | "child.send"
-  | "child.sendCb"
-  | "child.disconnect"
-  | "child.onMessage"
-  | "child.onDisconnect"
-  | "child.onSpawn"
-  /** Rest listeners use the checked function bridge to pack event arguments. */
-  | "child.onDyn"
-  | "process.connected"
-  | "process.send"
-  | "process.sendCb"
-  | "process.disconnect"
-  | "process.onMessage"
-  | "process.onDisconnect"
-  /** child_process.execFile's callback slice: starts an all-piped child,
-   * captures stdout/stderr, and moves the error-first callback into the
-   * child registry. The callback shape is program-dependent and checked
-   * by the validator/backends. */
-  | "cp.execFile"
-  | "child.onExit"
-  | "child.onClose"
-  | "child.onError"
-  /** The ChildProcess lifecycle members (scr_child.c), Node's shapes
-   * exactly (SEMANTICS.md has the pinned matrix). child.pid is the
-   * checker's `number | undefined` (undefined = spawn failure) and
-   * child.exitCode its `number | null` (null while running and after a
-   * signal death; -errno once a spawn failure settled) — both unions are
-   * type-directed constructions in the backend over a has/get runtime
-   * pair, the spawnRes.status pattern. child.killed is Node's
-   * sent-a-signal flag. child.kill sends while the child is un-reaped
-   * (false after — Node's null-handle answer) and THROWS the
-   * Unknown-signal TypeError on bad names (may-throw); killNum passes
-   * numbers through (0 probes; never throws). child.unref drops the
-   * child from the loop's keep-alive set — it is still reaped while the
-   * loop runs for other reasons, and one the loop never reaps is left to
-   * the OS at exit. All receivers borrowed. */
-  | "child.pid"
-  | "child.exitCode"
-  | "child.killed"
-  | "child.kill"
-  | "child.killNum"
-  | "child.unref"
-  | "child.ref"
-  /** The piped-output streams (stdio mode 3 — scr_child.c's stream
-   * slice). child.stdout/child.stderr answer the checker's
-   * `Readable | null` union (type-directed construction in the backend
-   * over the +1-or-NULL runtime pair — the child.pid pattern with a ref
-   * arm). stream.onData/onEnd register 'data'/'end' listeners (receiver
-   * borrowed, CALLBACK MOVES, trailing once-flag, void — chaining
-   * fenced): 'data' fires one Buffer chunk per read (zero-param and
-   * Buffer/string adapters are runtime-provided; setEncoding threads
-   * split multibyte sequences through the shared StringDecoder core. A
-   * union-param listener —
-   * ngrok's `Buffer | string` — gets a compiler-emitted adapter wrapping
-   * the chunk at its Buffer arm), 'end' fires once at EOF, always BEFORE
-   * the child's 'exit' (the pinned ordering). A flowing stream keeps the
-   * loop alive: usesTimers. */
-  | "child.stdout"
-  | "child.stderr"
-  | "stream.onData"
-  | "stream.onDataStr"
-  | "stream.onEnd"
-  | "stream.childSetEncoding"
-  /** The piped-input writer (stdio mode 3 on fd 0). child.stdin answers
-   * `Writable | null`; writes copy borrowed data into the nonblocking
-   * queue, end/destroy settle it, writable is a pure state read, and
-   * listener callbacks move into the writer registry. */
-  | "child.stdin"
-  | "writer.writeString"
-  | "writer.writeBytes"
-  | "writer.end"
-  | "writer.destroy"
-  | "writer.writable"
-  | "writer.onDrain"
-  | "writer.onFinish"
-  | "writer.onError"
-  /** The first-class WritableStream write (`output.write(line)` — the
-   * prefixStream idiom): the receiver IS the fd scalar (process.stdout/
-   * stderr reads mint 1/2), dispatched onto the exact stdoutWrite/
-   * stderrWrite paths so buffering and ordering stay identical. Data
-   * borrowed; the bool is Node's always-true backpressure signal. */
-  | "procStream.write"
-  /** node:net (scr_net.c — linked, and scr_net_install() emitted, only
-   * when one of these appears on the IR; moduleUsesNet is the switch).
-   * Receivers are borrowed; CALLBACKS MOVE into the handle's listener
-   * registry and are released at settlement (the child.onExit story).
-   * All listener registrations carry a trailing BOOL once-flag (`on` vs
-   * `once`) and are void — chaining is fenced. None of these throw:
-   * listen/connect failures are the async 'error' event, like Node.
-   *
-   * net.createServer's optional connection handler and the
-   * serverOnConnection listeners take the runtime-provided adapters
-   * (zero-param, or the one-param socket shape); sockOnData's adapters
-   * are the stdin pair's shapes (zero-param / bytes chunk); the error
-   * events reuse the child %Error adapters. net.listen/net.listenCb bind
-   * NOW and defer 'listening' to the next loop turn (Node's next-tick
-   * emit); net.serverPort is the composed `server.address().port` read.
-   * net.connect's host argument is a string ("localhost" pins to
-   * 127.0.0.1 — SEMANTICS.md); the connect callback is once('connect'). */
-  | "net.createServer"
-  | "net.createServerCb"
-  | "net.listen"
-  | "net.listenCb"
-  /** listen({ port, host, ipv6Only }[, cb]) — the explicit-interface bind
-   * (portless's listenOnProxyInterface): args [server, port, host,
-   * ipv6Only]. host is an IP literal string ("" = the host-less
-   * dual-stack any default); ipv6Only sets IPV6_V6ONLY before the bind.
-   * These are the old-shaped calls, retained for omitted reusePort so
-   * serialized IR remains compatible. Failures are the async 'error',
-   * message in Node's listen shape with the requested host. Never throws. */
-  | "net.listenOpts"
-  | "net.listenOptsCb"
-  /** Additive ABI for listen({ ..., reusePort }) — args
-   * [server, port, host, ipv6Only, reusePort], with the callback following
-   * those values in the callback form. The final BOOL is the requested
-   * kernel connection-distribution option; old spellings remain
-   * four/five-argument calls so serialized IR stays compatible. */
-  | "net.listenOptsReusePort"
-  | "net.listenOptsReusePortCb"
-  | "net.serverPort"
-  | "net.serverListening"
-  /** server.address() as the full AddressInfo record (the dgram.address
-   * materialization pattern: the emitter builds the record from the three
-   * runtime reads; the frontend pinned the shape). Never throws — before
-   * listen it answers the any-form defaults with port 0 where Node
-   * answers null (the serverPort stance). */
-  | "net.serverAddress"
-  | "net.serverClose"
-  | "net.serverCloseCb"
-  /** The close-override pair (the portless close-proxy idiom).
-   * serverCloseBind is `wrapper.close.bind(wrapper)` as a VALUE: a
-   * compiler-emitted closure over the server whose invocation runs the
-   * REAL close (scr_net_server_close_direct — never the override), so
-   * the override body's `origClose(cb)` cannot recurse; its callback
-   * argument (the `((err?: Error) => void) | undefined` union) registers
-   * as a once-'close' listener, a one-param callback wrapped by an
-   * emitted zero-arg trampoline firing the undefined arm (a clean close
-   * carries no error). serverSetCloseOverride is `wrapper.close = fn`:
-   * the override MOVES in behind an emitted zero-arg wrapper (it invokes
-   * the user function with the undefined-arm callback — tags are program
-   * data), and server.close() consults it before closing. */
-  | "net.serverCloseBind"
-  | "net.serverSetCloseOverride"
-  | "net.serverOnError"
-  | "net.serverOnClose"
-  | "net.serverOnConnection"
-  /** 'secureConnection' — the TLS server's deferred 'connection' list
-   * (handshake-completion timing); on a server without deferred
-   * connections (a plain net server) the registration never fires,
-   * exactly Node's split. */
-  | "net.serverOnSecureConnection"
-  | "net.connect"
-  /** connect with a validated autoSelectFamilyAttemptTimeout option (the
-   * budget runs Node's validateInt32-from-1 ladder and is then inert —
-   * the single dial has nothing to time). May-throw. */
-  | "net.connectAttempt"
-  /** net.connect/createConnection over a RUNTIME option bag (computed
-   * keys — the invalid-input probes): Node-order validation (the
-   * objectMode trio's ERR_INVALID_ARG_VALUE, validatePort, host string,
-   * autoSelectFamily boolean, the attempt budget), then the trailing
-   * compiler-rendered fence — ALWAYS THROWS (the error.nodeThrow
-   * polymorphic-result carve-out). May-throw seed. */
-  | "net.connectOptsChk"
-  | "net.connectCb"
-  /** connect({ port, host, autoSelectFamily: true, lookup }) — the
-   * caller-resolver dial (portless's createLoopbackConnection): args
-   * [port, host, lookup]. The runtime creates the (connecting) socket
-   * handle, invokes the lookup as Node does — lookup(hostname, options,
-   * callback), options crossing as the dyn undefined — and the answer
-   * closure (an emitter-synthesized per-shape thunk over a boxed socket,
-   * the SNI-answer pattern) dials the answered addresses IN ORDER: each
-   * connect failure tries the next, the LAST failure's message is the
-   * socket's 'error' (Node's autoSelectFamily aggregate is a documented
-   * divergence), and a lookup error surfaces as the deferred socket
-   * 'error'. A synchronous throw INSIDE the lookup propagates out of the
-   * connect call (may-throw seed). */
-  | "net.connectLookup"
-  | "net.sockWrite"
-  | "net.sockWriteBytes"
-  | "net.sockEnd"
-  | "net.sockEndStr"
-  | "net.sockEndBytes"
-  /** write/end with a CHECKED-DYNAMIC chunk (an untyped JS payload into a
-   * typed socket): the runtime dispatches STR/BYTES and throws Node's
-   * ERR_INVALID_ARG_TYPE chunk TypeError on any other kind. */
-  | "net.sockWriteDyn"
-  | "net.sockEndDyn"
-  | "net.sockDestroy"
-  | "net.sockPipe"
-  /** socket.pipe(res) — raw socket chunks into a ServerResponse body
-   * (the extended-CONNECT bridge leg): each chunk is a body write (the
-   * response's own framing applies); source EOF end()s the response,
-   * pipe's default. Borrows both. Never throws. */
-  | "net.sockPipeRes"
-  | "net.sockOnData"
-  | "net.sockOnEnd"
-  | "net.sockOnClose"
-  | "net.sockOnError"
-  | "net.sockOnConnect"
-  /** node:dgram + node:dns (scr_dgram.c — linked, and
-   * scr_dgram_install() emitted, only when one of these appears on the
-   * IR; moduleUsesDgram is the switch — dns.lookup rides the same unit).
-   * The net listener discipline verbatim: receivers borrowed, CALLBACKS
-   * MOVE into the handle's registry and release at settlement, `on` vs
-   * `once` is the trailing bool, registrations are void. bind/connect
-   * bind NOW and defer 'listening'/'connect' to the next loop turn (the
-   * net.listen story); their optional-host completions are ""
-   * (bind → 0.0.0.0) and "127.0.0.1" (connect — udp4's Node default).
-   * bind/connect/send/close/address THROW Node's state errors ("Socket
-   * is already bound", "Already connected", "Not running") — may-throw
-   * seeded. dgram.address returns the AddressInfo RECORD (the frontend
-   * pins the {address, family, port} shape; the emitter builds it from
-   * runtime parts). onMessage adapters are emitted per rinfo record
-   * shape (the child.onExit precedent); onError reuses the child %Error
-   * adapters. dns.lookup resolves via getaddrinfo AT CALL TIME and
-   * defers the callback to the next turn (SEMANTICS.md documents the
-   * blocking divergence); its per-union adapter builds the
-   * `Error | null` first argument. */
-  | "dgram.createSocket"
-  | "dgram.bind"
-  | "dgram.bindCb"
-  | "dgram.connect"
-  | "dgram.connectCb"
-  | "dgram.sendStr"
-  | "dgram.sendBytes"
-  /** The send argument-validation ladder over dyn arguments (Node's
-   * signature shuffle: slice bounds, list/type contracts, port/address
-   * validation, connected-state errors) — a fully-validated unconnected
-   * single-payload send RUNS; callback/list/connected forms meet the
-   * trailing fence. May-throw. */
-  | "dgram.sendChk"
-  | "dgram.address"
-  | "dgram.close"
-  | "dgram.closeCb"
-  | "dgram.unref"
-  | "dgram.ref"
-  | "dgram.onMessage"
-  | "dgram.onError"
-  | "dgram.onListening"
-  | "dgram.onClose"
-  | "dgram.onConnect"
-  | "dns.lookup"
-  /** node:test (scr_test.c — linked only when one of these appears on
-   * the IR; moduleUsesNodeTest is the switch, and the main epilogue asks
-   * scr_test_exit_code() for the process's exit status). Strings are
-   * BORROWED, callbacks MOVE. register/suite/hook attach to the runner
-   * tree (register: name, mode 0|1|2 run/skip/todo, directive message ""
-   * = none, cb or absent via registerEmpty, flags 1 async | 2 takes-ctx
-   * | 4 only, "file:line:col"); suite runs its body AT registration
-   * (Node's collection phase). sub is t.test — runs the subtest INLINE
-   * on the runner fiber and returns the settled promise the await
-   * consumes. ctxSkip/ctxTodo mark the running test; ctxDiagnostic
-   * queues an ℹ line; ctxName reads t.name. Every registration keeps
-   * the loop-run emitted (usesTimers) so the runner fiber drains. */
-  | "test.register"
-  | "test.registerEmpty"
-  | "test.suite"
-  | "test.hook"
-  | "test.sub"
-  | "test.subEmpty"
-  | "test.ctxSkip"
-  | "test.ctxTodo"
-  | "test.ctxDiagnostic"
-  | "test.ctxName"
-  /** node:http, the server slice (scr_http.c over scr_net.c — linked
-   * only when these appear on the IR; moduleUsesHttpServer is the
-   * switch, and any http.* libCall also counts as net use so scr_net.c
-   * links and installs). http.createServer's handler MOVES in and takes
-   * the runtime adapters for its (req, res) / (req) / () shapes; req
-   * body listeners follow the net.sockOnData story (bytes chunks, once
-   * flags); reqHeader answers the interned `string | undefined` union
-   * exactly like process.envGet; the res writers are borrowed-argument
-   * voids with Node's framing decided in the runtime (Content-Length
-   * for end-before-head, chunked after an explicit writeHead/write). */
-  | "http.createServer"
-  /** http.createServer() / http.Server() with no handler — the
-   * on("request") route; option helpers set parser behavior on a fresh
-   * server before the constructor/factory result is returned. */
-  | "http.createServerEmpty"
-  | "http.validateHeaderName"
-  | "http.validateHeaderValue"
-  | "http.serverJoinDupHeaders"
-  | "http.serverAllowMissingHostHeader"
-  /** The five writable numeric http.Server timeout fields use one
-   * selector ABI: 0 timeout, 1 keepAliveTimeout, 2 headersTimeout,
-   * 3 requestTimeout, 4 keepAliveTimeoutBuffer. These calls store/read
-   * the property values; timer enforcement remains outside this surface.
-   * The constructor-option setter takes dyn so explicit undefined remains
-   * distinguishable from a numeric value until its Node validation ladder. */
-  | "http.serverTimeoutGet"
-  | "http.serverSetTimeout"
-  | "http.serverSetTimeoutCb"
-  | "http.serverOnTimeout"
-  | "http.serverCloseAllConnections"
-  | "http.serverCloseIdleConnections"
-  | "http.serverTimeoutSet"
-  | "http.serverTimeoutOptionSet"
-  /** server.on("listening", cb) — the deferred listen-callback list. */
-  | "net.serverOnListening"
-  /** The ServerResponse member surface: statusCode/statusMessage reads
-   * and assignments (Node's writable properties), the header CRUD trio
-   * (getHeader answers `string | undefined` like reqHeader), and
-   * end(cb)'s finish slot (resOnFinish registers, the end call follows —
-   * the callback fires deferred, Node's 'finish' emit). writeHead's
-   * statusMessage forms compose in interned helpers: resStatusMsgSet
-   * then the ordinary writeHead entry. */
-  | "http.resStatusGet"
-  | "http.resStatusSet"
-  | "http.resStatusMsgGet"
-  | "http.resStatusMsgSet"
-  | "http.resRequest"
-  | "http.resSocket"
-  | "http.resWritableFinished"
-  | "http.resSendDateGet"
-  | "http.resSendDateSet"
-  | "http.resStrictContentLengthGet"
-  | "http.resStrictContentLengthSet"
-  | "http.resSetTimeout"
-  | "http.resSetTimeoutCb"
-  | "http.resGetHeader"
-  | "http.resGetHeaderNames"
-  | "http.resGetRawHeaderNames"
-  | "http.resGetHeaders"
-  | "http.resHasHeader"
-  | "http.resRemoveHeader"
-  | "http.resOnFinish"
-  | "http.reqUrl"
-  | "http.reqMethod"
-  | "http.reqHeader"
-  | "http.reqTrailer"
-  | "http.reqHeaderValues"
-  | "http.reqTrailerValues"
-  | "http.reqOnData"
-  | "http.reqOnEnd"
-  | "http.resSetHeader"
-  | "http.resWriteHead"
-  | "http.resWriteHeadN"
-  /** HTTP/1.1 informational heads; early hints takes flat string pairs,
-   * with a lowercase `link` key required to send anything. */
-  | "http.resWriteContinue"
-  | "http.resWriteProcessing"
-  | "http.resWriteEarlyHints"
-  | "http.resWrite"
-  | "http.resWriteBytes"
-  | "http.resEnd"
-  | "http.resEndStr"
-  | "http.resEndBytes"
-  /** The checked-dynamic chunk twins (the net.sockWriteDyn story). */
-  | "http.resWriteDyn"
-  | "http.resEndDyn"
-  | "http.resHeadersSent"
-  | "http.resWritableEnded"
-  | "http.resFlushHeaders"
-  | "http.resAddTrailers"
-  | "http.resCork"
-  | "http.resUncork"
-  | "http.resWritableCorked"
-  /** The server-surface member follow-ups: reqStatusCode answers the
-   * interned `number | undefined` union (negative = the undefined arm —
-   * a SERVER request, where Node's statusCode is undefined; every client
-   * response carries a real status); reqSocket is the underlying
-   * connection (+1, the same handle net.connect would give);
-   * sockRemoteAddress answers `string | undefined` (NULL after the fd
-   * closed, Node's destroyed-socket undefined; a dual-stack accept of an
-   * IPv4 peer reads "::ffff:a.b.c.d" like Node). reqResume/reqDestroy and
-   * the req error/close listener slots complete the IncomingMessage
-   * surface portless's client responses use; resDestroy/resOnClose and
-   * resWriteHeadPairs ([k0,v0,k1,v1,...] — the env.pairs helper's flat
-   * shape) complete ServerResponse. sockSetTimeout arms the idle
-   * EVFILT_TIMER ('timeout' fires after ms of inactivity, once per idle
-   * period, never destroying the socket — Node's semantics). */
-  | "http.reqStatusCode"
-  | "http.reqSocket"
-  | "http.reqH2Stream"
-  | "http.reqH2StreamOrThrow"
-  | "http.reqResume"
-  /** req.rawHeaders — [name, value, name, value, ...] in arrival order,
-   * names in their ORIGINAL case (Node's shape); a fresh string[] per
-   * read. reqStatusMessage answers the interned `string | undefined`
-   * union — the reason phrase on client responses ("" when the status
-   * line carried none), the undefined arm on server requests (the
-   * statusCode split). sockDestroyed is socket.destroyed — true once the
-   * fd is gone (destroy() or full close). */
-  | "http.reqRawHeaders"
-  | "http.reqRawTrailers"
-  | "http.reqStatusMessage"
-  /** The `{ ...req.headers }` snapshot feed: [lowercased name, value,
-   * ...] pairs in arrival order — the interned %headers.snapshot helper
-   * builds the record over it, exactly the process.envPairs pattern. */
-  | "http.reqHeaderPairs"
-  | "http.reqTrailerPairs"
-  | "net.sockDestroyed"
-  /** socket.writable — the write half is open: no end() yet, no FIN sent,
-   * fd alive (connecting sockets answer true; writes queue). Node's
-   * stream flag. Borrows; never throws. */
-  | "net.sockWritable"
-  /** The 'upgrade' events, both sides (SEMANTICS.md — the WebSocket
-   * proxying surface): serverOnUpgrade registers (req, socket, head)
-   * listeners fired INSTEAD of 'request' for Connection: upgrade
-   * requests (the parser steps aside; the socket is raw; `head` carries
-   * bytes past the request head; no listener = the socket destroys,
-   * Node's default). clientOnUpgrade is the client twin: a 101 response
-   * fires (res, socket, head) INSTEAD of 'response'. */
-  | "http.serverOnUpgrade"
-  | "http.clientOnUpgrade"
-  /** server.on("connect", ...) — HTTP CONNECT tunneling, the 'upgrade'
-   * machinery's twin: (req, socket, head) fired INSTEAD of 'request' for
-   * CONNECT-method requests (no listener = the socket destroys, Node's
-   * default). The h2 compat server's 'connect' (portless's RFC 8441
-   * handler) only ever sees the HTTP/1.1 arm under the allowHTTP1
-   * lowering, so a listener whose second parameter is a UNION with a
-   * netSocket arm takes the socket wrapped at that arm (an emitted
-   * per-shape adapter — the tags are program data). */
-  | "http.serverOnConnect"
-  /** req.pipe(dest) — the IncomingMessage body streaming into a
-   * ServerResponse (the proxy's response leg), a ClientRequest (the
-   * request-body forward), or a raw socket (the upgrade-rejection leg);
-   * chunk-for-chunk, natural end ends the destination (Node's pipe
-   * default; no backpressure — divergence 54's stream model). */
-  | "http.reqPipeRes"
-  | "http.reqPipeClient"
-  | "http.reqPipeSock"
-  | "http.reqDestroy"
-  | "http.reqOnError"
-  | "http.reqOnClose"
-  | "http.reqOnAborted"
-  | "http.reqHttpVersion"
-  | "http.reqHttpVersionMajor"
-  | "http.reqHttpVersionMinor"
-  | "http.reqAborted"
-  | "http.reqComplete"
-  | "http.resDestroy"
-  | "http.resOnClose"
-  | "http.resWriteHeadPairs"
-  /** writeHead(status, headers) with a checked-dynamic headers value —
-   * the runtime OBJ walk (string/number values; loud fences otherwise;
-   * may throw). */
-  | "http.resWriteHeadDyn"
-  | "net.sockSetTimeout"
-  /** setEncoding('utf8') — 'data' delivers strings inside the chunk-encoding window; other real encodings fence loudly, unknown names throw ERR_UNKNOWN_ENCODING (may throw). */
-  | "net.sockSetEncoding"
-  | "http.reqSetEncoding"
-  | "net.sockOnTimeout"
-  | "net.sockRemoteAddress"
-  /** The paused-mode demux surface (portless's first-byte TLS peek:
-   * once('readable') + read(1) + unshift + emit('connection')).
-   * sockOnReadable registers a zero-param listener (a consumer: arrived
-   * bytes buffer instead of flowing, and EOF announces too); sockRead
-   * answers `Buffer | null` (exactly n buffered bytes, or null — Node's
-   * less-than-n answer; n <= 0 drains everything); sockUnshift returns
-   * bytes to the front of the stream; serverEmitConnection routes a
-   * socket into another server's protocol layer (a TLS target's
-   * 'connection' waits for its handshake). */
-  | "net.sockOnReadable"
-  | "net.sockRead"
-  | "net.sockUnshift"
-  /** Socket flow control and the compat surface: pause/resume (reads
-   * gate off/on — kernel backpressure holds paused bytes; resume flows
-   * and discards sans listeners) and setNoDelay answer the SOCKET (+1,
-   * Node's chaining); destroySoon ends now and destroys once the FIN
-   * flushed; bytesWritten counts accepted bytes; readable is true until
-   * the read half ends. */
-  | "net.sockPause"
-  | "net.sockResume"
-  | "net.sockSetNoDelay"
-  | "net.sockDestroySoon"
-  | "net.sockBytesWritten"
-  | "net.sockReadable"
-  /** socket.on('finish', cb) / end(cb): fires once when the FIN goes out
-   * (sweep-deferred, never the registering stack). */
-  | "net.sockOnFinish"
-  | "net.serverEmitConnection"
-  /** node:http, the CLIENT slice (http.request/http.get over the net
-   * client machinery): request/requestCb take (host, port, path, method,
-   * timeoutMs, headerPairs, autoEnd[, responseCb]) — headerPairs is the
-   * flat [k0,v0,...] array (empty for none), autoEnd true is http.get's
-   * eager end(). The handle owns one dialed connection (NO pooling — the
-   * wire still carries Node's exact head: user headers, then Host,
-   * Connection: keep-alive, and the framing header; the socket closes
-   * when the response completes). The response delivered to responseCb /
-   * 'response' listeners IS an httpReq (IncomingMessage), status and
-   * headers parsed from the wire, body via reqOnData/reqOnEnd. Errors are
-   * Node-shaped ('connect ECONNREFUSED ip:port', 'socket hang up') and
-   * fire 'error' then 'close'; an unhandled 'error' exits 1 like every
-   * net handle. clientWrite before end commits to chunked framing unless
-   * the caller set content-length; clientEnd(data) before any write sends
-   * Content-Length exactly like Node. */
-  | "http.request"
-  | "http.requestCb"
-  /** new http.Agent(opts) / new https.Agent(opts): (secure, keepAlive,
-   * keepAliveMsecs, maxSockets, maxFreeSockets, timeoutMs, port) — the
-   * numeric options arrive < 0 for "unset" (Infinity/256/none; port
-   * seeds the settable defaultPort, Node's option merge). Returns the
-   * Agent as a checked-dynamic HANDLE (getName/destroy and the
-   * sockets/requests/freeSockets counters dispatch through the dyn
-   * handle ops). keepAlive: true THROWS the named construction fence —
-   * socket POOLING is not modeled (one dial per request); maxSockets
-   * accounting is real: over-limit requests defer their dial and queue.
-   * MAY THROW. */
-  | "http.agentNew"
-  /** The agent-threaded request rows: the http.request/https.request
-   * shape with a trailing `agent` dyn argument (an Agent handle, false —
-   * the one-shot Connection: close dial — or null/undefined for the
-   * default path). port < 0 means "no port option": the agent's settable
-   * defaultPort, then the scheme's. MAY THROW (a non-Agent value is
-   * Node's ERR_INVALID_ARG_TYPE). */
-  | "http.requestAgent"
-  | "http.requestAgentCb"
-  | "https.requestAgent"
-  | "https.requestAgentCb"
-  /** The createConnection form (the proxy's own dialer): args are
-   * (connCb, path, method, timeout, headers, autoEnd[, cb]) — connCb is
-   * a `() => net.Socket` closure the runtime invokes ONCE, synchronously
-   * (Node's onSocket timing); everything else matches http.request. The
-   * Host header defaults to "localhost" — a headers.host entry wins
-   * verbatim, the proxy shape. */
-  | "http.requestConn"
-  | "http.requestConnCb"
-  /** node:tls + node:https (scr_tls.c over scr_net.c/scr_http.c, with
-   * the vendored mbedTLS archive — linked only when one of these appears
-   * on the IR; moduleUsesTls is the switch, and every tls/https libCall
-   * also counts as net AND http use so both units link and install).
-   * tls.createServer takes (cert, key[, handler]) — cert/key are PEM
-   * strings or Buffers (the emitter passes data+len for either); the
-   * handler is Node's 'secureConnection' (fires post-handshake with a
-   * socket that behaves exactly like a net socket, the same adapters as
-   * net.createServer). https.createServer is (cert, key, handler) with
-   * the http request-handler adapters. https.request/requestCb extend
-   * the http client row with (…, rejectUnauthorized: bool, ca: PEM
-   * string/Buffer — "" for none) and default port 443; everything else
-   * (write/end/destroy/events, the response surface) IS the http client
-   * surface — the handles are the same kinds. */
-  | "tls.createServer"
-  | "tls.createServerCb"
-  /** RUNTIME options records (the divergence-66 stance): the *Dyn
-   * creators take a checked-dynamic (dyn) options value whose members
-   * read at runtime — cert/key extract like the literal path, members
-   * whose literal forms fence THROW the catchable fence at runtime, and
-   * undocumented keys drop like Node drops them. tls.pemDyn is the
-   * literal walk's runtime-valued cert/key extraction: (value, whatLit)
-   * → PEM bytes (strings/Buffers/one-element arrays of those) or the
-   * thrown fence. All of them may throw. */
-  | "tls.pemDyn"
-  | "tls.createServerDyn"
-  | "tls.createServerDynCb"
-  | "https.createServerDyn"
-  | "https.createServerDynCb"
-  /** tls.connect — the TLS client socket: (port, host, opts[, cb]) where
-   * port -1 reads options.port, host "" reads options.host, and opts is
-   * the runtime (dyn) options record (rejectUnauthorized/ca/servername
-   * implemented; other documented members throw the runtime fence). The
-   * callback fires post-handshake — Node's secureConnect timing. */
-  | "tls.connect"
-  | "tls.connectCb"
-  /** The TLSSocket member surface on the socket kind: authorized (bool —
-   * Node's verify verdict), authorizationError (the verify-failure CODE
-   * STRING or null), the 'secureConnect' registration (a TLS socket's
-   * conn list fires at establishment; plain sockets never fire it), and
-   * the 'session' registration (fires once with the serialized session —
-   * a Buffer; the received-ticket event). */
-  | "tls.sockAuthorized"
-  | "tls.sockAuthError"
-  | "tls.sockOnSecureConnect"
-  | "tls.sockOnSession"
-  /** tls.createSecureContext({ cert, key }) — parses the PEM pair into an
-   * opaque SecureContext handle (secureCtx kind) for SNI callbacks to
-   * answer with; cert/key are PEM strings or Buffers like createServer's. */
-  | "tls.createSecureContext"
-  /** createSecureContext over a RUNTIME options record (the checked-
-   * dynamic lane): Node's typed option validations first (the ciphers/
-   * passphrase/engine/version/timeout/ticketKeys ladders), then the pem
-   * walk — a validated { cert, key } bag builds the real context.
-   * May-throw. */
-  | "tls.createSecureContextDyn"
-  /** tls.getCACertificates(type): validateString + the documented name
-   * set, then the trailing compiler-rendered fence — ALWAYS THROWS (the
-   * error.nodeThrow polymorphic-result carve-out). May-throw seed. */
-  | "tls.caCertsChk"
-  /** The CA-store introspection surface (scr_tls_ca.c — its own unit and
-   * link gate, "tlsca." NOT "tls.", so a getCACertificates-only binary
-   * never pulls mbedTLS): tlsca.get is tls.getCACertificates(type) — the
-   * cached per-type string[] of PEM blocks (identity-stable across calls,
-   * Node's caching; an unknown type throws Node's ERR_INVALID_ARG_VALUE
-   * TypeError); tlsca.root is the tls.rootCertificates value read;
-   * tlsca.set is tls.setDefaultCACertificates(certs) — replaces the
-   * default set (deduped) and the anchors the TLS client verifies
-   * against, throwing Node's ERR_CRYPTO_OPERATION_FAILED when no entry
-   * carries a certificate block. */
-  | "tlsca.get"
-  | "tlsca.root"
-  | "tlsca.set"
-  | "https.createServer"
-  | "https.request"
-  | "https.requestCb"
-  /** The URL-string first argument, the http.requestUrl row over TLS:
-   * no options means Node's defaults (verification on, default trust
-   * anchors), and a non-https scheme is ERR_INVALID_PROTOCOL. */
-  | "https.requestUrl"
-  | "https.requestUrlCb"
-  /** A call through a `const requestFn = tls ? https.request :
-   * http.request` binding — the module-function-as-value ternary between
-   * the two known clients: the https.request row with a leading `secure`
-   * bool that picks the dial at RUNTIME (true = the TLS client, exactly
-   * https.request; false = the plain client, exactly http.request —
-   * rejectUnauthorized/ca ignored there like Node ignores TLS options on
-   * http.request). The "https." prefix keeps the TLS unit linked. */
-  | "https.requestFn"
-  | "https.requestFnCb"
-  /** node:http2 allowHTTP1: one TLS server advertises h2 + http/1.1 and
-   * dispatches to the matching parser after ALPN. Request listeners mirror
-   * into both compatibility lists; the remaining session/req.stream rows
-   * below retain their explicitly limited behavior. */
-  | "http2.createSecureServer"
-  /** createSecureServer(options, handler) — the eager COMPAT handler as
-   * the first 'request' listener (Node's exact route), on both literal
-   * flavors: Req is the dual ALPN allowHTTP1 server, H2Req the ALPN=h2-only
-   * server (both use compat handles over h2 streams). Args are
-   * (cert, key, cb, enableConnectProtocol). */
-  | "http2.createSecureServerReq"
-  | "http2.createSecureServerH2Req"
-  /** createSecureServer with a RUNTIME options record (the divergence-66
-   * stance): allowHTTP1/cert/key read at runtime — allowHTTP1 picks the
-   * flavor, the TLS server walk fences its out-of-bounds members with
-   * the catchable runtime fence, and h2 session-tuning keys drop exactly
-   * like the literal walk ignores them. May throw. The Cb form carries
-   * the eager compat handler. */
-  | "http2.createSecureServerDyn"
-  | "http2.createSecureServerDynCb"
-  /** createSecureServer with an SNI callback: args are (cert, key, sniCb)
-   * where sniCb is the JS SNICallback — a `(servername, cb) => void`
-   * closure, or the `SNICallback | undefined` union from the conditional-
-   * spread spelling (`...(x ? { SNICallback: x } : {})`; the emitter
-   * unwraps the union — the undefined arm means "no callback", exactly
-   * the no-SNI server). The runtime parses each connection's ClientHello
-   * for the server_name extension BEFORE the TLS handshake begins, calls
-   * the callback with (servername, answer-closure), and resumes the
-   * handshake when the answer arrives — cb(err) tears the socket down
-   * silently (Node's 'tlsClientError' default), cb(null, ctx) serves
-   * ctx's cert/key, cb(null, undefined) serves the default pair. */
-  | "http2.createSecureServerSni"
-  /** The REAL h2-over-TLS server (createSecureServer WITHOUT allowHTTP1):
-   * scr_http2_create_secure_server — the h2c session machinery behind an
-   * mbedTLS handshake whose ALPN advertises h2 alone (an http/1.1-only
-   * client fails the handshake with no_application_protocol, Node's
-   * h2-only split). args are (cert, key) — PEM strings or Buffers. */
-  | "http2.createSecureServerH2"
-  | "http.serverOnRequest"
-  | "http2.serverOnSessionError"
-  /** The guarded absent-session compatibility call remains a no-op. */
-  | "http2.streamNoop"
-  /** The UNGUARDED h2-only stream call (`req.stream.on(...)`): stream is
-   * undefined on every connection the allowHTTP1 lowering accepts — and
-   * on every HTTP/1.1 connection of Node's own allowHTTP1 server — so the
-   * call IS Node's member read on undefined: throws the exact catchable
-   * TypeError ("Cannot read properties of undefined (reading 'on')").
-   * One arg: the read member's name (a string literal). Never returns. */
-  | "http2.streamUndefCall"
-  /** node:http2, the REAL h2c surface (scr_http2.c — frame codec + HPACK
-   * over the net loop; the design note atop that file has the story).
-   * Sessions and streams are first-class handle kinds; 'stream'/'response'
-   * payloads cross as flat [name, value, ...] pairs arrays and an EMITTED
-   * adapter closure builds the program-side headers record (the response
-   * :status rides separately as a number). */
-  | "http2.createServer"
-  | "http2.createServerReq"
-  | "http2.serverOnStream"
-  | "http2.serverOnSession"
-  /** connect(authority[, listener]) — h2c prior knowledge; the listener
-   * closure (if any) is the 'connect' once-listener. */
-  | "http2.connect"
-  | "http2.connectCb"
-  /** session.request(pairs?, endStream) — endStream is a tri-state f64:
-   * -1 the method's payload-meaningless default, 0/1 explicit. */
-  | "http2.sessionRequest"
-  | "http2.sessionClose"
-  | "http2.sessionCloseCb"
-  | "http2.sessionDestroy"
-  | "http2.sessionOnClose"
-  | "http2.sessionOnError"
-  | "http2.sessionOnConnect"
-  | "http2.sessionOnStream"
-  | "http2.sessionOnGoaway"
-  | "http2.sessionSettings0"
-  | "http2.sessionSettings"
-  | "http2.sessionSettingsDynCb"
-  | "http2.sessionSettingsCb0"
-  | "http2.sessionOnSettingsDyn"
-  | "http2.sessionOnSettings0"
-  | "http2.sessionSettingsGet"
-  | "http2.sessionPendingSettingsAck"
-  | "http2.getDefaultSettings"
-  | "http2.sessionClosed"
-  | "http2.sessionDestroyed"
-  | "http2.sessionEncrypted"
-  | "http2.sessionType"
-  | "http2.sessionAlpn"
-  | "http2.sessionSocket"
-  /** stream.respond(pairs?, endStream) — the server answer. */
-  | "http2.streamRespond"
-  | "http2.streamWrite"
-  | "http2.streamWriteBytes"
-  | "http2.streamEnd"
-  | "http2.streamEndStr"
-  | "http2.streamEndBytes"
-  | "http2.streamClose"
-  | "http2.streamCloseCb"
-  | "http2.streamDestroy"
-  | "http2.streamSetEncoding"
-  | "http2.streamSetEncodingRet"
-  | "http2.streamResume"
-  | "http2.streamPause"
-  | "http2.streamOnData"
-  | "http2.streamOnEnd"
-  | "http2.streamOnClose"
-  | "http2.streamOnAborted"
-  | "http2.streamOnError"
-  | "http2.streamOnResponse"
-  | "http2.streamId"
-  | "http2.streamRstCode"
-  | "http2.streamDestroyed"
-  | "http2.streamClosed"
-  | "http2.streamAborted"
-  | "http2.streamPending"
-  | "http2.streamSession"
-  /** socket.encrypted — `boolean | undefined`: the true arm iff the
-   * socket carries a TLS transport (Node types `encrypted: true` on
-   * TLSSocket; plain sockets answer undefined — the proxy.ts isEncrypted
-   * idiom reads it through a cast). */
-  | "net.sockEncrypted"
-  | "http.clientWrite"
-  | "http.clientSetHeader"
-  | "http.clientGetHeader"
-  | "http.clientHasHeader"
-  | "http.clientRemoveHeader"
-  | "http.clientGetHeaderNames"
-  | "http.clientGetRawHeaderNames"
-  | "http.clientGetHeaders"
-  | "http.clientWriteBytes"
-  | "http.clientEnd"
-  | "http.clientEndStr"
-  | "http.clientEndBytes"
-  /** The checked-dynamic chunk twins (the net.sockWriteDyn story). */
-  | "http.clientWriteDyn"
-  | "http.clientEndDyn"
-  | "http.clientFlushHeaders"
-  | "http.clientAddTrailers"
-  | "http.clientCork"
-  | "http.clientUncork"
-  | "http.clientWritableCorked"
-  | "http.clientMethod"
-  | "http.clientPath"
-  | "http.clientHost"
-  | "http.clientProtocol"
-  | "http.clientHeadersSent"
-  | "http.clientWritableEnded"
-  | "http.clientWritableFinished"
-  | "http.clientSocket"
-  | "http.clientReusedSocket"
-  | "http.clientSetNoDelay"
-  | "http.clientSetSocketKeepAlive"
-  | "http.clientSetTimeout"
-  | "http.clientSetTimeoutCb"
-  | "http.statusCodes"
-  | "http.methods"
-  | "http.reqSetTimeout"
-  | "http.reqSetTimeoutCb"
-  /** request/get with a URL-STRING first argument: the runtime parses it
-   * (WHATWG) and dials — throws catchably on an unparsable input or a
-   * non-http scheme. */
-  | "http.requestUrl"
-  | "http.requestUrlCb"
-  | "http.clientDestroy"
-  | "http.clientAbort"
-  | "http.clientAborted"
-  | "http.clientDestroyed"
-  | "http.clientOnResponse"
-  | "http.clientOnSocket"
-  | "http.clientOnFinish"
-  | "http.clientOnError"
-  | "http.clientOnTimeout"
-  | "http.clientOnClose"
-  | "http.clientOnAbort"
-  /** fs/promises (scr_lib.c over scr_async.c's settled minting): the SAME
-   * sync syscalls, wrapped in an ALREADY-SETTLED promise — failure
-   * REJECTS (catchable at the await) instead of throwing, so none of
-   * these are in the may-throw seed. readFile is utf8-fenced like
-   * readFileSync. The non-interleaving divergence is documented in
-   * SEMANTICS.md. */
-  /** node:crypto randomness: randomUUID plus randomBytes as either a real
-   * Buffer or the fused randomBytes(n).toString("hex"|"base64") path.
-   * The size-taking forms throw Node's RangeError on invalid values. */
-  | "crypto.randomUUID"
-  | "crypto.randomBytesToString"
-  /** The fused createHash(alg).update(data).digest(enc) fast path and the
-   * one-shot crypto.hash implementation. First-class Hash/Hmac handles use
-   * the entries below; all paths share the incremental runtime core. */
-  | "crypto.hashDigestStr"
-  | "crypto.hashDigestBytes"
-  /** First-class static Hash/Hmac handles. Constructors validate the
-   * runtime algorithm string (MD5, SHA-1, or SHA-2); update returns the same
-   * handle by retained identity, copy snapshots Hash state, and digest
-   * finalizes the handle and returns either a Buffer or encoded string. */
-  | "crypto.native"
-  | "crypto.hashNew"
-  | "crypto.hmacNewStr"
-  | "crypto.hmacNewBytes"
-  | "crypto.hashUpdateStr"
-  | "crypto.hashUpdateBytes"
-  | "crypto.hmacUpdateStr"
-  | "crypto.hmacUpdateBytes"
-  | "crypto.hashCopy"
-  | "crypto.hashDigestString"
-  | "crypto.hashDigestBuffer"
-  | "crypto.hmacDigestString"
-  | "crypto.hmacDigestBuffer"
-  | "crypto.timingSafeEqual"
-  | "crypto.randomFill"
-  | "crypto.randomFillRest"
-  | "crypto.randomInt"
-  | "crypto.pbkdf2"
-  | "crypto.randomBytesCb"
-  | "crypto.pbkdf2Cb"
-  | "crypto.hkdf"
-  | "crypto.hkdfCb"
-  | "crypto.scrypt"
-  | "crypto.scryptCb"
-  /** crypto.randomBytes(n) → a real u8 Buffer (+1). THROWS Node's
-   * RangeError on out-of-range sizes, exactly like the composed
-   * randomBytesToString (which keeps its one-libCall lowering — the two
-   * coexist: the composed form never materializes the Buffer). */
-  | "crypto.randomBytes"
-  /** The Buffer statics with fixed (always-u8) signatures. fromStr is
-   * `Buffer.from(string, enc)` — the frontend completes an omitted
-   * encoding to "utf8" and fences non-literal/unsupported ones; hex and
-   * base64 decode Node-leniently, so it never throws. concat takes ONE
-   * bytes<u8>[] arg (the list) and returns a fresh copy. `Buffer.from(u8)`
-   * and `Buffer.alloc(n)` need no libFn — they lower to bytesNew. */
-  | "buffer.fromStr"
-  | "buffer.brand"
-  /** Buffer.from on checked-native strings, bytes, arrays and data-only
-   * array-like/Buffer-JSON objects. The encoding is a normalized literal;
-   * non-string inputs ignore it. Copies the input and may throw during
-   * element coercion or argument validation. Custom object valueOf and
-   * opaque reference inputs retain explicit runtime refusals. */
-  | "buffer.fromDyn"
-  | "buffer.concat"
-  /** Buffer.byteLength(string, enc) — enc a NORMALIZED literal like
-   * fromStr's — and Buffer.isEncoding(name) over a runtime string
-   * (case-insensitive against Node's alias set). Pure; never throw. */
-  | "buffer.byteLenDyn"
-  | "buffer.byteLenStr"
-  | "buffer.isEncoding"
-  /** Buffer.concat(list, totalLength): the concatenation truncated or
-   * zero-padded to the total. THROWS Node's 'length' RangeError on a
-   * negative/non-integer total (may-throw seed). */
-  | "buffer.concatLen"
-  /** The checked-dynamic compare/equals validators (scr_bytes_io.c) —
-   * the lowered form when an argument is NOT statically bytes<u8> (the
-   * invalid-input probes; a dyn from an untyped JS helper): Node's own
-   * argument ladders run at runtime — ERR_INVALID_ARG_TYPE with the
-   * API's argument name ("buf1"/"buf2", "otherBuffer", "target"; offsets
-   * "of type number"), validateOffset's ERR_OUT_OF_RANGE for bad
-   * numbers, undefined offsets taking their Node defaults — and a
-   * well-typed value still computes the real answer. All args borrowed
-   * dyn; compareChk's four offset slots pass the undefined dyn when
-   * syntactically absent. May-throw seeds. */
-  | "buffer.compareChk"
-  | "bytes.equalsChk"
-  | "bytes.compareChk"
-  /** The deprecated `new Buffer(number, 'enc')` string-arm rejection:
-   * always throws Node's ERR_INVALID_ARG_TYPE ("The \"string\" argument
-   * must be of type string. Received ..."). Borrowed dyn; may-throw. */
-  | "buffer.newStringFail"
-  /** fs._toUnixTimestamp(time) over a dyn value: numeric strings and
-   * finite numbers coerce (negatives answer now/1000, Node's shape);
-   * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
-  | "fs.toUnixTimestamp"
-  /** The fs argument-validation ladders (checked-dynamic lane): each Chk
-   * replicates its API's Node-order validation over dyn values (Node's
-   * exact typed errors — ERR_INVALID_ARG_TYPE/VALUE, ERR_OUT_OF_RANGE),
-   * and a full pass meets the trailing compiler-rendered SC2020 fence
-   * string — so the ALWAYS-THROW forms take the error.nodeThrow
-   * polymorphic-result carve-out. mkdtempSyncChk and the lchmod sync/
-   * promise pair run the REAL operation on a validated pass instead
-   * (macOS lchmod(2); non-APPLE answers Node's not-a-function /
-   * ERR_METHOD_NOT_IMPLEMENTED shapes). May-throw seeds, all of them. */
-  | "fs.existsChk"
-  | "fs.mkdtempChk"
-  | "fs.mkdtempSyncChk"
-  | "fs.readFileChk"
-  | "fs.opendirChk"
-  | "fs.watchFileChk"
-  | "fs.lchmodChk"
-  | "fs.lchmodSyncChk"
-  | "fsp.lchmodChk"
-  | "fs.readChk"
-  | "fs.streamOptsChk"
-  /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
-   * rendered Received tail: args [argname, "of type ..." clause, the
-   * offending dyn value]. ALWAYS THROWS; polymorphic result (the
-   * error.nodeThrow pattern). May-throw seed. */
-  | "error.argTypeThrow"
-  /** The property flavor of argTypeThrow ("The \"options.x\" property
-   * must be ..."): the option-bag ladders' provably-invalid arms. ALWAYS
-   * THROWS; polymorphic result. May-throw seed. */
-  | "error.propTypeThrow"
-  /** The checked-dynamic max-listeners ladders: setMaxChk is the
-   * instance form over a dyn n (non-numbers ERR_INVALID_ARG_TYPE,
-   * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
-   * setDefaultMaxChk is the static/property form, its second argument
-   * naming the message slot ("setMaxListeners" for the static call,
-   * "defaultMaxListeners" for the module-property assignment). */
-  | "emitter.setMaxChk"
-  | "emitter.setDefaultMaxChk"
-  /** The Buffer forms of fs: readFileSync(path) with NO
-   * encoding → bytes<u8> (+1), writeFileSync/appendFileSync(path, bytes), and the
-   * fs/promises readFile(path) no-encoding form (an already-settled
-   * promise, rejecting on failure like the other fsp members). The sync
-   * forms THROW catchably on failure exactly like the utf8 forms. */
-  | "fs.readFileSyncBytes"
-  | "fs.writeFileSyncBytes"
-  | "fs.appendFileSyncBytes"
-  | "fsp.readFileBytes"
-  /** node:zlib (scr_zlib.c — native-toolchain.ts compiles/links it ONLY when these
-   * appear on the IR, the regex/libcurl gating precedent): one-shot zlib,
-   * raw-DEFLATE, gzip, and auto-detect codecs over u8 bytes with Node's
-   * default options, or a validated literal compression level from -1 to 9.
-   * Compression never throws (OOM aborts); decompression
-   * of corrupt input THROWS Node's error catchably. */
-  | "zlib.deflateSync"
-  | "zlib.inflateSync"
-  | "zlib.deflateRawSync"
-  /** bytes, mode (0 zlib / 1 raw / 2 gzip), validated compression level. */
-  | "zlib.deflateLevelSync"
-  | "zlib.inflateRawSync"
-  | "zlib.gzipSync"
-  | "zlib.gunzipSync"
-  | "zlib.unzipSync"
-  /** The default-options callback twins run on the executable's shared
-   * native work pool and deliver (Error | null, Buffer) on a later loop
-   * turn. crc32 validates its optional uint32 seed synchronously. */
-  | "zlib.deflateCb"
-  | "zlib.inflateCb"
-  | "zlib.deflateRawCb"
-  | "zlib.inflateRawCb"
-  | "zlib.gzipCb"
-  | "zlib.gunzipCb"
-  | "zlib.unzipCb"
-  | "zlib.crc32"
-  /** The Buffer overloads of the raw stream writes — same promptly
-   * submitted streams as process.stdoutWrite/stderrWrite, constantly true.
-   * The encoding arg is evaluated but ignored for bytes, like Node. The Cb
-   * forms move their program-shaped completion callback to the tick queue. */
-  | "process.stdoutWriteBytes"
-  | "process.stderrWriteBytes"
-  | "process.stdoutWriteBytesCb"
-  | "process.stderrWriteBytesCb"
-  | "fsp.readFile"
-  | "fsp.writeFile"
-  /** fs.promises.writeFile(path, data, { mode }): the settled-promise
-   * twin of fs.writeFileModeSync. */
-  | "fsp.writeFileMode"
-  | "fsp.mkdir"
-  /** The fs/promises option/member tail the certs pipeline uses: mkdir's
-   * literal { recursive?, mode? } options (the mkdirSync matrix behind
-   * settled promises), unlink, chmod. Failures REJECT (catchable at the
-   * await), like the rest of the fsp family. */
-  | "fsp.mkdirMode"
-  | "fsp.mkdirRecursive"
-  | "fsp.mkdirRecursiveMode"
-  | "fsp.unlink"
-  | "fsp.chmod"
-  | "fsp.link"
-  | "fsp.symlink"
-  | "fsp.readlink"
-  | "fsp.statfs"
-  | "fsp.readlinkStr"
-  | "fsp.readlinkBuffer"
-  | "fsp.utimes"
-  | "fsp.lutimes"
-  | "fsp.rename"
-  | "fsp.readdir"
-  /** `fs.promises.readdir(path, { withFileTypes: true })` — the settled-
-   * promise twin of fs.readdirTypesSync. The backends assemble the same
-   * call-site-shaped Dirent rows, then move the array into a promise;
-   * scandir failure becomes its rejection. */
-  | "fsp.readdirTypes"
-  | "fsp.rm"
-  | "fsp.stat"
-  | "fsp.realpath"
-  | "fsp.lstat"
-  /** fs/promises.open and the statically represented FileHandle surface.
-   * Every operation returns an already-settled promise; syscall failures
-   * become rejections rather than escaping synchronously. read/write
-   * results are call-site record shapes ({ bytesRead/bytesWritten,
-   * buffer }) assembled by the backends around the fixed runtime ABI. */
-  | "fsp.open"
-  | "fileHandle.fd"
-  | "fileHandle.close"
-  | "fileHandle.sync"
-  | "fileHandle.datasync"
-  | "fileHandle.truncate"
-  | "fileHandle.chmod"
-  | "fileHandle.utimes"
-  | "fileHandle.readv"
-  | "fileHandle.writev"
-  | "fileHandle.read"
-  | "fileHandle.writeBytes"
-  | "fileHandle.writeStr"
-  | "fileHandle.readFile"
-  | "fileHandle.readFileBytes"
-  | "fileHandle.writeFile"
-  | "fileHandle.writeFileBytes"
-  | "fileHandle.stat"
-  | "process.argv"
-  | "process.platform"
-  /** getenv(3): one string key arg → the interned `string | undefined`
-   * union (present: +1 string wrapped into the string arm; absent: the
-   * interned undefined-arm instance). BOTH source forms — `process.env.FOO`
-   * and `process.env[expr]` — lower here. Purely static; never throws. */
-  | "process.envGet"
-  /** setenv(3): (name, value) string args → void. Later envGet reads and
-   * spawned children observe the write, like Node (values are strings —
-   * the frontend fences non-string RHS). Never throws. */
-  | "process.envSet"
-  /** The whole environment as alternating [k0, v0, k1, v1, ...] strings in
-   * environ order — the raw material of the process.env SNAPSHOT record
-   * (the frontend's interned %env.snapshot helper keyed-writes the pairs
-   * into a fresh `{ [k: string]: string | undefined }` record). Fresh +1
-   * array; never throws. */
-  | "process.envPairs"
-  | "process.exit"
-  /** Numeric process.exitCode write (integer validation, implicit exit status). */
-  | "process.setExitCode"
-  /** The code for process.exit() with no argument, or zero when unset. */
-  | "process.currentExitCode"
-  | "process.cwd"
-  /** getpid(2) / getuid(2): zero args → f64. POSIX-only target, so both
-   * always answer (the checker's `getuid?` optionality covers Windows —
-   * `process.getuid?.()` lowers as the plain call). Never throw. */
-  | "process.pid"
-  | "process.getuid"
-  | "process.getgid"
-  /** The ambient receiver — JS `this` in a plain (non-method) function
-   * body: the innermost binding the current firing/dispatch window
-   * pushed (Node's listener receiver, a dyn OBJ method's object, an
-   * apply/call thisArg), or the undefined dyn singleton with none bound
-   * (the strict-mode plain-call answer, the old constant). Zero args →
-   * dyn (+1). Never throws. */
-  | "dyn.dataViewIs"
-  | "dyn.construct"
-  | "dyn.this"
-  | "dyn.generatorThis"
-  /** process.execPath: the compiled binary's own resolved absolute path
-   * (one interned string, +1 per read) — the honest answer where Node's
-   * is the node executable's (SEMANTICS.md divergence 12). Never throws. */
-  | "process.execPath"
-  /** process.arch: the compiled binary's OWN architecture ("arm64",
-   * "x64") — Node's answer for its own build on the same machine.
-   * Interned; +1 per read. Never throws. */
-  | "process.arch"
-  /** Stable native version dictionary. node/openssl identify compatibility
-   * targets; components absent from the native runtime are omitted. */
-  | "process.versions"
-  | "process.builtinId"
-  | "process.builtinModule"
-  | "process.builtinUnsupported"
-  | "fs.callbackValue"
-  | "fs.callbackCall"
-  | "process.hrtimeValue"
-  /** process.versions.node: the runtime's Node COMPATIBILITY TARGET —
-   * there is no Node under the binary, so this reports the version whose
-   * semantics the runtime implements (SEMANTICS.md divergence 60, the
-   * execPath stance). Interned; +1 per read. Never throws. */
-  | "process.versionsNode"
-  | "process.versionsOpenssl"
-  /** umask(2): arg < 0 reads without setting (umask has no read-only form
-   * — set 0, restore); otherwise sets and answers the PREVIOUS mask.
-   * Never throws. */
-  | "process.umask"
-  /** chdir(2) — throws Node's fs-shaped error (ENOENT/EACCES/ENOTDIR,
-   * syscall "chdir") on failure. */
-  | "process.chdir"
-  | "process.loadEnvFile"
-  /** process._exiting: true once the exit sequence began (exit listeners
-   * running) — the runtime flag scr_run_exit_listeners/process.exit set.
-   * Never throws. */
-  | "process.exiting"
-  /** os.type(): uname(2)'s sysname ("Darwin", "Linux"; "Windows_NT" on
-   * win32) — Node's uv_os_uname answer. Interned per call; never throws. */
-  | "os.type"
-  /** os.totalmem(): total physical memory in bytes. Never throws. */
-  | "os.totalmem"
-  /** net's process-wide happy-eyeballs attempt budget (Node's default
-   * 250ms): one runtime double in the core unit, so reading/writing it
-   * never forces the net unit into the link. Never throw. */
-  | "net.getAutoSelTimeout"
-  | "net.setAutoSelTimeout"
-  /** realpath(3) with Node's error shape (syscall "lstat" in the message,
-   * Node's own spelling for realpathSync failures). +1 fresh string. */
-  | "fs.realpathSync"
-  /** Native realpath with syscall "realpath" on failure. +1 fresh string. */
-  | "fs.realpathNativeSync"
-  /** kill(2) with Node's exact semantics and error shapes: the pid must be
-   * an int32 (else the ERR_INVALID_ARG_TYPE TypeError text), the named
-   * form resolves Node's signal-name table (unknown names throw the
-   * ERR_UNKNOWN_SIGNAL TypeError), an omitted signal completes to
-   * "SIGTERM" in the frontend, signal 0 probes, and a kill(2) failure
-   * throws Node's `kill ESRCH`/`kill EPERM` Error. Result is Node's
-   * constant true. */
-  | "process.kill"
-  | "process.killNum"
-  /** execFileSync/execSync as ONE entry (args: cmd, argv, shell, input,
-   * cwd, hasEnv, envPairs, timeoutMs, stdoutMode, stderrMode — see
-   * scr_runtime.h). Throws Node's exact errors: "Command failed: <cmd>"
-   * (+ captured stderr) on non-zero exit or signal death, "spawnSync
-   * <file> ENOENT" on spawn failure, "spawnSync <file> ETIMEDOUT" after
-   * the SIGTERM timeout. Result is the captured utf8 stdout (+1). */
-  | "cp.execSync"
-  /** The promisified-execFile capture (args: cmd, argv, cwd, hasEnv,
-   * envPairs, timeoutMs): the same exec core in the async shape — both
-   * streams captured, no echo, Node's ASYNC messages on the throw paths
-   * ("Command failed: <cmd>\n<stderr>" with the unconditional newline,
-   * "spawn <file> ENOENT" with .code, timeouts reporting as ordinary
-   * SIGTERM command failures — never ETIMEDOUT). Result reuses the
-   * ScrSpawnRes container (+1; stdout/stderr strings, status unused).
-   * Called only from the frontend's interned %execFileAsync ASYNC helper,
-   * whose fiber turns the throw into the rejection. */
-  | "cp.execCapture"
-  /** The raw byte writes: one borrowed string arg → bool (constantly true
-   * — this synchronous runtime never queues backpressure). stdoutWrite
-   * shares console.log's stream, each call is submitted promptly, and
-   * interleaved output keeps source order. No newline, no formatting,
-   * never throws. */
-  | "process.stdoutWrite"
-  | "process.stderrWrite"
-  | "process.stdio"
-  | "timers.setTimeout"
-  /** The repeating timer pair. setInterval takes (callback, ms) like
-   * setTimeout and RETURNS the f64 handle the fallback declarations
-   * promise (ids start at 1, so truthiness narrowing works); the loop
-   * owns the callback until clearInterval removes the entry (eagerly — a
-   * live interval keeps the loop alive, a cleared one releases it, like
-   * Node). Neither throws; a throw ESCAPING an interval callback ends the
-   * program like a setTimeout throw. */
-  | "timers.setInterval"
-  | "timers.clearInterval"
-  /** setTimeout WITH a clear handle (the f64 id) — the clearable/unref-able
-   * one-shot; clearTimeout cancels it, .unref() drops it from loop
-   * liveness. The plain timers.setTimeout stays the handle-less
-   * fire-and-forget. */
-  | "timers.setTimeoutHandle"
-  | "timers.clearTimeout"
-  /** Timeout.unref()/ref()/hasRef() — loop-liveness bookkeeping over the
-   * handle id. unref/ref RETURN the handle (f64) for chaining; hasRef
-   * returns bool. */
-  | "timers.unref"
-  | "timers.ref"
-  | "timers.hasRef"
-  /** Timeout.refresh() — re-arm to now + the original delay (from the
-   * heap or from inside the firing callback; a one-shot that fired on an
-   * earlier turn is gone and no-ops — documented divergence). Returns
-   * the handle for chaining like unref/ref. */
-  | "timers.refresh"
-  /** setImmediate/clearImmediate — Node's check phase: callbacks run
-   * once per loop turn AFTER due timers, FIFO, and immediates queued
-   * mid-phase wait for the next turn. setImmediate returns the f64
-   * handle (its own id space — clearTimeout of an Immediate no-ops,
-   * like Node); the Immediate ref trio mirrors the Timeout one (an
-   * unref'd pending immediate neither keeps the loop alive nor fires
-   * once nothing reffed remains). */
-  | "timers.setImmediate"
-  | "timers.clearImmediate"
-  | "timers.immediateUnref"
-  | "timers.immediateRef"
-  | "timers.immediateHasRef"
-  /** queueMicrotask (scr_async.c): the callback enters the SAME FIFO
-   * promise continuations ride — one microtask order, like V8's queue —
-   * and a throw is an UNCAUGHT exception (never a rejection).
-   * timers.queueMicrotask takes an owned zero-param closure and never
-   * throws; the Dyn form (checked-dynamic arguments — the mustCall
-   * wrapper, the suite's invalid-input probes) throws Node's
-   * ERR_INVALID_ARG_TYPE synchronously on a non-function value and calls
-   * the function with zero arguments at drain. */
-  | "timers.queueMicrotask"
-  | "timers.queueMicrotaskDyn"
-  /** The tolerated non-handle clear (`clearTimeout(null)`,
-   * `clearInterval({})`, zero-argument forms): Node silently ignores
-   * anything that is not a live handle — a VOID no-op the emitter drops
-   * (only syntactically side-effect-free arguments take this path). */
-  | "timers.clearNoop"
-  /** process.nextTick(cb, ...args) — the user tick queue. args: [cb
-   * (() => void; trailing call arguments ride the timer surface's
-   * interned dyn thunk)]. Ticks drain BEFORE promise jobs at every loop
-   * checkpoint, to joint exhaustion with them (Node's tick-then-
-   * microtask order); ticks enqueued by station listeners run at the
-   * NEXT checkpoint (the stream-tick station divergence, SEMANTICS.md).
-   * Pending ticks are always-ready work — the loop neither sleeps nor
-   * exits while any exist; ticks scheduled from 'exit' listeners never
-   * run (Node). The enqueue itself never throws. */
-  | "process.nextTick"
-  /** The process introspection statics. uptime: seconds since the
-   * binary's own start (fractional — a load-time monotonic anchor).
-   * availableMemory/constrainedMemory: libuv's numbers (free-ish bytes;
-   * the cgroup cap or 0). cpuUser/cpuSystem (+ threadCpu twins): the
-   * process/thread CPU clocks in microseconds — the frontend composes
-   * the {user, system} records. The *Diff forms answer current − prev
-   * for one field; cpuPrevValidate throws Node's ERR_INVALID_ARG_VALUE
-   * RangeError for negative/non-finite prev fields (user first, then
-   * system — Node's order; MAY THROW). rusage(idx): one
-   * process.resourceUsage() field by canonical index (Node's units).
-   * activeResources: the loop's own bookkeeping — 'Timeout' per armed
-   * (or firing, uncleared) timer, 'Immediate' per queued unfired
-   * immediate; unmodeled resource kinds are absent (SEMANTICS.md). */
-  | "process.uptime"
-  /** perf_hooks performance.now(): fractional ms since process start. */
-  | "perf.now"
-  | "process.availableMemory"
-  | "process.constrainedMemory"
-  | "process.cpuUser"
-  | "process.cpuSystem"
-  | "process.cpuUserDiff"
-  | "process.cpuSystemDiff"
-  | "process.threadCpuUser"
-  | "process.threadCpuSystem"
-  | "process.threadCpuUserDiff"
-  | "process.threadCpuSystemDiff"
-  | "process.cpuPrevValidate"
-  | "process.rusage"
-  | "process.activeResources"
-  /** Named process signal events: [name string, callback dyn, once bool]
-   * or [name, callback] for removal. The runtime resolves platform signal
-   * numbers and delivers (name, number). Listeners do not keep the loop
-   * alive. Invalid callbacks and uncatchable signals throw. */
-  | "process.onSignal"
-  | "process.offSignal"
-  /** The process 'exit' event — process.on/once/off("exit"). args: [cb,
-   * once bool] / [cb]. Listeners run SYNCHRONOUSLY at termination
-   * (normal exit, process.exit(), the uncaught/unhandled exit-1 paths)
-   * with the exit code; anything they schedule never runs, like Node.
-   * Callback shapes: () => void or (code: number) => void — the emitter
-   * picks the runtime adapter. Never throw. */
-  | "process.onExit"
-  | "process.offExit"
-  /** process.stdin listener registration — stdin.on/once("data" | "end" |
-   * "error", cb). args: [cb, once bool]. data callbacks: () => void or
-   * (chunk: Uint8Array) => void; end: () => void; error: () => void or
-   * (err: Error) => void (the child error adapters are reused). While a
-   * data listener (or a parked for-await chunk promise) exists, stdin
-   * keeps the loop alive — Node's flowing-stdin keep-alive. Never
-   * throw. */
-  | "stdin.onData"
-  | "stdin.onEnd"
-  | "stdin.onError"
-  /** The for-await chunk source over process.stdin: no args, result
-   * Promise<Uint8Array> (+1). Fulfills with the next arrived chunk; the
-   * EMPTY bytes value is the done sentinel (POSIX reads never deliver
-   * empty data chunks), which the for-await desugar turns into loop
-   * exit. Never throws itself; awaiting it re-throws nothing (stdin
-   * errors surface through 'error' listeners, not the iterator). */
-  | "stdin.nextChunk"
-  /** The runtime-provided Error hierarchy's entry points (scr_error.c).
-   * error.new: one borrowed string arg (the message), result an owned (+1)
-   * builtin error instance — the result TYPE names which builtin class
-   * (backends derive the runtime kind from it). error.ctor: the
-   * super(message) call of an `extends Error` constructor — borrowed
-   * receiver (already allocated by the derived class's new) + borrowed
-   * message, void; the receiver's type names the builtin class whose name
-   * field to stamp. error.toString: borrowed `%Error`-typed receiver, +1
-   * string in Node's "name: message" shape. Formatting can invoke a user
-   * message accessor, which can throw. */
-  | "error.new"
-  /** ECMAScript constructors with raw checked-dynamic message/options.
-   * Options retain cause presence; constructor calls borrow their args.
-   * Message coercion may throw before the cause is installed. */
-  | "error.newOptions"
-  | "error.ctorOptions"
-  /** Borrowed Error receiver. cause returns an owned dyn value (undefined
-   * when absent); hasCause distinguishes absence from present undefined. */
-  | "error.cause"
-  | "error.hasCause"
-  /** Assignment borrows both operands and retains the new cause. */
-  | "error.setCause"
-  | "error.defineCause"
-  | "error.deleteCause"
-  /** The compiler-resolved Node-parity throw for always-throwing lowered
-   * arms (ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders,
-   * the symbol-to-string TypeError): args are [error-kind f64 (the
-   * SCR_ERR_* index: 0 Error, 1 TypeError, 2 RangeError), code (empty =
-   * no code slot), message]. ALWAYS THROWS catchably; the result type is
-   * the replaced expression's own (never materialized — the
-   * global.undefRead pattern). May-throw seed. */
-  | "error.nodeThrow"
-  /** JS ToString over a dyn value WITH the object protocol (a user
-   * toString/valueOf member is CALLED and its throw propagates;
-   * exhaustion throws "Cannot convert object to primitive value"; units
-   * render "null"/"undefined") — the WHATWG USVString conversions
-   * (URLSearchParams names/values). Borrowed dyn; +1 string. May-throw. */
-  | "dyn.toStringCoerce"
-  | "dyn.stringConstructor"
-  | "dyn.propertyKey"
-  | "dyn.toNumeric"
-  | "dyn.increment"
-  /** JS ToNumber over a dyn value WITH the object protocol (number-hint
-   * valueOf/toString ordering; user throws propagate). Borrowed dyn;
-   * f64 result, or a throw. Used by statically lowered numeric coercions
-   * whose checker type remained any. */
-  | "dyn.numberConstructor"
-  | "dyn.bigintConstructor"
-  | "dyn.toNumberCoerce"
-  | "dyn.add"
-  | "dyn.arithmetic"
-  | "dyn.compare"
-  | "dyn.bitwise"
-  | "dyn.proxyNew"
-  /** A read of a `declare`d const NOTHING defines (the bundler-define
-   * pattern — __VERSION__): always throws the catchable ReferenceError
-   * Node raises at the access ("<name> is not defined"). args[0] is the
-   * name; the result type is the read's declared type (a typed dummy the
-   * unwind abandons — the value never exists). */
-  | "global.undefRead"
-  /** A native reference to the global object; known names retain value fences. */
-  | "global.native"
-  | "console.native"
-  /** `X.name` through a class VALUE (scr_object.c): args[0] is a borrowed
-   * classval; the result is the class object's stored .name string,
-   * retained (+1 — the string is an interned immortal, so the retain is a
-   * no-op, kept for ownership uniformity). Never throws. A direct
-   * `C.name` on the class name itself folds to a strLit instead. */
-  | "class.name"
-  | "error.ctor"
-  | "error.toString"
-  | "error.stack"
-  | "error.stackLimitGet"
-  | "error.stackLimitSet"
-  /** `new DOMException(message?, nameOrOptions?)` (scr_error.c): both args
-   * are borrowed dyn values (the lowering passes the dyn undefined for an
-   * absent argument, so WebIDL's optionality lives in one place). The
-   * runtime ToStrings the message ("" for absent/undefined), resolves the
-   * name — absent/undefined → "Error", a non-null object → ToString of its
-   * `name` member plus the `cause` own-property record, anything else →
-   * ToString — and stamps the legacy code from the WebIDL name table (0
-   * off-table). Result is an owned (+1) %DOMException. Never throws (dyn
-   * ToString is total). */
-  | "error.newDom"
-  /** DOMException's own read surface (scr_error.c; %DOMException receivers
-   * only — borrowed). domCode: the legacy numeric code. domHasCause: the
-   * options form's own-property record (`'cause' in e`). domCause: the
-   * cause value, +1 (the dyn undefined when absent — matching Node's
-   * undefined read). None throws. */
-  | "error.domCode"
-  | "error.domHasCause"
-  | "error.domCause"
-  /** structuredClone of a %DOMException receiver (scr_error.c): WebIDL
-   * serialization — name/message copy, the legacy code re-derives, cause
-   * does not serialize. args are the borrowed receiver and the borrowed
-   * options dyn value (the dyn undefined when absent — the shared
-   * validation throws Node's exact option errors; any non-empty transfer
-   * list throws DataCloneError, nothing static is transferable). Result
-   * +1 %DOMException. */
-  | "error.domClone"
-  /** `d instanceof TypeError` (and the other BUILTIN error classes) on a
-   * checked-dynamic value (scr_json.c): the from_error cache holds the
-   * dyn↔error identity edge, so the test resolves the runtime error and
-   * asks its vtable's stamped preorder interval — exact for every error
-   * that crossed the boundary. A dyn object that never came from an
-   * error (a hand-built {%error} literal) answers false: subclass
-   * identity is unknowable there (the root keeps dynTest's marker
-   * answer). args are the borrowed dyn and the SCR_ERR_* kind literal.
-   * Never throws. */
-  | "dyn.errInstanceof"
-  /** Object.keys/values/entries over a CHECKED-DYNAMIC receiver
-   * (scr_json.c): the runtime walks the dyn node's own members in JS
-   * own-key order (array-index keys ascending first, then insertion
-   * order) and answers a dyn array (entries: an array of [key, value]
-   * pairs; values RETAIN the member nodes — reference semantics, like
-   * JS). Strings/arrays/bytes answer their index keys; other scalars an
-   * empty array; null/undefined throw Node's catchable TypeError
-   * ("Cannot convert undefined or null to object"). */
-  | "dyn.objKeys"
-  | "dyn.forInKeys"
-  | "dyn.hasOwn"
-  | "dyn.propertyIsEnumerable"
-  | "dyn.assign"
-  | "dyn.copyDataProperties"
-  | "dyn.objectRest"
-  /** Variadic Object.assign over CHECKED-DYNAMIC targets (`Object.assign(
-   * {}, ...arr.map(f), tail)` — the option-table merge): the lowering
-   * builds one fresh dyn pack of sources (packPush retains a plain source
-   * in; packPushSpread flattens a spread source through the spread-call
-   * walk — V8's exact TypeError texts, the string arg spelling the spread
-   * expression for the nullish form), so every source evaluates and
-   * flattens BEFORE any copying (JS's ArgumentListEvaluation), then
-   * assignAll copies each pack element's own enumerable keys onto the
-   * target left to right and answers the TARGET (+1) — identity, like JS.
-   * assignAll throws Node's ToObject TypeError on a nullish target. */
-  | "dyn.packPush"
-  | "dyn.packPushSpread"
-  /** The iterated-path spread twin: V8 spells the optimized apply-path
-   * texts (packPushSpread's — the expression named for nullish sources)
-   * only for the SINGLE LAST argument's spread; any other spread position
-   * drives the real iterator protocol, whose failure describes the VALUE
-   * ("object null is not iterable (cannot read property
-   * Symbol(Symbol.iterator))"). The frontend picks by position. */
-  | "dyn.packPushSpreadIter"
-  | "dyn.assignAll"
-  | "dyn.reflectApply"
-  | "dyn.reflectGet"
-  | "dyn.reflectSet"
-  | "dyn.reflectDefine"
-  | "dyn.abstractEq"
-  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE dyn
-   * dictionary. The checked-dynamic tree's OBJ dispatch is already own-member-only —
-   * Node's null-proto answer — so the flag's whole job is the observations
-   * that SEE the prototype: inspect's "[Object: null prototype]" prefix
-   * and deepStrictEqual's prototype gate. Never throws. Static builds
-   * only; --dynamic routes Object.create through the engine instead. */
-  | "dyn.objCreateNullProto"
-  | "dyn.arrayPrototype"
-  | "dyn.arrayConstructor"
-  | "dyn.objectPrototype"
-  | "dyn.functionApply"
-  | "dyn.builtinMethod"
-  | "dyn.classPrototype"
-  | "dyn.classBasePrototype"
-  | "dyn.classInherit"
-  | "dyn.classSuper"
-  | "dyn.assignPrototype"
-  | "dyn.definePrototypeProps"
-  | "dyn.bagGet"
-  | "dyn.bagSet"
-  | "dyn.objCreate"
-  | "dyn.objCreateWithProperties"
-  | "dyn.getPrototype"
-  | "dyn.setPrototype"
-  | "dyn.getOwnPropertyNames"
-  | "dyn.ownKeys"
-  | "dyn.getOwnPropertySymbols"
-  | "dyn.getOwnPropertyDescriptors"
-  | "dyn.preventExtensions"
-  | "dyn.isExtensible"
-  | "dyn.seal"
-  | "dyn.isSealed"
-  | "dyn.objValues"
-  | "dyn.objEntries"
-  /** structuredClone over the checked-dynamic tree (scr_json.c): the JSON-safe subset plus
-   * bytes (a fresh copy — a Buffer clones as a plain Uint8Array, like
-   * Node), deep. Functions and handle kinds throw the spec's catchable
-   * DataCloneError; CYCLES throw the scriptc fence (the checked-dynamic tree cannot
-   * represent them — Node clones cycles; documented divergence). The
-   * options dyn value validates with Node's exact errors (dictionary
-   * conversion, the transfer-sequence member; any non-empty transfer
-   * list throws DataCloneError). dyn.cloneMissing is the zero-argument
-   * call: always throws Node's TypeError [ERR_MISSING_ARGS] with Node's
-   * own (verbatim, doubly-wrapped) message. */
-  | "dyn.structuredClone"
-  | "dyn.cloneMissing"
-  /** `new RegExp(pattern, flags?)` (scr_regex.c): a heap regex over the
-   * same libregexp engine the literals use. The pattern compiles EAGERLY
-   * so an invalid pattern (or an unknown flag letter) throws Node's
-   * catchable SyntaxError at construction — Node's message shape with
-   * libregexp's detail text (approximate fidelity; e.name exact). An
-   * empty pattern stores the spec's "(?:)" source. Both args borrowed
-   * strings (the lowering completes an absent flags to ""); result +1.
-   * The result TYPE is the regex kind, so the link switch pulls the
-   * engine exactly like a literal. */
-  | "regex.new"
-  | "regex.resetLastIndex"
-  | "regex.newChecked"
-  /** structuredClone with a NON-EMPTY transfer array of static values:
-   * nothing static is transferable, so the call always throws Node's
-   * catchable DataCloneError ("Found invalid value in transferList.") —
-   * lowered directly (the list's values need no dyn representation to
-   * fail). */
-  | "dyn.cloneTransferFail"
-  /** node:events EventEmitter (scr_events_emitter.c, link-gated by
-   * moduleUsesEmitter). The receiver of every instance form is a borrowed
-   * emitter-hierarchy object (`%EventEmitter` or a user subclass — the
-   * backend reinterprets to ScrEmitter*, the identical prefix); event
-   * names are borrowed strings (compile-time literals — the frontend
-   * fences non-literals and unifies each event's argument tuple program-
-   * wide). The chaining forms (on/off/removeAll/setMax) return the
-   * receiver +1 typed as its static class, Node's `return this`.
-   *
-   * emitter.new: `new EventEmitter()` → a +1 bare emitter. emitter.ctor:
-   * super() into the prefix of an emitted subclass (borrowed receiver,
-   * void — allocation already initialized the prefix). emitter.on:
-   * (recv, name, cb /moves/, once, prepend) — the backend synthesizes the
-   * per-signature va_list invoke adapter from the cb's func type.
-   * emitter.emit: (recv, name, ...tuple) — VARIADIC, the one libCall
-   * whose arg count exceeds its signature; args are borrowed, result is
-   * the had-listeners bool. emitter.emitError: emit('error', err) —
-   * throws err when unhandled. count/countFn/names/listeners/getMax/
-   * setMax/setDefaultMax/getDefaultMax are the introspection surface. */
-  | "emitter.new"
-  | "emitter.ctor"
-  | "emitter.on"
-  | "emitter.off"
-  | "emitter.checkListener"
-  | "emitter.onDyn"
-  | "emitter.onFlex"
-  | "emitter.offDyn"
-  | "emitter.removeAll"
-  | "emitter.emit"
-  | "emitter.emitFlex"
-  | "emitter.emitError"
-  | "emitter.count"
-  | "emitter.countFn"
-  | "emitter.countDyn"
-  | "emitter.names"
-  | "emitter.listeners"
-  | "emitter.setMax"
-  | "emitter.getMax"
-  /** Stream-'data' registration twins of emitter.on/onDyn (same args):
-   * chosen at registration sites whose receiver is stream-rooted, so the
-   * backend emits DATA thunks — the runtime's 'data' emission carries
-   * BOTH payload slots (bytes, string; exactly one non-NULL — encoded
-   * streams deliver strings), and the thunk unwraps the listener's
-   * declared side (typed) or boxes by tag (dyn). emitter.emitData is the
-   * user-emit form: (recv, name, chunk) with a bytes OR string chunk. */
-  | "emitter.onData"
-  | "emitter.onDataDyn"
-  | "emitter.emitData"
-  | "emitter.setDefaultMax"
-  | "emitter.getDefaultMax"
-  /** node:stream (scr_stream.c, link-gated by moduleUsesStream — which
-   * implies the emitter unit: stream events dispatch through the embedded
-   * ScrEmitter registry). Receivers are borrowed stream-class objects
-   * (`%Readable`/`%Writable`/`%Duplex`/`%Transform`/`%PassThrough` — one
-   * runtime layout, reinterpreted by side).
-   *
-   * Constructors (`readable.new` et al): args are [hwmR, hwmW, flags]
-   * followed by the PRESENT user callbacks in canonical order (read,
-   * write, final, destroy, transform, flush — the flags f64 is a bitmask
-   * naming which follow; absent ones emit NULL). Every callback closure
-   * MOVES and carries a leading `this` param (the stream), invoked
-   * through compiler-emitted adapters. Results are +1.
-   *
-   * readable.push / readable.pushStr / readable.pushNull: Node's push —
-   * buffers or delivers (bytes chunk borrowed; string converted utf8);
-   * returns the below-hwm answer. readable.read: (recv, size — -1 for
-   * absent) → Buffer|null union. pause/resume return recv +1 (`this`);
-   * isPaused answers the flag. readable.pipe: (recv, dst, end) → dst +1,
-   * fires 'pipe' on dst; readable.unpipe (recv[, dst]) → recv +1.
-   * writable.write/writeStr: (recv, chunk[, cb]) → below-hwm bool (cb
-   * MOVES when present, called after the user write completes).
-   * writable.end: (recv, flags[, chunk][, cb]) → recv +1. cork/uncork are
-   * void. stream.destroy/destroyErr: (recv[, err]) → recv +1.
-   * stream.prop: (recv, name-literal) → the flag/number the name asks
-   * for; stream.errored → Error|null union; readable.flowing →
-   * bool|null union. All may leave a listener's exception pending
-   * (dispatch runs user code synchronously, like emit). */
-  | "readable.new"
-  | "writable.new"
-  | "duplex.new"
-  | "transform.new"
-  | "passthrough.new"
-  /** Subclass initialization (`super(options?)` in a user `extends
-   * Readable` constructor): same tail as the `.new` forms, prefixed with
-   * the BORROWED receiver (the emitted subclass allocation — vtable and
-   * display name stamped, state NULL until here). Overridden underscore
-   * methods arrive as synthesized wrapper closures dispatching through
-   * the vtable. Void result. */
-  | "readable.init"
-  | "writable.init"
-  | "duplex.init"
-  | "transform.init"
-  | "passthrough.init"
-  /** The dyn-options twins (a checked-dynamic options record — the JS
-   * lane's `super(options)` forwarding and `new Readable(dynVar)`): the
-   * option walk runs at RUNTIME with Node's reading rules. newDyn:
-   * (optsDyn) → the fresh stream; initDyn: (recv, optsDyn, flags,
-   * ...fallback wrapper closures in canonical order — the flags literal
-   * names which ride, exactly the .init callback ABI). MAY THROW (a
-   * consumed-but-unlowered option is the compile fence's runtime twin). */
-  /** stream.finished(s, cb) — the callback form: the watcher fires once
-   * at the terminal point with the finish status; the result is the +1
-   * cleanup closure. stream.pipeline(count, s1..sn, cb): chains pipes,
-   * propagates the first error by destroying the rest, calls cb after the
-   * last 'close'; answers the destination +1. The Dyn twins take the
-   * callback as a checked-dynamic VALUE (mustCall wrappers). */
-  | "stream.finished"
-  | "stream.finishedDyn"
-  | "stream.pipeline"
-  | "stream.pipelineDyn"
-  /** node:stream/promises — the promise forms over the same machinery:
-   * sp.finished: (s) → a pending void promise the terminal watcher
-   * settles; sp.pipeline: (count, s1..sn) → the callback pipeline's
-   * chaining/destroyer semantics settling a void promise (fulfilled on a
-   * clean finish, rejected with the finish status otherwise). */
-  | "sp.finished"
-  | "sp.pipeline"
-  /** node:stream/consumers — the promise consumers over the readable
-   * machinery: (s) → a pending promise settled at the terminal point
-   * with the accumulated result (sc.text: the utf8 decode, sc.json: the
-   * parsed dyn — malformed input rejects with the parse's SyntaxError,
-   * sc.buffer: the concatenated bytes) or rejected with the stream's
-   * error / ERR_STREAM_PREMATURE_CLOSE. */
-  | "sc.text"
-  | "sc.json"
-  | "sc.buffer"
-  | "readable.newDyn"
-  | "writable.newDyn"
-  | "duplex.newDyn"
-  | "transform.newDyn"
-  | "passthrough.newDyn"
-  | "readable.initDyn"
-  | "writable.initDyn"
-  | "duplex.initDyn"
-  | "transform.initDyn"
-  | "passthrough.initDyn"
-  | "readable.push"
-  | "readable.pushStr"
-  | "readable.pushNull"
-  | "readable.pushU"
-  | "readable.pushDyn"
-  | "readable.unshift"
-  | "readable.unshiftStr"
-  | "readable.read"
-  | "readable.readDyn"
-  | "stream.onDyn"
-  | "readable.pause"
-  | "readable.resume"
-  | "readable.setEncoding"
-  /** push(chunk, enc) with a literal non-utf8 encoding, and the
-   * defaultEncoding option's push side (how push(string) decodes —
-   * Buffer.from(chunk, enc)); both carry the CANONICAL literal. */
-  | "readable.pushStrEnc"
-  | "readable.pushEncoding"
-  /** for-await over a readable (the desugared loop's per-pass promise):
-   * +1 promise of the next chunk — buffered content, the EOF sentinel
-   * (empty Buffer / dyn undefined), or a rejection with the stream's
-   * error. The Dyn twin boxes chunks by runtime tag (the JS lane).
-   * readable.fromArr is Readable.from(array): a fully-seeded object-
-   * entry stream (one whole chunk per element; strings per the flag). */
-  | "readable.nextChunk"
-  | "readable.nextChunkDyn"
-  | "readable.fromArr"
-  | "readable.isPaused"
-  | "readable.pipe"
-  | "readable.unpipe"
-  | "readable.flowing"
-  | "writable.write"
-  | "writable.writeStr"
-  | "writable.writeU"
-  | "writable.writeDyn"
-  | "writable.end"
-  | "writable.cork"
-  | "writable.uncork"
-  | "stream.destroy"
-  | "stream.destroyErr"
-  /** AsyncIteratorClose for Readable[Symbol.asyncIterator](): destroy with
-   * Node's AbortError/ABORT_ERR payload while the iterator's internal error
-   * consumer prevents an unhandled-error crash. */
-  | "stream.iteratorClose"
-  | "stream.prop"
-  | "stream.errored"
-  /** The underscore-method assignment surface (`r._read = fn` after
-   * construction — Node's own-property shadow of the prototype method):
-   * args [stream receiver (borrowed), callback closure (+1 moves)]. The
-   * runtime slot the matching option callback fills swaps its closure
-   * and invoke thunk; the next dispatch uses it (Node's timing). The
-   * setters themselves never throw. */
-  | "stream.setRead"
-  | "stream.setWrite"
-  | "stream.setFinal"
-  | "stream.setDestroy"
-  | "stream.setTransform"
-  | "stream.setFlush"
-  /** NodeJS.ErrnoException's `.code` read: borrowed error-hierarchy
-   * receiver → the interned `string | undefined` union (type-directed
-   * construction in the backend, the process.envGet pattern) — the errno
-   * name where a throw site stamped one (fs, exec spawn/timeout,
-   * process.kill, the spawn 'error' event), the undefined arm everywhere
-   * else. Never throws. */
-  | "error.code"
-  /** node:assert (scr_assert.c; assert.match in scr_regex.c — every call
-   * site carries a regex value, so the regex link switch is already on).
-   * Failures throw a catchable AssertionError — a runtime %Error whose
-   * name is "AssertionError" and whose code slot is "ERR_ASSERTION" — so
-   * `instanceof Error`, `.name`, `.message`, and `.code` all answer like
-   * Node's. Generated messages are Node's assertion_error.js scalar forms
-   * byte-exactly (the short `a !== b` form, the stacked `+ actual
-   * - expected` diff with the string `^` indicator, the inline-vs-block
-   * not-equal split); composite deep failures carry the header line
-   * without the rendered inspect diff (documented divergence).
-   *
-   * assert.ok: (pass, message) — the frontend computed the truthiness AND
-   * the full message (the user's, or the compile-time source-text form —
-   * assert.fail lowers here too with pass=false). assert.eqF64/eqBigInt/
-   * eqStr/eqBool: (a, b, negated, deep, msg, hasMsg) — Object.is comparison,
-   * covering strictEqual/notStrictEqual and the scalar deepStrictEqual
-   * pair; msg is a typed dummy ("" literal) when hasMsg is false (Node
-   * distinguishes an omitted message from an empty one per operator).
-   * assert.deepResult: (equal, negated, msg, hasMsg) — the verdict of a
-   * frontend-synthesized structural comparison, turned into Node's throw.
-   * assert.sameValue: Object.is over doubles (the deep-equal helpers'
-   * number leaf; never throws). assert.match: (s, regex, negated, msg,
-   * hasMsg) — a fresh exec from index 0. assert.throwsNone: (rejection,
-   * ename, hasEname, msg, hasMsg) — the "Missing expected
-   * exception|rejection" throw of assert.throws/rejects whose callback
-   * returned (fulfilled) normally, with Node's ` (${expected.name})`
-   * detail when the expected class or shape carries a name.
-   * assert.throwsMismatch: (expectedName, error) — the wrong-class throw
-   * of the assert.throws(fn, ErrorClass) form. assert.eqSym:
-   * (a, b, negated, deep, msg, hasMsg) — strict equality over symbol
-   * values, pointer identity with v24's "Symbol(desc)" stacked-diff
-   * messages (scr_symbol.c, the assert.match pattern — symbol-typed
-   * slots already flip the symbol link switch). assert.eqDyn:
-   * (a, b, negated, deep, msg, hasMsg) — the whole quartet over
-   * checked-dynamic operands (both slots dyn; the frontend boxes a
-   * static side with dynFrom first): SameValue for the strict pair over
-   * the dyn kinds (boxed-closure identity for functions), the structural
-   * dyn walk for the deep pair, with assertion_error.js's messages —
-   * scalar forms byte-exact, composites rendered compact:false/sorted
-   * through the checked-dynamic tree and diffed with the real myers line printer.
-   *
-   * The assert.throws(fn, {name/code/message}) shape check
-   * (expectedException over the static error surface): shapeBegin
-   * stashes the caught error, shapeStr/shapeRe add one expected key each
-   * (key ids 0 code / 1 message / 2 name; shapeRe lives in scr_regex.c —
-   * its regex argument flips the regex link switch — and tests eagerly
-   * so scr_assert.c stays libregexp-free), then shapeEnd throws Node's
-   * deep-equal Comparison diff BYTE-EXACTLY (the bounded key set makes
-   * the rendering enumerable) or the custom message.
-   * assert.throwsRegex: (regex, error, msg, hasMsg) — the
-   * assert.throws(fn, /re/) check over String(error), Node's
-   * regex-mismatch message. assert.regexErrTest: doesNotReject's silent
-   * regex predicate over String(error) (never throws).
-   * assert.unwantedRejection: (error, msg, hasMsg) — doesNotReject's
-   * "Got unwanted rejection" throw.
-   * assert.ifErrorErr/F64/Str/Bool: assert.ifError's per-type throws
-   * ("ifError got unwanted exception: " + the error's message/name or
-   * the value's inspection) — the frontend routes null/undefined to a
-   * no-op and everything else here (Node throws for falsy values too).
-   * All arguments are borrowed. */
-  | "assert.ok"
-  | "assert.eqF64"
-  | "assert.eqBigInt"
-  | "assert.eqStr"
-  | "assert.eqBool"
-  | "assert.eqSym"
-  | "assert.eqDyn"
-  | "assert.looseResult"
-  | "assert.deepResult"
-  | "assert.sameValue"
-  /* deepStrictEqual's pair memo over cycle-capable types: enter answers
-   * true for a pair already being compared (Node's memo — equal cyclic
-   * structures compare true); leave pops. */
-  | "assert.deqEnter"
-  | "assert.deqLeave"
-  | "assert.match"
-  | "assert.throwsNone"
-  | "assert.throwsMismatch"
-  | "assert.throwsRegex"
-  | "assert.shapeBegin"
-  | "assert.shapeStr"
-  | "assert.shapeRe"
-  | "assert.shapeEnd"
-  | "assert.regexErrTest"
-  | "assert.unwantedRejection"
-  | "assert.unwantedError"
-  | "assert.noErrorPredicate"
-  | "assert.regexDynTest"
-  /** Node's expectsError over an error-INSTANCE expected (assert.throws/
-   * rejects second argument): walk the expected dyn error's keys (name,
-   * message, code — the %error marker skipped) and deep-compare each
-   * against the caught value's; a mismatch throws the deep-equal
-   * AssertionError (scr_assert.c). MAY THROW by design. */
-  | "assert.expectsErrDyn"
-  | "assert.ifErrorErr"
-  | "assert.ifErrorF64"
-  | "assert.ifErrorStr"
-  | "assert.ifErrorBool"
-  | "assert.ifErrorDyn"
-  | "assert.refEqBytes"
-  | "assert.refEqFn"
-  | "assert.bytesDeepEq"
-  /** util.inspect (scr_inspect.c — its own link switch, moduleUsesInspect):
-   * the runtime half of the static rendering. Scalar formatters return +1
-   * strings (insp.f64: JS ToString except -0; insp.str: the quoting
-   * ladder + line splitting; insp.regex: /source/flags; insp.buffer:
-   * <Buffer aa ..>). insp.error renders the STACKLESS [Name: message]
-   * form with the code slot as its one property. insp.dyn walks the
-   * checked-dynamic tree entirely in the runtime (its shape lives in the
-   * value); insp.dynS is format's %s twin (dyn strings pass verbatim).
-   * insp.jsval ([value, recurse, depth], --dynamic only) renders the
-   * island scalars and THROWS a catchable TypeError on composites (the
-   * may-throw seed set). begin/entry/moreItems/end drive the frame
-   * engine from the compiler-synthesized per-type traversal helpers
-   * (%util.insp.N — the deepStrictEqual precedent). */
-  | "insp.f64"
-  /** util.format %j over a checked-dynamic argument: the runtime dyn
-   * walk (JS-exact stringify; root undefined/function prints
-   * "undefined"; a handle in the tree throws the loud fence). */
-  | "insp.jsonDyn"
-  | "insp.str"
-  | "insp.regex"
-  | "insp.buffer"
-  | "insp.error"
-  | "insp.dyn"
-  | "insp.dynS"
-  | "insp.jsval"
-  | "insp.begin"
-  | "insp.entry"
-  | "insp.key"
-  | "insp.moreItems"
-  /* Circular references over cycle-capable composites (recursive record/
-   * class types): circCheck answers a value's circular id when it is
-   * already on the traversal stack (0 otherwise), seenPush/refWrap
-   * bracket the frame (refWrap adds Node's "<ref *N> " prefix to values
-   * the walk found circular), circular renders "[Circular *N]". */
-  | "insp.circCheck"
-  | "insp.seenPush"
-  | "insp.refWrap"
-  | "insp.circular"
-  | "insp.end"
-  /** node:string_decoder's utf8 StringDecoder (scr_string.c): the decoder
-   * value is a one-field record whose f64 PACKS the pending partial
-   * sequence (count + up to 3 raw bytes — Node buffers at most 3 for
-   * every encoding); the frontend's interned %strdec helpers thread it,
-   * with the decoder's CANONICAL encoding name first, through these pure
-   * functions. write: (enc, pending, chunk) → the decoded complete
-   * prefix of pending+chunk (+1); next: (enc, pending, chunk) → the
-   * packed NEW pending; end: (enc, pending) → the buffered partial's
-   * flush (+1). Node-exact per encoding (oracle-pinned); none throws. */
-  | "strdec.write"
-  | "strdec.next"
-  | "strdec.end"
-  /** node:readline's question/close slice (scr_readline.c, linked under
-   * the events gate — these fns imply moduleUsesProcessEvents). The
-   * interface value is an f64 handle (the Timeout-id precedent).
-   * rl.create: [] → f64 — createInterface({ input: process.stdin,
-   * output: process.stdout }), registering the unit's shared stdin
-   * consumer (an OPEN interface keeps the loop alive until close/EOF,
-   * Node's semantics). rl.question: [handle, query, cb] — writes the
-   * query to stdout (Node writes under pipes too) and delivers the next
-   * line's text through a backend-picked adapter (zero-param or
-   * (answer: string)); THROWS Node's "readline was closed" on a closed
-   * interface (may-throw). rl.close: [handle] — fires 'close' listeners
-   * SYNCHRONOUSLY (Node's inline emit) and detaches the consumer (the
-   * loop stops waiting on fd 0). rl.onClose: [handle, cb] — a zero-arg
-   * listener (moves); stdin EOF closes every open interface with the
-   * buffered partial line DISCARDED, like Node. */
-  | "rl.create"
-  | "rl.question"
-  | "rl.close"
-  | "rl.onClose"
-  /** node:timers/promises — the promisified pair (scr_async.c, beside
-   * the timer heap they ride): tp.setTimeout: [ms] → a pending void
-   * promise a one-shot heap timer fulfills (the loop's timer phase, FIFO
-   * against equal deadlines like Node); tp.setImmediate: [] → the same
-   * through the immediate queue (fires before due timers of later loop
-   * turns, Node's check phase). Neither throws. */
-  | "tp.setTimeout"
-  | "tp.setImmediate"
-  /** node:diagnostics_channel (scr_dc.c, linked when any dc.* appears —
-   * the zlib gating precedent): a process-global name→channel registry;
-   * channel values are f64 handles (type-mapper.ts maps Channel to F64, the
-   * readline.Interface pattern). Subscribers are dyn function values —
-   * identity-compared by unsubscribe, called (message, name) by publish
-   * over a SNAPSHOT of the list (a subscriber unsubscribing itself
-   * mid-publish still lets its siblings fire, Node's behavior). dc.publish
-   * MAY THROW: a subscriber's throw propagates out of publish (catchable
-   * there) where Node routes it to triggerUncaughtException — the
-   * documented divergence. subscribe/unsubscribe throw Node's
-   * ERR_INVALID_ARG_TYPE TypeError for non-function subscribers. */
-  | "dc.channel"
-  | "dc.subscribe"
-  | "dc.unsubscribe"
-  | "dc.hasSubscribers"
-  | "dc.publish"
-  | "dc.chanSubscribe"
-  | "dc.chanUnsubscribe"
-  | "dc.chanHasSubscribers"
-  | "dc.chanName"
-  /** TracingChannel (dc.tracingChannel): a registry entry of the five
-   * event channels, an f64 handle like Channel (type-mapper.ts). tcSubscribe/
-   * tcUnsubscribe walk a dyn handlers object's five event keys (truthy
-   * non-function slots throw the per-channel ERR_INVALID_ARG_TYPE);
-   * tcTraceSync/tcTraceCallback/tcTracePromise run Node's publish choreography in C over
-   * dyn values (fn, ctx, thisArg, args-array) with thisArg bound as the
-   * ambient receiver — the traced call's throw and any subscriber throw
-   * both propagate (MAY THROW). tcTraceCallback wraps args[position] in a
-   * native error/result + asyncStart/asyncEnd publisher and throws Node's
-   * TypeError when that slot is not callable. tracingChannelOf is the
-   * five-Channel collection form of the constructor. */
-  /** setImmediate as a first-class dyn value (scr_async.c): a minted dyn
-   * callable scheduling args[0](args[1..]) on the immediate queue — the
-   * Node-suite traceCallback shape (`traceCallback(setImmediate, ...)`).
-   * Calling it validates the callback (the dyn call machinery); minting
-   * never throws. */
-  | "timers.setImmediateFnValue"
-  /** `new Promise(setImmediate)` (the Node-suite early-exit shape): a
-   * fresh promise an immediate fulfills with the undefined dyn value —
-   * the executor IS setImmediate, so resolve rides the immediate queue
-   * (scr_async.c). Never throws. */
-  | "timers.immediatePromise"
-  | "dc.tracingChannel"
-  | "dc.tracingChannelOf"
-  | "dc.tcChannel"
-  | "dc.tcHasSubscribers"
-  | "dc.tcSubscribe"
-  | "dc.tcUnsubscribe"
-  | "dc.tcTraceSync"
-  | "dc.tcTraceCallback"
-  /** tracePromise (scr_dc.c): start publish, the traced call, a wrap of
-   * non-promise results, the end publish, and a REACTION FIBER that
-   * awaits the traced promise and publishes asyncStart/asyncEnd (error
-   * first on rejection) before settling the returned promise<dyn> with
-   * the passed-through outcome. MAY THROW (the traced call and the
-   * synchronous publishes). */
-  | "dc.tcTracePromise"
-  /** AsyncLocalStorage (node:async_hooks — scr_async.c): stores are f64
-   * handles; contexts are immutable fiber-carried snapshots (spawned
-   * fibers inherit the spawner's — Node's init-time capture). run/exit
-   * enter (or clear) the store, call the dyn function with forwarded
-   * arguments, and restore (the finally); getStore answers the current
-   * dyn value or undefined; enterWith installs with no restore point.
-   * run/exit MAY THROW (the callback's own throws propagate). */
-  /** `await v` over a checked-dynamic VALUE (scr_async.c): a dyn promise
-   * adopts (rejections re-throw — MAY THROW), anything else takes JS's
-   * one-microtask non-thenable await and answers itself. Only emitted
-   * inside async bodies (the frontend's isAsync gate). */
-  | "async.awaitDyn"
-  /** The bare one-microtask hop (scr_await_hop): `await v` over a typed
-   * NON-promise value — JS awaits non-thenables through exactly one
-   * microtask turn and yields the value itself. Never throws. */
-  | "async.hop"
-  | "als.new"
-  | "als.get"
-  | "als.run"
-  | "als.exitRun"
-  | "als.enterWith"
-  | "als.disable"
-  /** Channel.bindStore/unbindStore/runStores (scr_dc.c): the
-   * AsyncLocalStorage integration — set-semantics bindings per store,
-   * runStores entering every bound store with transform(data) around the
-   * publish and the callback (MAY THROW: transforms, subscribers, and
-   * the callback all run). */
-  | "dc.chanBindStore"
-  | "dc.chanUnbindStore"
-  | "dc.chanRunStores"
-  /** process warnings (scr_lib.c): onWarning/offWarning register dyn
-   * listeners; emitWarning applies Node's full argument grammar over the
-   * call's dyn argument vector (ERR_INVALID_ARG_TYPE TypeErrors — MAY
-   * THROW; a listener throw propagates too) and always prints Node's
-   * stderr report. Emission is synchronous (SEMANTICS.md). */
-  | "process.onWarning"
-  | "process.offWarning"
-  | "process.emitWarning"
-  /** process.on/once('unhandledRejection', fn): registers a dyn listener
-   * the checkpoint report dispatches per never-observed rejection —
-   * (reason, promise) — instead of printing and exiting 1 (scr_async.c).
-   * The bool second arg is `once` (auto-removed after one delivery,
-   * Node's once); off/removeListener remove by closure identity, the
-   * offWarning stance. Throws Node's ERR_INVALID_ARG_TYPE on a
-   * non-function. */
-  /** Uncaught exception handlers and monitors: [callback dyn, once, monitor]. */
-  | "process.onUncaughtException"
-  | "process.offUncaughtException"
-  | "process.onUnhandledRejection"
-  | "process.offUnhandledRejection"
-  /** process.on/once/off('rejectionHandled', fn): the sibling registry.
-   * A handler attached after unhandledRejection delivery fires the event
-   * once. Dispatch is synchronous at the attach, with the promise,
-   * Node's payload. */
-  | "process.onRejectionHandled"
-  | "process.offRejectionHandled"
-  /** The Number statics with a static C implementation (scr_lib.c): one
-   * f64 arg → bool, JS-exact BY CONSTRUCTION — Number.isFinite/isNaN/
-   * isInteger/isSafeInteger never coerce, and the frontend routes only
-   * f64-typed arguments here (other static types fence). None throws. */
-  | "number.isFinite"
-  | "number.isNaN"
-  | "number.isInteger"
-  | "number.isSafeInteger"
-  /** Date (scr_lib.c). Values are TimeClip'd epoch-millisecond scalars:
-   * construction/store/pass/getters are exact while identity and mutation
-   * remain fenced. date.now is Node's integer milliseconds since epoch;
-   * date.toISOString formats one raw f64 millisecond time value and
-   * date.toISOStringValue formats a stored Date, both with Node's rules (UTC,
-   * YYYY-MM-DDTHH:mm:ss.sssZ, expanded ±YYYYYY years outside 0–9999,
-   * ToInteger truncation of fractional ms) and THROWS Node's "Invalid
-   * time value" RangeError on NaN / out-of-range input (may-throw seed).
-   * Results: f64 / owned (+1) string. */
-  | "date.now"
-  | "date.newNow"
-  | "date.newMs"
-  | "date.newString"
-  /** Date.parse(dateString), with its own reach witness for exact fences. */
-  | "date.parse"
-  | "date.getTime"
-  | "date.valueOf"
-  | "date.toISOString"
-  | "date.toISOStringValue"
-  | "date.getFullYear"
-  | "date.getUTCFullYear"
-  | "date.getMonth"
-  | "date.getUTCMonth"
-  | "date.getDate"
-  | "date.getUTCDate"
-  | "date.getDay"
-  | "date.getUTCDay"
-  | "date.getHours"
-  | "date.getUTCHours"
-  | "date.getMinutes"
-  | "date.getUTCMinutes"
-  | "date.getSeconds"
-  | "date.getUTCSeconds"
-  | "date.getMilliseconds"
-  | "date.getUTCMilliseconds"
-  | "date.getTimezoneOffset"
-  /** The composed `new Date(dateString).getTime()` read: one borrowed
-   * string, f64 milliseconds since epoch. The parsed grammar is BOUNDED
-   * (documented divergence — V8's parser accepts far more): the ASN.1
-   * validity shape X509Certificate.validFrom/validTo answer ("Jul  1
-   * 00:00:00 2026 GMT" — the portless cert-expiry read), and ECMA's own
-   * date-time string format (YYYY-MM-DD[THH:mm[:ss[.sss]]][Z|±HH:MM] —
-   * date-only forms are UTC, exactly the spec). Anything else is NaN,
-   * Node's invalid-date getTime. Never throws. */
-  | "date.parseGetTime"
-  /** `Date.UTC(...)` — seven f64 arguments (the frontend completes the
-   * spec's defaults for omitted trailing parts: month 0, date 1, time
-   * parts 0), the spec's MakeDay/MakeTime/TimeClip exactly: 0–99 years
-   * map to 1900+year, out-of-range months/dates roll over, non-finite
-   * parts and out-of-range results answer NaN. Never throws. */
-  | "date.utc"
-  /** The fs option forms and friends (scr_lib.c), all throwing catchably
-   * like the rest of sync fs. mkdirRecursiveSync is Node's recursive
-   * algorithm (try mkdir, EEXIST-dir is fine, ENOENT creates the parent
-   * first — errors report Node's errno at Node's path, EEXIST at a file
-   * target, ENOTDIR at the full path past a file); the first-created-dir
-   * return value has no lowering (statement position only, frontend-
-   * fenced). rmOptsSync is rmSync with (recursive, force) bools: force
-   * swallows ENOENT, recursive removes trees post-order, a directory
-   * without recursive throws the EISDIR-worded error (divergence 13's
-   * wording note). mkdtempSync appends the six X's and returns the
-   * created path (+1). accessSync takes the F_OK/R_OK/W_OK/X_OK bits as
-   * one f64 (the frontend bakes fs.constants.* as literals and completes
-   * an omitted mode to 0). readFdSync/readFdSyncBytes are the
-   * readFileSync(fd[, "utf8"]) forms — a read(2) loop to EOF on the fd
-   * (the stdin path); errors carry Node's no-path message shape. */
-  | "fs.mkdirRecursiveSync"
-  | "fs.rmOptsSync"
-  /** rmOptsSync's maxRetries/retryDelay form (path, recursive, force,
-   * maxRetries, retryDelay): Node's linear-backoff retry on
-   * EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM — the tmpdir-harness shape
-   * rmSync(p, { maxRetries: 3, recursive: true, force: true }). */
-  | "fs.rmRetrySync"
-  | "fs.mkdtempSync"
-  | "fs.accessSync"
-  | "fs.readFdSync"
-  | "fs.readFdSyncBytes"
-  /** isatty(3) over an fd literal (0/1/2 — process.stdin/stdout/stderr
-   * .isTTY reads). A real boolean: false where Node's non-TTY streams
-   * expose undefined (documented divergence). Never throws. */
-  | "process.isTTY"
-  /** process.stdin.destroy(): a deliberate no-op (no stream machinery
-   * exists to tear down; documented in SEMANTICS.md). */
-  | "process.stdinDestroy"
-  /** process.stdin.setRawMode(mode) — one borrowed bool arg, void. On a
-   * TTY stdin: termios raw mode on/off (libuv's UV_TTY_MODE_RAW flag set,
-   * the mode Node's setRawMode(true) applies; false restores the entry
-   * state). On a NON-TTY stdin Node's process.stdin has no such method at
-   * all, so the call throws Node's exact catchable TypeError
-   * ("process.stdin.setRawMode is not a function") — the may-throw seed
-   * carries it. */
-  | "process.stdinSetRawMode"
-  /** Terminal width over an fd literal (1/2 — process.stdout/stderr
-   * .columns): ioctl(TIOCGWINSZ). The result is the module's interned
-   * `number | undefined` union — a non-TTY stream (or an ioctl refusal)
-   * yields the undefined arm, exactly Node's missing `.columns`. Never
-   * throws. */
-  | "process.columns"
-  /** Terminal height, with the same fd and optional-number contract. */
-  | "process.rows"
-  /** fromCharCode takes one packed f64[] or bytes arg and builds a string
-   * from UTF-16 code units. Adjacent surrogate pairs combine; lone
-   * surrogates follow the runtime's replacement policy. */
-  | "string.fromCharCode"
-  /** Numeric code points, with catchable RangeError for non-integers or
-   * values outside 0..0x10ffff. Uses the same UTF-8 surrogate policy. */
-  | "string.fromCodePoint"
-  /** lastIndexOf returns the last UTF-16 start index, or -1. The two-arg
-   * form searches at or before its numeric position; NaN starts at the end.
-   * String arguments are borrowed and neither form throws. */
-  | "string.lastIndexOf"
-  | "string.lastIndexOfFrom"
-  /** String.raw(template, ...subs): the raw literals array (a string[]
-   * read off the template record) interleaved with the PRE-STRINGIFIED
-   * substitutions (the frontend applies the static ToString and packs
-   * them into one string[] literal) — extra substitutions drop, missing
-   * ones skip, the spec's loop exactly (scr_array.c). Borrowed args;
-   * +1 string; never throws. */
-  | "string.raw"
-  /** WHATWG TextDecoder.decode over u8 bytes (scr_bytes.c): utf-8 with
-   * default options — the same maximal-subpart replacement decode as
-   * Buffer.toString("utf8"), with the leading BOM stripped (the one
-   * behavioral difference; ignoreBOM defaults to false). Inline calls
-   * lower directly; stored decoder records dispatch by encoding id.
-   * TextEncoder.encode needs no libFn: its matching forms
-   * lower to buffer.fromStr(s, "utf8") (identical bytes — ScrStr storage
-   * is well-formed UTF-8). Borrowed arg; owned (+1) string; never throws. */
-  | "text.decode"
-  | "bytes.bufferSource"
-  | "text.decodeBufferSource"
-  | "text.decodeOptions"
-  | "text.decodeStream"
-  | "text.decodeLegacyOptions"
-  /** TextDecoder.decode for a compile-time non-UTF-8 WHATWG label. The
-   * second f64 is the frontend-owned encoding id consumed by scr_bytes.c;
-   * label aliases/case/ASCII whitespace are canonicalized before IR. The
-   * mapping tables are generated from the pinned Node 24 oracle, keeping
-   * output portable without an ICU/iconv dependency. Borrowed args; owned
-   * (+1) string; never throws. */
-  | "text.decodeLegacy"
-  | "text.decoderEncoding"
-  | "text.decoderName"
-  | "text.encodeInto"
-  | "buffer.isAscii"
-  | "buffer.isUtf8"
-  | "buffer.transcode"
-  /** The wider sync fs slice (scr_lib.c), all throwing catchably with
-   * Node's errno message shapes and `.code` stamped like the rest of
-   * sync fs. unlink/chmod/chown wrap the syscalls 1:1 (Node reports the
-   * syscall's own name). copyFileSync copies contents into a fresh (or
-   * truncated) destination carrying the SOURCE's mode (libuv's
-   * uv_fs_copyfile behavior); its errors carry BOTH paths — Node's
-   * "copyfile 'src' -> 'dest'". lstatSync is statSync without following
-   * a trailing symlink (Node reports lstat); stats.isSymbolicLink /
-   * stats.dev / ino / blocks / nlink / atimeMs / mtimeMs / ctimeMs are pure reads on the widened
-   * snapshot (blocks is allocated 512-byte units; the times are milliseconds
-   * with their sub-second fractions, Node's arithmetic).
-   * writeFileModeSync is writeFileSync(path, data, { mode }): the mode
-   * applies at CREATION only (open(2) with O_CREAT, umask applying),
-   * exactly Node — an existing file keeps its permissions. mkdirModeSync
-   * / mkdirRecursiveModeSync are the mkdirSync option forms with an
-   * explicit mode (the recursive walk passes it to every directory it
-   * creates, like Node's). */
-  | "fs.unlinkSync"
-  | "fs.chmodSync"
-  | "fs.chownSync"
-  | "fs.copyFileSync"
-  /** renameSync is the direct two-path syscall wrapper. renameCb defers
-   * the operation to the loop and fires a program-shaped Error | null
-   * callback through a backend-emitted adapter. */
-  | "fs.renameSync"
-  | "fs.renameCb"
-  | "fs.lstatSync"
-  | "fs.fstatSync"
-  | "fs.fchmodSync"
-  | "fs.fsyncSync"
-  | "fs.fdatasyncSync"
-  | "fs.ftruncateSync"
-  | "fs.utimesSync"
-  | "fs.futimesSync"
-  | "fs.lutimesSync"
-  | "fs.readvSync"
-  | "fs.writevSync"
-  | "fs.linkSync"
-  | "fs.symlinkSync"
-  | "fs.readlinkSync"
-  | "fs.statfsSync"
-  | "fs.readlinkSyncStr"
-  | "fs.readlinkSyncBuffer"
-  /** fs.openSync(path, flags) → the raw fd as f64; fs.readSync/fs.writeSync
-   * over Buffer windows perform sequential I/O when position is -1 and
-   * offset-preserving positioned I/O otherwise; fs.writeStrSync is the
-   * utf8 string twin; and fs.closeSync(fd) closes the descriptor. This is
-   * the fd slice behind spawn/log-processing forms.
-   * flags is Node's string
-   * grammar ("r", "w", "a" and the +/x variants; unknown flags throw
-   * Node's ERR_INVALID_ARG_VALUE TypeError text). All throw Node-shaped
-   * fs errors (openSync ENOENT/EACCES..., readSync EBADF/range errors,
-   * closeSync EBADF). */
-  | "fs.openSync"
-  | "fs.openNumericSync"
-  | "fs.readSync"
-  | "fs.writeSync"
-  | "fs.writeStrSync"
-  | "fs.closeSync"
-  /** fs.watch(path, listener?) → an FSWatcher handle (scr_watch.c —
-   * linked, and scr_watch_install() emitted, only when these appear on
-   * the IR; moduleUsesFsWatch is the switch). The path opens NOW —
-   * failure throws Node's fs error synchronously ("ENOENT: ..., watch
-   * 'x'", the polling-fallback catch shape) — and the unit's kqueue
-   * (EVFILT_VNODE) delivers "rename"/"change" through the loop's watch
-   * hook. The callback (nullable) MOVES in with an adapter per listener
-   * shape (zero-param, or the (eventType: string) form — runtime-
-   * provided); an open watcher keeps the loop alive until watcher.close()
-   * (idempotent, receiver borrowed, statement position only). */
-  | "fs.watch"
-  | "fs.watchCb"
-  | "watcher.close"
-  /** The composed `new crypto.X509Certificate(data).fingerprint` read
-   * (scr_lib.c — no certificate handle exists): the SHA-1 of the DER,
-   * uppercase colon-separated, over PEM or raw-DER Buffer input; other
-   * inputs throw Node's ERR_OSSL_PEM_NO_START_LINE Error (may-throw). */
-  | "crypto.x509Fingerprint"
-  | "crypto.x509FingerprintStr"
-  /** The certificate's Validity window (validFrom / validTo reads —
-   * scr_lib.c's minimal ASN.1 walk to the TBSCertificate validity
-   * SEQUENCE): UTCTime and GeneralizedTime render in Node's exact
-   * ASN1_TIME_print shape ("Jul  1 00:00:00 2026 GMT" — %2d space-padded
-   * day). Same input contract and PEM error as the fingerprint pair
-   * (may-throw). */
-  | "crypto.x509ValidFrom"
-  | "crypto.x509ValidFromStr"
-  | "crypto.x509ValidTo"
-  | "crypto.x509ValidToStr"
-  | "stats.isSymbolicLink"
-  | "stats.blocks"
-  | "stats.nlink"
-  | "stats.atimeMs"
-  | "stats.mtimeMs"
-  | "stats.ctimeMs"
-  | "fs.writeFileModeSync"
-  | "fs.mkdirModeSync"
-  | "fs.mkdirRecursiveModeSync"
-  /** spawnSync with options (scr_child.c): the cp.spawnSync core plus the
-   * option slice portless-class CLIs pass — timeout (killSignal fires at
-   * the deadline and the result carries error: ETIMEDOUT + the signal,
-   * Node's shape), killSignal (a signal NAME; "" = the SIGTERM default),
-   * and per-fd stdio modes (in: 0 /dev/null, 1 ignore, 2 inherit; out/
-   * err: 0 capture, 1 ignore → "", 2 inherit → ""). NEVER throws — spawn
-   * failure and timeout are data on the result, like Node's error
-   * property. spawnRes.signal is the result's termination signal as the
-   * call site's `Signals | null` union (null = exited normally or spawn
-   * failure), constructed type-directedly like spawnRes.status. */
-  | "cp.spawnSyncOpts"
-  /** cp.spawnSyncOpts with the stdio carried as a RUNTIME string —
-   * "pipe" | "ignore" | "inherit", proven by the call site's TYPE (the
-   * defaultRunner idiom `stdio: options?.stdio ?? "pipe"`); the runtime
-   * maps the value to the three modes. Args (cmd, argv, timeout,
-   * killSignal, stdio). Never throws, like the other spawnSync forms. */
-  | "cp.spawnSyncStdioStr"
-  | "spawnRes.signal"
-  /** spawn with options (scr_child.c): the cp.spawn core plus PER-SLOT
-   * stdio — args are (cmd, argv, inMode, outMode, errMode, outFd, errFd,
-   * detached, hasEnv, envPairs, cwd); modes 0 ignore (/dev/null), 1
-   * inherit, 2 fd (out/err only — the fd dup2s into the child's slot,
-   * Node's stdio fd form; the daemon-log idiom ["ignore", logFd, logFd]).
-   * detached is POSIX_SPAWN_SETSID (the child gets its own session and
-   * process group, Node's semantics), env is a REPLACEMENT ([k,v,...]
-   * pairs like cp.execSync's), cwd ""=inherit. Same event/loop story as
-   * cp.spawn. */
-  | "cp.spawnOpts"
-  /** Runtime options normalized into the native spawn core; unsupported
-   * process features retain explicit refusals. (command, args, options). */
-  | "cp.spawnDynamic"
-  /** Atomics.wait(int32Array, idx, expected, timeoutMs) → "not-equal"
-   * when the element differs from `expected`, else a real nanosleep for
-   * the timeout and "timed-out" (scr_lib.c). scriptc has no threads —
-   * no other agent can ever notify, so for every compilable program this
-   * IS the spec's behavior, and "ok" is unreachable; the frontend
-   * REQUIRES the timeout argument (an infinite wait here is a certain
-   * deadlock, fenced). The SharedArrayBuffer the lib types demand exists
-   * only syntactically (new Int32Array(new SharedArrayBuffer(n)) lowers
-   * to a plain i32 typed array — sharing is unobservable without
-   * threads; SEMANTICS.md documents the stance). Never throws; +1 string
-   * result. */
-  | "atomics.wait";
-
 /** Numeric binary ops. The bitwise six (`&`/`|`/`^`/`<<`/`>>`/`>>>`) have
  * JS ToInt32/ToUint32 semantics — operands convert (NaN/±Infinity → 0,
  * truncate, wrap mod 2^32), the operation runs in 32-bit space (shift
  * counts mask to 5 bits), and the result returns to f64 (`>>>` as Uint32,
  * the rest as Int32) — backends emit the scr_bit_* runtime helpers. */
 export type IrNumBinOp =
-  | "+" | "-" | "*" | "/" | "%" | "**"
-  | "&" | "|" | "^" | "<<" | ">>" | ">>>"
-  | "<" | "<=" | ">" | ">=" | "===" | "!==";
+  | "+"
+  | "-"
+  | "*"
+  | "/"
+  | "%"
+  | "**"
+  | "&"
+  | "|"
+  | "^"
+  | "<<"
+  | ">>"
+  | ">>>"
+  | "<"
+  | "<="
+  | ">"
+  | ">="
+  | "==="
+  | "!==";
 export type IrStrCmpOp = "<" | "<=" | ">" | ">=";
 
 export type IrExpr =
@@ -5011,10 +2795,20 @@ export type IrExpr =
    * 0)`. f64 fields compute in place (JS-exact); fieldDyn marks a
    * CHECKED-DYNAMIC field (a JS implicit-any ctor assignment): the number
    * validates OUT of the box (dynCheck's catchable TypeError on
-   * non-numbers — the documented dyn arithmetic stance, never a silent
-   * ToNumber), computes, and boxes back into the slot (old box released
+   * non-numbers — the documented dyn arithmetic stance, instead of an
+   * implicit ToNumber), computes, and boxes back into the slot (old box released
    * after the unlink, like fieldSet). Type is always f64. */
-  | { kind: "fieldIncDec"; op: "+" | "-"; prefix: boolean; obj: IrExpr; className: string; field: string; fieldDyn: boolean; type: IrType; loc: SrcLoc }
+  | {
+      kind: "fieldIncDec";
+      op: "+" | "-";
+      prefix: boolean;
+      obj: IrExpr;
+      className: string;
+      field: string;
+      fieldDyn: boolean;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** `x = e` in EXPRESSION position over a local or module global: evaluates
    * `value` once, writes the binding, and yields the assigned value — JS
    * evaluation order (`while ((idx = s.indexOf("\n")) !== -1)`). The type is
@@ -5026,8 +2820,7 @@ export type IrExpr =
    * dyn asks its runtime kind. The other operand form is a UNION — the ARM
    * value's ToBoolean via a per-union interned helper (unit arms false;
    * f64/string/bool arms per-value; ref arms — arrays, records, objects,
-   * functions, maps, sets, promises, ... — always true; jsval arms ask the
-   * engine). Result is bool. */
+   * functions, maps, sets, promises, ... — always true). Result is bool. */
   | { kind: "toBool"; operand: IrExpr; type: IrType; loc: SrcLoc }
   /** Distinct from `bin`: short-circuits, and has JS value semantics — the
    * result is the deciding operand itself (`a && b` ≡ `toBool(a) ? b : a`),
@@ -5038,10 +2831,8 @@ export type IrExpr =
   | { kind: "logical"; op: "&&" | "||"; left: IrExpr; right: IrExpr; type: IrType; loc: SrcLoc }
   | { kind: "strConcat"; left: IrExpr; right: IrExpr; type: IrType; loc: SrcLoc }
   | { kind: "strEq"; negated: boolean; left: IrExpr; right: IrExpr; type: IrType; loc: SrcLoc }
-  /** String ordering. Ordinary source comparisons omit `utf16` and retain
-   * scriptc's documented code-point order; the default Array sort comparator
-   * sets it to request ECMAScript's UTF-16 code-unit order. */
-  | { kind: "strCmp"; op: IrStrCmpOp; left: IrExpr; right: IrExpr; utf16?: boolean; type: IrType; loc: SrcLoc }
+  /** String ordering in ECMAScript's UTF-16 code-unit order. */
+  | { kind: "strCmp"; op: IrStrCmpOp; left: IrExpr; right: IrExpr; type: IrType; loc: SrcLoc }
   /** f64|bool → string, JS-exact (Number::toString / "true"/"false").
    * Union operands dispatch through the per-union ToString helper (arms
    * fenced to unit/string/f64/bool by the frontend); a CAUGHT operand is
@@ -5115,7 +2906,7 @@ export type IrExpr =
     }
   /** A regex literal `/ab+c/gi`. `pattern` is the text between the slashes
    * exactly as written (escapes UNprocessed — the regex engine parses them),
-   * `flags` the trailing flags in source order (alphabet fenced to gimsuy by
+   * `flags` the trailing flags in getter order (alphabet fenced to gimsuvy by
    * the frontend). Backends intern ONE immortal static per (pattern, flags)
    * pair — like string literals, so repeated evaluation is free and
    * `re === re` would hold — and compile the pattern lazily at first use
@@ -5155,8 +2946,17 @@ export type IrExpr =
    * element-by-element at construction (JS-exact: a fresh array, source
    * untouched). Allocates; the result is owned (+1); ownership of
    * refcounted plain elements MOVES into the array, spread sources are
-   * BORROWED (their elements copy in retained). */
-  | { kind: "arrayLit"; elems: IrExpr[]; spreads?: number[]; type: IrType; loc: SrcLoc }
+   * BORROWED (their elements copy in retained). `capacity` is an optional
+   * dense-storage hint for an empty literal that statements fill right
+   * away; it has no observable effect. */
+  | {
+      kind: "arrayLit";
+      elems: IrExpr[];
+      spreads?: number[];
+      capacity?: number;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Mapper-less `Array.from({ length: n })` — a length-n array of ABSENT
    * slots: unions carrying an undefined arm hold the interned undefined
    * instance (reads are JS-exact), every other refcounted element kind
@@ -5232,8 +3032,10 @@ export type IrExpr =
   /** Typed-array/Buffer method or property on a bytes receiver — see
    * IrBytesIntrinsicMethod for the surface and conventions. Methods in
    * MAY_THROW_BYTES_METHODS raise catchable RangeErrors (may-throw
-   * seeds); `get` traps on invalid indices instead (the array runtime's
-   * discipline — never catchable). */
+   * seeds); `get` traps on an invalid index unless `invalidNaN` is set,
+   * in which case the invalid read answers NaN without touching storage
+   * (the numeric view of Node's undefined; ordinary reads test the index
+   * first and answer undefined itself). */
   | {
       kind: "bytesIntrinsic";
       method: IrBytesIntrinsicMethod;
@@ -5241,6 +3043,7 @@ export type IrExpr =
       args: IrExpr[];
       type: IrType;
       loc: SrcLoc;
+      invalidNaN?: true;
     }
   /** `new Map<K, V>()` — allocate an empty map. `type` is the map type
    * (key/value fences already enforced by the frontend); the result is
@@ -5314,14 +3117,31 @@ export type IrExpr =
    * in the callee's captures[] order). The result is owned (+1); the closure
    * itself retains each captured box. A reference to a top-level declared
    * function lowers to a zero-capture closure — backends must intern that
-   * case so `f === f` is true (JS function identity). */
-  | { kind: "closure"; fnName: string; captures: string[]; type: IrType; loc: SrcLoc }
+   * case so `f === f` is true (JS function identity). `adapts` marks a
+   * signature adapter: captures[0] holds the function it forwards to, and
+   * the new closure takes that function's identity (JS sees one function,
+   * so `===`, SameValue and searches compare identity roots). */
+  | {
+      kind: "closure";
+      fnName: string;
+      captures: string[];
+      adapts?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Indirect call of a func-typed value. Args follow `call`'s convention
    * (callee owns its params, callers pass +1). The callee expression is an
    * ordinary owned temp, released at statement end. receiver supplies the
    * call-time this value; absence means undefined. Evaluate callee, receiver,
    * then args, and restore the ambient receiver before unwinding. */
-  | { kind: "callValue"; callee: IrExpr; receiver?: IrExpr; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "callValue";
+      callee: IrExpr;
+      receiver?: IrExpr;
+      args: IrExpr[];
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** The currently-executing closure, as a value (+1). Valid only inside a
    * lifted function. Exists so a named nested function can recurse on itself
    * WITHOUT capturing its own binding — a box holding its own closure would
@@ -5337,8 +3157,18 @@ export type IrExpr =
    * as the GENRET sentinel — pending like an exception, it unwinds
    * through finally blocks but must NOT be taken by catch handlers
    * (backends emit a sentinel re-unwind prologue at catch entry inside
-   * generator bodies; scr_exc_genret_pending answers it). */
-  | { kind: "yieldExpr"; value: IrExpr | null; awaited?: true; captureCompletion?: { returnType: IrType }; type: IrType; loc: SrcLoc }
+   * generator bodies; scr_exc_genret_pending answers it). `delegated`:
+   * only as the `arg` of a `delegate` genResume, which reads the resumed
+   * value and handles a pending throw or return; the yield itself is VOID. */
+  | {
+      kind: "yieldExpr";
+      value: IrExpr | null;
+      awaited?: true;
+      delegated?: true;
+      captureCompletion?: { returnType: IrType };
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** One consumer resume of a generator: `g.next(arg)`, `g.return(arg)`,
    * `g.throw(arg)`, and the for-of/yield* desugars. `gen` is a borrowed
    * generator-typed temp. `arg` is the sent value (moves in): next's
@@ -5356,12 +3186,47 @@ export type IrExpr =
    * non-suspended generator marks it done and re-throws at the call site.
    * Sync generators return that record directly and propagate body errors
    * synchronously. Async generators return Promise<record>; requests queue,
-   * and body errors reject the corresponding promise. */
-  | { kind: "genResume"; mode: "next" | "return" | "throw"; gen: IrExpr; arg: IrExpr | null; type: IrType; loc: SrcLoc }
+   * and body errors reject the corresponding promise.
+   *
+   * Three record-free modes serve the compiler's own drives of a sync
+   * generator (for-of, spread, yield*), which read only `done` and then the
+   * yielded value: `step` is a valueless next() answering `done` (BOOL;
+   * throws like next); `value` moves the yielded value out, typed as the
+   * yield channel (valid only right after a `step` or `delegate` that
+   * answered false; never throws), or the completion value typed as the
+   * return channel (once a `delegate` answered true); `close` is a valueless return() whose result is dropped
+   * (IteratorClose; VOID; throws like return). All three have a null
+   * `arg`.
+   *
+   * `delegate` drives a sync generator from a `yield*` in a sync generator
+   * body. With a null `arg` it is the delegation's first resume: a
+   * valueless next() on any next channel (a suspended delegate whose next
+   * channel is typed throws an SC1071 fence error instead). Otherwise `arg`
+   * is a `delegated` yieldExpr, and once the body resumes, the consumer's
+   * next(v), return(v), or throw(e) passes to the delegate; the body
+   * itself unwinds only on a delegate exception or when the delegate
+   * completes a forwarded return(). The delegate's next channel is
+   * undefined, dyn, or the body's own. The result is the delegate's
+   * IteratorResult record, or BOOL `done` for a record-free drive (then
+   * `value` reads a yielded value or the completion; an empty completion
+   * on a valued return channel throws an SC1071 fence error). */
+  | {
+      kind: "genResume";
+      mode: "next" | "return" | "throw" | "step" | "value" | "close" | "delegate";
+      gen: IrExpr;
+      arg: IrExpr | null;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Await a promise: parks the current fiber until it settles; a rejected
    * promise re-throws into the awaiter (may-throw seed). Result is the
-   * promise's inner value (+1 for refcounted kinds). Only inside async fns. */
-  | { kind: "awaitExpr"; value: IrExpr; type: IrType; loc: SrcLoc }
+   * promise's inner value (+1 for refcounted kinds). Only inside async fns.
+   * `adopt`: the operand of `return` in an async (non-generator) function.
+   * JS resolves the function's promise with the returned promise, which
+   * adopts its settlement through a then job: one microtask turn before
+   * the await proper. Any enclosing finally runs first, and a rejection
+   * leaves the function without reaching its catch handlers. */
+  | { kind: "awaitExpr"; value: IrExpr; type: IrType; adopt?: true; loc: SrcLoc }
   /** Await of a promise-or-absent union (`Promise<T> | undefined`, the
    * mapped `Promise<T> | void`): `value` is a union whose arm `promiseTag`
    * is a promise and whose other arms are all units. The promise arm awaits
@@ -5418,7 +3283,9 @@ export type IrExpr =
    * pointer, type-only — legal exactly when D strictly descends from C
    * AND the two constructors' completed ABIs are equal (param-wise
    * typeEquals; validator-enforced), the invariant `newValue` completion
-   * rests on. */
+   * rests on. Function values may also widen a nominal class return with
+   * identical parameter/rest types: the closure identity and pointer-return
+   * ABI remain unchanged. */
   | { kind: "upcast"; value: IrExpr; type: IrType; loc: SrcLoc }
   /** Implicit widening of a promise value into a VOID-promise slot (an
    * inferred Promise<never>/Promise<void> return whose body built a
@@ -5428,11 +3295,12 @@ export type IrExpr =
    * fulfillment payload (scr_await_void) and rejections flow untyped.
    * Ownership of the operand transfers to the result, like upcast. */
   | { kind: "promiseVoidWiden"; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** Checker-trusted narrowing of a base-class value to a subclass (`type`
-   * is the subclass). The frontend emits this only where tsc's control-flow
-   * narrowing has already proven the dynamic class (an `instanceof` guard)
-   * — the same trust-the-checker contract as unionNarrow: no runtime check,
-   * a pointer reinterpret with ownership transferring like upcast. */
+  /** Narrowing of a base-class value to a subclass (`type` is the
+   * subclass). The frontend emits this only where tsc's control-flow
+   * narrowing has already proven the dynamic class (an `instanceof` guard),
+   * like unionNarrow. Backends verify the class once and trap on a mismatch
+   * (a compiler bug or a lying type predicate or assertion function), then
+   * reinterpret the pointer with ownership transferring like upcast. */
   | { kind: "downcast"; value: IrExpr; type: IrType; loc: SrcLoc }
   /** `x instanceof C` where x's static class and C are both in extends-
    * hierarchies: an O(1) preorder-interval check against the vtable the
@@ -5448,8 +3316,23 @@ export type IrExpr =
    * root-most declaring class. Monomorphic calls (no override reachable
    * from the static class) stay ordinary `call` nodes — whole-program
    * devirtualization is the frontend's job. Ownership follows `call`:
-   * callees own their params, callers pass +1. */
-  | { kind: "virtualCall"; className: string; method: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+   * callees own their params, callers pass +1.
+   *
+   * `targets`, when present, is the closed set of classes whose OWN
+   * declaration of `method` can run here: the frontend enumerated every
+   * class that may be instantiated below `className` (devirtualize.ts) and
+   * found a few distinct implementations. The backend then compares the
+   * loaded slot against those implementations and calls them directly
+   * (inlinable), with no indirect fallback. */
+  | {
+      kind: "virtualCall";
+      className: string;
+      method: string;
+      args: IrExpr[];
+      type: IrType;
+      loc: SrcLoc;
+      targets?: string[];
+    }
   /** Field read `obj.f`. Refcounted fields come out retained (+1). */
   | { kind: "fieldGet"; obj: IrExpr; className: string; field: string; type: IrType; loc: SrcLoc }
   /** Record literal `{ a: 1, b: "x" }`. `type` is the record type; `fields`
@@ -5463,14 +3346,15 @@ export type IrExpr =
    * shape (their values have the shape's indexValue type — dyn included);
    * they insert into the overflow map in list order, interleaved with the
    * declared writes (one list keeps JS source-order evaluation). */
-  /** Entries flagged `drop` are fields the shape MAPPING dropped (the
-   * PromiseSettledResult honest subset — SEMANTICS.md 46): the value
-   * expression still evaluates in its source-order slot (the awaited
-   * mapper in `{ status: "fulfilled", value: await fn(...) }` must run and
-   * may throw), but nothing is stored — the emitter releases the result
-   * with the statement frame. Any value type is legal here, void included
-   * (an awaited Promise<void>). */
-  | { kind: "recordLit"; fields: { name: string; value: IrExpr; overflow?: true; drop?: true }[]; type: IrType; loc: SrcLoc }
+  /** `nullProto` (index-signature shapes only) gives the record a null
+   * prototype, as Object.groupBy's result has (recordNullProto reads it). */
+  | {
+      kind: "recordLit";
+      fields: { name: string; value: IrExpr; overflow?: true }[];
+      nullProto?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Same-shape object spread with explicit overrides: `{ ...source,
    * field: value }`. `source` is evaluated first and borrowed by one
    * per-shape clone helper; `overrides` then evaluate in source order and
@@ -5478,29 +3362,48 @@ export type IrExpr =
    * replaced cloned values release after unlinking. Restricted to plain
    * declared-field records (no tuple/index/accessor shapes), so every
    * omitted field is copied exactly once by the helper. */
-  | { kind: "recordClone"; source: IrExpr; overrides: { name: string; value: IrExpr }[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "recordClone";
+      source: IrExpr;
+      overrides: { name: string; value: IrExpr }[];
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Record field read `r.f` — mirrors `fieldGet`: refcounted fields come
-   * out retained (+1). */
+   * out retained (+1). A field in its ABSENT state (fieldAbsent) reads as
+   * the ordinary undefined arm. */
   | { kind: "recordGet"; obj: IrExpr; shapeId: string; field: string; type: IrType; loc: SrcLoc }
   /** Dynamic-keyed record read `r[k]` (string key, evaluated at runtime).
    * Declared fields are tried FIRST (an emitted string-switch — field
    * access exactness is preserved: a declared name always answers from the
    * struct slot), then the overflow map on index-signature shapes. `type`
-   * is the CHECKER's type for the access: the index signature's value type
-   * (dyn for `unknown`; with noUncheckedIndexedAccess, its
-   * `V | undefined` union). A MISSING key produces: the undefined dyn
-   * singleton when `type` is dyn; the undefined arm when `type` is an
-   * undefined-armed union; otherwise a TRAP — the checker claimed V and no
-   * undefined is representable (the array OOB policy; on declared-only
-   * shapes tsc's keyof check makes the trap unreachable without an `as`
-   * smuggle). Declared-field values surface as `type`: V-typed fields read
-   * directly, dyn results build a dyn COPY of the field value (the dynFrom
-   * conversion — deep for composites, documented), union results wrap.
+   * is the index signature's value type armed with undefined (dyn for
+   * `unknown`), so a missing key reads undefined as in JavaScript, or the
+   * declared fields' common type on signature-free shapes. A MISSING key
+   * produces: the undefined dyn singleton when `type` is dyn; the undefined
+   * arm when `type` is an undefined-armed union; NaN with `missNaN`;
+   * otherwise a TRAP (declared-only shapes, where tsc's keyof check makes
+   * the trap unreachable without an `as` smuggle). Declared-field values
+   * surface as `type`: V-typed fields read directly, dyn results build a
+   * dyn COPY of the field value (the dynFrom conversion — deep for
+   * composites, documented), union results wrap.
    * The key and object are borrowed; refcounted results are owned (+1).
    * `overflowOnly` (set when the key is a LITERAL that names no declared
    * field): the read touches only the overflow map — declared fields need
-   * not surface as `type`, and the emitted helper skips the string-switch. */
-  | { kind: "recordKeyGet"; obj: IrExpr; shapeId: string; key: IrExpr; overflowOnly?: true; type: IrType; loc: SrcLoc }
+   * not surface as `type`, and the emitted helper skips the string-switch.
+   * `missNaN` (with an f64 `type`): a missing key produces NaN instead of
+   * trapping, for reads whose every consumer treats undefined like NaN
+   * (nan-coded-reads.ts). */
+  | {
+      kind: "recordKeyGet";
+      obj: IrExpr;
+      shapeId: string;
+      key: IrExpr;
+      overflowOnly?: true;
+      missNaN?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Static value → dyn conversion (`type` is always dyn): the operand
    * (a JSON-safe type — f64/string/bool/record/array/union, validated)
    * converts to a fresh dyn tree, DEEP-COPYING composites (the jsMarshal
@@ -5523,19 +3426,17 @@ export type IrExpr =
    * from a union) whose Web API contract exposes the reference again, such
    * as stream chunks and abort reasons; ordinary JSON-shaped values retain
    * the documented deep-copy boundary. */
-  | { kind: "dynFrom"; value: IrExpr; fnName?: string; liveRef?: true; type: IrType; loc: SrcLoc }
-  /** Island value → dyn conversion (`type` is always dyn; the operand
-   * is always jsval): the jsval→dyn crossing — an 'any'-typed engine
-   * value flowing into an 'unknown'/'object'/JS-residue slot wraps BY
-   * REFERENCE as the checked-dynamic tree's SCR_DYN_JSVAL kind (scr_dyn_from_jsval).
-   * Engine scalars (number/string/boolean/null/undefined) normalize to
-   * the native dyn kinds at wrap time, so wrapped nodes only ever hold
-   * engine objects/arrays/functions; typeof/truthiness/String()/=== on
-   * the wrapped node route to the engine, un-armed dyn walks fence
-   * loudly, and scr_jsval_from_dyn unwraps the SAME engine value back
-   * (identity round trip). The operand is borrowed; the result is owned
-   * (+1). Never throws. */
-  | { kind: "dynFromJsval"; value: IrExpr; type: IrType; loc: SrcLoc }
+  | {
+      kind: "dynFrom";
+      value: IrExpr;
+      fnName?: string;
+      /** A boxed function's `length` when it differs from its parameter
+       * count (builtin function values). */
+      fnLength?: number;
+      liveRef?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** CALLING a dyn value — `fn(a, b)` where fn is checked-dynamic (an
    * implicit-any JS binding, a dyn record member, a dynKeyGet result).
    * Arguments are ALREADY dyn-typed (typed values box through dynFrom at
@@ -5559,21 +3460,40 @@ export type IrExpr =
    * the nullish text spells), evaluated and flattened left-to-right (JS's
    * ArgumentListEvaluation). The emitters build one fresh argument array
    * and apply through it. */
-  | { kind: "dynCall"; callee: IrExpr; receiver?: IrExpr; calleeName: string; calleeNameValue?: IrExpr; args: IrExpr[]; spreads?: { arg: number; what: string }[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "dynCall";
+      callee: IrExpr;
+      receiver?: IrExpr;
+      calleeName: string;
+      calleeNameValue?: IrExpr;
+      args: IrExpr[];
+      spreads?: { arg: number; what: string }[];
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Prototype-method DISPATCH on a dyn receiver — `recv.m(...)` where `m`
    * is a name a dyn-representable prototype declares (Array/String/
    * Function shared names: push, slice, join, forEach, map, apply, ...),
-   * so a stored-member read would silently mis-answer real methods. The
+   * so a stored-member read would return wrong results for real methods. The
    * runtime (scr_dyn_invoke) dispatches on the receiver's KIND:
    * implemented (kind, name) pairs run JS-exact semantics; a real-but-
-   * unimplemented method throws a LOUD "not supported yet" Error; a name
+   * unimplemented method throws a "not supported yet" Error; a name
    * the kind's prototype lacks throws Node's catchable "<calleeName> is
    * not a function"; OBJ receivers call the own member (own properties
    * shadow prototypes in JS too); undefined/null receivers throw Node's
    * "Cannot read properties of ...". Arguments are already dyn.
    * `calleeName` is the source spelling for the error texts. Receiver and
    * args are borrowed; the result is owned (+1). MAY THROW. */
-  | { kind: "dynInvoke"; recv: IrExpr; method: string; calleeName: string; calleeNameValue?: IrExpr; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "dynInvoke";
+      recv: IrExpr;
+      method: string;
+      calleeName: string;
+      calleeNameValue?: IrExpr;
+      args: IrExpr[];
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** A dyn ARRAY built element-by-element (JS mixed-element literals —
    * `['pwd', []]` — and evolving `[]` declarations): each element is
    * already a dyn value; the result owns them. Never throws. */
@@ -5618,13 +3538,42 @@ export type IrExpr =
    * "function"` — true exactly for the checked-dynamic tree's function kind (boxed
    * closures); function values are truthy and answer FALSE to the
    * `"object"` test, JS-exact. */
-  | { kind: "dynTest"; test: "promise" | "bigint" | "symbol" | "string" | "number" | "boolean" | "undefined" | "null" | "nullish" | "bytes" | "buffer" | "object" | "array" | "truthy" | "error" | "function"; bytesElem?: IrBytesElem; negated?: true; value: IrExpr; type: IrType; loc: SrcLoc }
+  | {
+      kind: "dynTest";
+      test:
+        | "promise"
+        | "bigint"
+        | "symbol"
+        | "string"
+        | "number"
+        | "boolean"
+        | "undefined"
+        | "null"
+        | "nullish"
+        | "bytes"
+        | "buffer"
+        | "object"
+        | "array"
+        | "truthy"
+        | "error"
+        | "function"
+        /** The value is a capsule of a compiled class instance. */
+        | "classCapsule"
+        /** The value is a boxed function or class value (exact kind test). */
+        | "funcKind";
+      bytesElem?: IrBytesElem;
+      negated?: true;
+      value: IrExpr;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Keyed read on a dyn value — `pkg.name` / `pkg["k"]` / the
    * `pkg?.scripts` chain step on a JSON.parse result. `key` is
    * string-typed (a strLit for the dot form); `type` is always dyn. An
-   * OBJ receiver answers the member (+1) or the undefined singleton (the
-   * own-property answer — prototype members like `toString` answer
-   * undefined, SEMANTICS.md); ARR answers `length` and canonical
+   * OBJ receiver answers the member (+1), an inherited Object.prototype
+   * member (the Object constructor and the interned valueOf/toString/
+   * hasOwnProperty/propertyIsEnumerable values), or the undefined singleton;
+   * ARR answers `length` and canonical
    * in-range indices, STR answers `length` (UTF-16-exact), both
    * undefined otherwise; NUM/BOOL/BYTES answer undefined. An
    * undefined/null receiver THROWS the catchable Node-shaped TypeError
@@ -5665,28 +3614,50 @@ export type IrExpr =
    * ids, but their owned values live through the enclosing expression's
    * frame: later call arguments may reuse a saved operand. Release them
    * on the same path that initialized them, not an outer lexical scope. */
-  | { kind: "seqExpr"; stmts: IrStmt[]; result: IrExpr; generatorDelegate?: true; type: IrType; loc: SrcLoc }
+  | {
+      kind: "seqExpr";
+      stmts: IrStmt[];
+      result: IrExpr;
+      generatorDelegate?: true;
+      /** The statements end in a `runtimeFence` that control never reaches:
+       * the value of a call whose checked type is `never` (it throws or exits)
+       * flowing into a typed slot. `result` is a placeholder read of an
+       * uninitialized hidden local and is never evaluated. */
+      diverges?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** RequireObjectCoercible with V8's destructuring TypeError: throws
    * "Cannot destructure 'SPELLING' as it is undefined." (or "…null.") on
    * a nullish value — the property form "Cannot destructure property
    * 'FIRSTPROP' of 'SPELLING' …" when `firstProp` is set (V8 names the
    * pattern's first property) — and yields the value unchanged otherwise.
    * `spelling` is the RHS's compile-time source spelling. Value and type
-   * are dyn (the dyn helper) or jsval (the island's prelude guard —
-   * engine-thrown, catchable like every boundary throw). */
-  | { kind: "dynDestrCheck"; value: IrExpr; spelling: string; firstProp?: string; type: IrType; loc: SrcLoc }
+   * are dyn; the helper throws a catchable error. */
+  | {
+      kind: "dynDestrCheck";
+      value: IrExpr;
+      spelling: string;
+      firstProp?: string;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** GetIterator + the first `count` steps, as array destructuring sees
    * it. Over a dyn value: arrays step by index, strings by code point,
    * Buffers by byte; everything else throws V8's exact "<desc> is not
    * iterable (cannot read property Symbol(Symbol.iterator))" TypeError.
-   * Over an island (jsval) value the engine runs the REAL iterator
-   * protocol (user iterables included, IteratorClose per spec) behind the
-   * same V8 message for non-iterables. The result is a FRESH array (dyn
-   * or engine, matching the operand) of exactly `count` elements
+   * The result is a fresh dyn array of exactly `count` elements
    * (undefined-padded past the end) — the empty pattern passes count 0
    * and uses only the validation. Value is borrowed; the result is owned
    * (+1). */
-  | { kind: "dynIterN"; value: IrExpr; count: number; notIterableMessage?: string; type: IrType; loc: SrcLoc }
+  | {
+      kind: "dynIterN";
+      value: IrExpr;
+      count: number;
+      notIterableMessage?: string;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** The OVERFLOW key list of an index-signature record, in JS OWN-KEY
    * order (canonical array indices ascending first, then insertion order —
    * the runtime's scr_map_keys_js_order): a fresh string[] snapshot, the
@@ -5701,6 +3672,29 @@ export type IrExpr =
    * value. Declared fields are handled separately by the lowering. Both
    * operands are borrowed, the key is string, the result is bool. */
   | { kind: "recordOvfHas"; obj: IrExpr; shapeId: string; key: IrExpr; type: IrType; loc: SrcLoc }
+  /** Whether an index-signature record has a null prototype: the flag a
+   * `nullProto` recordLit sets on its overflow map. The receiver is
+   * borrowed, the result is bool. Never throws. */
+  | { kind: "recordNullProto"; obj: IrExpr; shapeId: string; type: IrType; loc: SrcLoc }
+  /** Own-property presence of a DECLARED record field (`"f" in r`,
+   * Object.keys/hasOwn and every other key surface). A field whose type
+   * has no undefined arm is always present; an undefined-armed union field
+   * is present unless its slot holds the field's ABSENT state (see
+   * fieldAbsent), so `{ f: undefined }` keeps `f` while an omitted or
+   * deleted optional field lacks it. The receiver is borrowed; the result
+   * is bool. */
+  | { kind: "recordHas"; obj: IrExpr; shapeId: string; field: string; type: IrType; loc: SrcLoc }
+  /** The ABSENT state of an undefined-armed record field slot: the value
+   * stored for an omitted optional property, a `delete`d property, or a
+   * checked-dynamic key that does not exist. It is the union's undefined
+   * arm in every respect (tag tests, narrowing, equality, JSON), but the
+   * slot remembers that no property exists, which recordHas observes.
+   * Record field reads surface the ordinary undefined arm, so the state
+   * never escapes its slot. Legal only where a field slot is written
+   * directly: a recordLit field value, a recordSet value, a recordClone
+   * override, or a ternary arm in one of those positions. `type` is the
+   * union named by `unionId`, which has an undefined arm. Immortal. */
+  | { kind: "fieldAbsent"; unionId: string; type: IrType; loc: SrcLoc }
   /** Union construction: wrap an arm value into a fresh tagged box (the
    * frontend inserts these wherever a `B` flows into an `A | B` slot).
    * `tag` is the arm's index in the union's canonical arm list; `value` has
@@ -5708,33 +3702,61 @@ export type IrExpr =
    * (+1); ownership of a refcounted payload MOVES into the union. Unions are
    * immutable once constructed. */
   | { kind: "unionWrap"; unionId: string; tag: number; value: IrExpr; type: IrType; loc: SrcLoc }
+  /** Identity union conversion: `value` (union `fromId`) currently holds
+   * one of `tags`, and each listed tag names an equal arm at the same index
+   * of the target union `unionId` (`type`). The result is the same value
+   * viewed as the target union: owned (+1), and for two tagged unions the
+   * very same box (unions are immutable and box identity is unobservable).
+   * The operand is therefore a whole-value use: it escapes through the
+   * result, so it can never be a stack box. Never throws. */
+  | {
+      kind: "unionRetype";
+      fromId: string;
+      unionId: string;
+      tags: number[];
+      value: IrExpr;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Strict identity comparison between a function arm of a union and a
    * function value with a potentially different static signature. This is
    * non-coercing: closures share one pointer representation, but the value
    * never enters the union or becomes callable through its arm type. */
-  | { kind: "unionFuncEq"; unionId: string; tag: number; union: IrExpr; func: IrExpr; negated: boolean; type: IrType; loc: SrcLoc }
+  | {
+      kind: "unionFuncEq";
+      unionId: string;
+      tag: number;
+      union: IrExpr;
+      func: IrExpr;
+      negated: boolean;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Runtime test on a catch binding (`value` is a caught-typed varRef,
    * borrowed). The primitive tests ("string"/"number"/"boolean") compare
    * the snapshot's kind tag. "object" also checks reference payloads,
    * excluding callable and primitive references;
-   * "instanceof" requires `className` (a hierarchy class) and tests an OBJ
-   * payload's vtable preorder against its interval (false for every other
-   * payload kind). `negated` flips the result (the `!==` spelling). */
+   * "instanceof" requires `className`: hierarchy payloads use the vtable
+   * interval, while standalone classes use their exact retain adapter.
+   * Other payloads answer false. "dynamic" is a value thrown as unknown
+   * (the payload caughtToDyn returns by reference). `negated` flips the
+   * result (the `!==` spelling). */
   | {
       kind: "caughtTest";
       value: IrExpr;
-      test: "string" | "number" | "boolean" | "object" | "instanceof";
+      test: "string" | "number" | "boolean" | "object" | "instanceof" | "dynamic";
       className?: string;
       negated?: boolean;
       type: IrType;
       loc: SrcLoc;
     }
-  /** Checker-trusted extraction of a catch binding's payload as `type` —
-   * the caught analog of unionNarrow: the frontend emits this only where
-   * tsc's control-flow narrowing has already proven the matching test
-   * (`e instanceof C` / `typeof e === "string"`), so the read is
-   * kind-UNCHECKED at runtime. `type` is f64, bool, string, or a
-   * hierarchy-class object; refcounted results come out retained (+1). */
+  /** Extraction of a catch binding's payload as `type` — the caught
+   * analog of unionNarrow: the frontend emits this only where tsc's
+   * control-flow narrowing has already proven the matching test
+   * (`e instanceof C` / `typeof e === "string"`). Backends verify the kind
+   * or class once and trap on a mismatch (a compiler bug or a lying type
+   * predicate or assertion function). `type` is f64, bool, string, or a class object; refcounted results come
+   * out retained (+1). */
   | { kind: "caughtNarrow"; value: IrExpr; type: IrType; loc: SrcLoc }
   /** CHECKED extraction of a catch binding's payload as a hierarchy-class
    * instance — the caught analog of dynCheck, emitted for `e as C` casts
@@ -5760,11 +3782,13 @@ export type IrExpr =
    * varRef (borrowed); `type` is dyn; the result is a fresh tree (+1),
    * never aliasing the payload. Never throws. */
   | { kind: "caughtToDyn"; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** Union payload extraction, tag-UNCHECKED: `value` is union-typed,
-   * `type` is arms[tag], and the backend reads the payload assuming the tag
-   * — SOUNDNESS RESTS ON tsc's control-flow narrowing (the frontend emits
-   * this only where the checker has already narrowed the expression to that
-   * arm; see docs/ir.md). Refcounted payloads come out retained (+1). */
+  /** Union payload extraction: `value` is union-typed and `type` is
+   * arms[tag]. The frontend emits this only where tsc's control-flow
+   * narrowing has already narrowed the expression to that arm; backends
+   * verify the tag once and trap on a mismatch (a compiler bug or a lying
+   * type predicate or assertion function), so a wrong proof cannot read the
+   * payload as another arm.
+   * Refcounted payloads come out retained (+1). */
   | { kind: "unionNarrow"; unionId: string; tag: number; value: IrExpr; type: IrType; loc: SrcLoc }
   /** Discriminant read `r.kind` on a union receiver: every arm is a
    * record/class possessing field `field` with the SAME primitive IR type
@@ -5839,11 +3863,17 @@ export type IrExpr =
    * promise.race: every arg is a PROMISE (the array literal's
    * entries, lowered individually — the array never materializes), the
    * type is the checker's combined result promise; the backend emits a
-   * fresh promise plus one scr_promise_race_add per entry with an
+   * fresh promise plus one scr_promise_race_join per entry with an
    * interned per-(entry-inner → result-inner) adapter (raceAdapterFor) —
    * same-type entries share the runtime's copy adapter, arm entries wrap
    * into the result union, sub-union entries re-tag arm-wise. First
    * settle wins; rejections copy raw and count handled on the entry.
+   * promise.allSettled / promise.any: ONE arg, an array of promises
+   * (Promise.all's countdown machinery). allSettled's type is a promise
+   * of the PromiseSettledResult union array — the backend's per-entry
+   * store adapter builds the fulfilled/rejected record arm; any's type is
+   * the entries' own promise type (the first fulfillment copies through;
+   * exhaustion rejects with an AggregateError of the dyn reasons).
    * promise.reject: one %Error-rooted arg (the reason — rejection
    * payloads share the thrown-Error representation), type is the
    * context-named result promise; the backend mints a fresh promise and
@@ -5854,11 +3884,72 @@ export type IrExpr =
    * result's inner type (promise arguments never reach here — the
    * frontend returns them as-is, the spec's native-promise identity;
    * thenables and promise-armed unions fence); the backend mints a fresh
-   * promise and fulfills it immediately per the inner kind. */
-  | { kind: "intrinsic"; name: "console.log" | "console.error" | "promise.race" | "promise.all" | "promise.reject" | "promise.resolve" | "module.await"; args: IrExpr[]; type: IrType; loc: SrcLoc }
+   * promise and fulfills it immediately per the inner kind.
+   * module.tdzCheck: two args, a BOOL initialization flag and the binding's
+   * source name as a strLit; void. Throws the catchable ReferenceError
+   * "Cannot access 'name' before initialization" while the flag is false
+   * (a module binding of an import cycle read before its declaration). */
+  | {
+      kind: "intrinsic";
+      name:
+        | "console.log"
+        | "console.error"
+        | "promise.race"
+        | "promise.all"
+        | "promise.allSettled"
+        | "promise.any"
+        | "promise.reject"
+        | "promise.resolve"
+        | "module.await"
+        | "module.tdzCheck"
+        /* @scriptc/threads publish(value): one argument, the result is the
+         * same value (and type); its graph becomes immortal and immutable. */
+        | "threads.publish"
+        /* LifetimeRegion (@scriptc/experimental), in modules with
+         * lifetimeRegions: region.create () → f64, a fresh region id;
+         * region.enter (f64 id) → void makes it the thread's current
+         * region until the matching region.leave () → void; region.release
+         * (f64 id) → void condemns it. None of them throws. */
+        | "region.create"
+        | "region.enter"
+        | "region.leave"
+        | "region.release"
+        /* InternTable (@scriptc/experimental; scr_itable.c):
+         * itable.open (string name, f64 key kind) → f64 table handle;
+         * itable.find (f64 table, K key) → f64 entry handle, 0 when the key
+         * has no entry; itable.insert (f64 table, K key, V value) → f64 the
+         * key's entry, storing the already published value when the key has
+         * none; itable.value (f64 entry) → V, the entry's immortal value;
+         * itable.size (f64 table) → f64. K is string, f64, or an array of
+         * f64 or of strings (compared by elements); find and insert throw
+         * a TypeError for array keys of more than 65536 elements or whose
+         * encoding exceeds 2^31 - 1 bytes; nothing else throws. Handles
+         * carry raw pointer bits and only reach toBool and these
+         * intrinsics. */
+        | "itable.open"
+        | "itable.find"
+        | "itable.insert"
+        | "itable.value"
+        | "itable.size"
+        /* ThreadSlots (@scriptc/experimental; scr_slots.c). Every one takes
+         * the family name (a string literal), the family's %ThreadSlots
+         * value (read for its effects only) and the key, a class instance
+         * whose hierarchy is in IrModule.threadSlotKeys:
+         * slots.get → V | undefined, a nullable union, owned (+1);
+         * slots.has → bool; slots.delete → bool, releasing the value;
+         * slots.set (…, V value) → void, or the %ThreadSlots value when the
+         * result is used. Nothing throws. */
+        | "slots.get"
+        | "slots.has"
+        | "slots.set"
+        | "slots.delete";
+      args: IrExpr[];
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Standard-library call (`process` members, node:fs functions). `fn` is a
    * closed union; arg/result types are fixed per member (validated against
-   * LIB_FN_SIGS). Property READS (`process.argv`, `process.platform`) are
+   * libFnSignatures()). Property READS (`process.argv`, `process.platform`) are
    * zero-arg libCalls. Args are BORROWED by the operation (frame temps
    * release at statement end); refcounted results come back owned (+1) —
    * `process.argv` returns +1 on ONE interned array (JS identity:
@@ -5868,19 +3959,46 @@ export type IrExpr =
    * the may-throw seed set (MAY_THROW_LIB_FNS) in their analysis and emit
    * pending checks; process.* members never throw. `process.exit` flushes
    * stdout and terminates the process without running exit handlers. */
-  | { kind: "libCall"; fn: IrLibFn; args: IrExpr[]; type: IrType; loc: SrcLoc; prototypeIdentityOnly?: true }
+  | {
+      kind: "libCall";
+      fn: IrLibFn;
+      args: IrExpr[];
+      type: IrType;
+      loc: SrcLoc;
+      prototypeIdentityOnly?: true;
+      /** A timer call through an ESM named or namespace import of
+       * node:timers. Node's mock.timers replaces the globals and the
+       * module object's properties, which these bindings do not follow,
+       * so the call keeps the loop's timer. */
+      realTimer?: true;
+      /** An assertion call made through a node:assert Assert instance: the
+       * instance options the runtime applies to this call. Backends set
+       * them right before the runtime call, after its arguments are
+       * evaluated; the AssertionError constructor consumes them, and a
+       * call that passes clears them. */
+      assertOptions?: { diff?: "full"; skipPrototype?: true };
+    }
   /** `JSON.stringify(v)` — type-DIRECTED serialization: `value`'s static IR
    * type must be JSON-safe (f64/string/bool/record/array/union of those,
    * recursively — validated), and backends emit one serializer per type used
    * in stringify position (interned, like the array-HOF desugars) instead of
-   * walking any runtime tag. Output is Node-compatible byte-for-byte with
+   * walking any runtime tag. Output is identical to Node's with
    * ONE documented divergence: record fields serialize in canonical (sorted)
    * order, not insertion order (SEMANTICS.md). NaN/±Infinity stringify as
    * `null` and -0 as `0`, exactly like JS; a record field holding the
    * undefined arm of its union (an optional field) is DROPPED from the
    * output — Node's rule for undefined-valued properties. The value is
-   * BORROWED; the result string is owned (+1). Never throws. */
-  | { kind: "jsonStringify"; value: IrExpr; indent?: string; type: IrType; loc: SrcLoc }
+   * BORROWED; the result string is owned (+1). Never throws. `circular`
+   * is util.format's %j (Node's tryStringify): a circular structure gives
+   * the text "[Circular]" instead of the TypeError. */
+  | {
+      kind: "jsonStringify";
+      value: IrExpr;
+      indent?: string;
+      circular?: true;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** The dynamic-boundary check — a CHECKED cast `dynValue as T`: validate
    * the dyn value's JSON dyn against `type` (a non-dyn, JSON-representable
    * IR type) and BUILD the typed value (+1), or THROW a catchable
@@ -5891,8 +4009,10 @@ export type IrExpr =
    * not shape equality; missing or wrong-typed fields throw, EXCEPT that a
    * missing key for an undefined-armed union field — an optional field —
    * builds the interned undefined arm instead); arrays check every element;
-   * unions try arms in canonical order and the first FULL match wins (no
-   * match → throw; an undefined arm matches no dyn value); JSON null matches
+   * unions try arms in canonical order, except that record arms with more
+   * required fields and then more fields go first, and the first FULL match
+   * wins (no match → throw; an undefined arm matches no dyn value); JSON
+   * null matches
    * exactly the nullT arm of a union target (bare null targets cannot
    * exist). MAY THROW:
    * backends' may-throw analyses must treat it like a `throw` statement.
@@ -5902,156 +4022,26 @@ export type IrExpr =
    * corrupting memory). `preserveRefs` refuses structural copies of native
    * references, including references nested in newly materialized arrays or
    * tuples; collection seeds use it to preserve key identity. */
-  | { kind: "dynCheck"; value: IrExpr; preserveRefs?: true; type: IrType; loc: SrcLoc }
-  /** Static → island marshal (--dynamic builds only). `value`'s type is
-   * f64/string/bool (marshaled by value) or a JSON-safe composite
-   * (record/array/union — marshaled as a DEEP COPY through the emitted
-   * type-directed JSON serializer and the engine's JSON parser; the
-   * aliasing divergence is documented in SEMANTICS.md). Result is an
-   * owned (+1) jsval; the operand is borrowed. Never throws. */
-  | { kind: "jsMarshal"; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** An operation on island values (--dynamic builds only), executed by
-   * the embedded engine with JS-exact semantics (coercions come from
-   * pinned prelude closures, not C reimplementations). `args` are
-   * jsval-typed and borrowed. Result `type` per op: arithmetic
-   * (add/sub/mul/div/mod/pow), unary neg/plus, getProp/getIdx,
-   * callMethod/callFn/callFnThis/globalGet → jsval (+1); comparisons
-   * (lt/le/gt/ge/eq/neq), truthy, not → bool; typeof, toStr → string (+1);
-   * setProp/setIdx → void. `name` carries the property/method identifier
-   * for getProp/setProp/callMethod/globalGet, absent otherwise. MAY THROW
-   * (engine
-   * exceptions bridge into the exception cell, catchably) — backends'
-   * may-throw analyses must seed on every jsOp like a `throw`. */
-  | { kind: "jsOp"; op: IrJsOp; name?: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
-  /** Island → static validated exit (--dynamic builds only): `value` is
-   * jsval-typed, `type` is the static target. STRICT for primitives (a
-   * non-number refuses to exit as number — no coercion); composite
-   * targets round-trip through the engine's JSON.stringify and the
-   * existing dynCheck walker for the target (width-tolerant records,
-   * path-annotated failures — identical semantics to `dyn as T`). MAY
-   * THROW a catchable TypeError-shaped string. The operand is borrowed;
-   * the result is owned (+1) for refcounted targets. */
-  | { kind: "jsExit"; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** Island → static PROMISE bridge (--dynamic builds only): `value` is a
-   * jsval whose declared type is Promise<T> (a package call's promise —
-   * it lives in the engine); the result is a fresh pending static promise
-   * the engine promise settles. `type` is promise-of-jsval (the settled
-   * engine value crosses as a retained handle; typed uses exit like any
-   * jsval) or promise-of-void (T mapped to void — nothing to carry).
-   * Fulfillment wakes parked awaiters through the ready queue; rejection
-   * crosses like a bridged exception (engine Errors become real static
-   * Errors) and re-throws at the await or enters the unhandled ledger.
-   * Bridging one engine promise twice makes two independent static
-   * observers of the same settlement — semantically equivalent, slightly
-   * redundant (SEMANTICS.md). Operand borrowed; result +1. MAY THROW
-   * only on an engine-level surprise minting the subscription — backends
-   * seed may-throw and emit the pending check like other island ops. */
-  | { kind: "jsBridgePromise"; value: IrExpr; type: IrType; loc: SrcLoc };
-
-/** The island operation set. Grouped by result type — see the jsOp node
- * doc. A closed union: every member has a lowering rule in the frontend,
- * a validation rule, and a scr_jsval_* implementation in scr_island.c. */
-export type IrJsOp =
-  | "add" | "sub" | "mul" | "div" | "mod" | "pow"
-  | "neg" | "plus"
-  | "lt" | "le" | "gt" | "ge" | "eq" | "neq"
-  /** `v instanceof C` where BOTH sides are island values (a package-
-   * exported class as the RHS): the spec's InstanceofOperator in the
-   * engine, Symbol.hasInstance included; a non-object RHS throws the
-   * engine's own TypeError, bridged catchably. */
-  | "instanceOf"
-  | "truthy" | "not" | "typeof" | "toStr"
-  | "getProp" | "setProp" | "getIdx" | "setIdx"
-  | "callMethod" | "callFn"
-  /** Calls an already-resolved island function with an explicit receiver.
-   * Args are (callee, receiver, ...arguments); this preserves computed
-   * method evaluation order without reading a getter twice. */
-  | "callFnThis"
-  /** Spread application on an island callee — `f(...pre, ...s)`, the
-   * rest-forwarding idiom (`(...args) => g(...args)` under --dynamic).
-   * Args are exactly (callee, pre, spread): `pre` is the engine array of
-   * leading fixed arguments (jsOp arrLit), `spread` the spread source;
-   * `name` carries the spread expression's source spelling (V8's nullish
-   * spread-call TypeError spells it). The prelude helper uses REAL spread
-   * syntax, so iterator protocols are the engine's own, with guards
-   * front-running V8's exact spread-call TypeError texts. May throw. */
-  | "callSpread"
-  /** `new X(...)` where X is jsval-typed (package-declared classes):
-   * JS_CallConstructor — args are the callee then the constructor
-   * arguments, mirroring callFn. */
-  | "construct"
-  /** A member of the engine's global object by name (Math, parseFloat, ...)
-   * — the receiver/callee for the island-backed ambient surface. Zero args;
-   * `name` carries the global's identifier. May-throw for uniformity with
-   * the other engine entries (the emitter's pending check runs after it). */
-  | "globalGet"
-  /** Island-native literals: an object literal / array literal whose
-   * contextual type is `any` builds directly in the engine — objLit args
-   * are alternating key/value jsvals (keys are marshaled strings), arrLit
-   * args are the elements. Never throw. */
-  | "objLit" | "arrLit"
-  /** The engine-native TemplateStringsArray for an ISLAND TAG call: args
-   * are 2n marshaled strings — n cooked then n raw — building a fresh
-   * engine array whose `.raw` carries the raw spellings (tags dispatch on
-   * it). Never throws. */
-  | "tplStrings"
-  /** Spread completion for an island-native object literal: copies
-   * args[1]'s own enumerable properties onto args[0] (the spec's
-   * CopyDataProperties — the engine's own Object.assign; null/undefined
-   * sources spread nothing) and answers args[0] for chaining. May throw
-   * (getters run). */
-  | "objSpread"
-  /** Accessor completion for an island-native object literal: defines a
-   * GETTER property on args[0] (the object) — args are (obj, key string
-   * marshal, getter function handle) — and answers the same object (the
-   * chainable spelling: `defineGetter(objLit(...), k, f)`). The
-   * self-referential doc-printer root-indent shape. Never throws. */
-  | "defineGetter"
-  /** The engine's own undefined / null as island values (zero args, never
-   * throw): the unit arms of a union marshaling IN (`string | undefined`
-   * into an 'any' slot — the undefined arm IS the engine undefined), and
-   * conceptually the unit path of `x?.y` on 'any' (the emitter inlines
-   * that one). */
-  | "undefLit" | "nullLit"
-  /** GetIterator over an island value — the for-of head over 'any' (the
-   * engine's own protocol lookup; V8's not-iterable TypeError on refusal).
-   * The loop drives next() through callMethod and reads value/done with
-   * getProp/truthy. */
-  | "iterNew"
-  /** `o.name?.(...)` — the optional METHOD call on an island receiver: a
-   * nullish member answers the engine's undefined, anything else calls
-   * with `this = o` (JS-exact; non-callables throw in the engine). */
-  | "optCallMethod";
-
-/** Result-type rule for each island op (the validator enforces it; the
- * frontend constructs nodes with exactly these). */
-export function jsOpResultKind(op: IrJsOp): "jsval" | "bool" | "string" | "void" {
-  switch (op) {
-    case "add": case "sub": case "mul": case "div": case "mod": case "pow":
-    case "neg": case "plus":
-    case "getProp": case "getIdx": case "callMethod": case "callFn": case "callFnThis":
-    case "callSpread":
-    case "construct":
-    case "globalGet":
-    case "objLit": case "arrLit": case "defineGetter": case "tplStrings": case "objSpread":
-    case "undefLit": case "nullLit":
-    case "iterNew": case "optCallMethod":
-      return "jsval";
-    case "lt": case "le": case "gt": case "ge": case "eq": case "neq":
-    case "instanceOf":
-    case "truthy": case "not":
-      return "bool";
-    case "typeof": case "toStr":
-      return "string";
-    case "setProp": case "setIdx":
-      return "void";
-    default: {
-      const _exhaustive: never = op;
-      void _exhaustive;
-      throw new InternalCompilerError("unreachable");
-    }
-  }
-}
+  /** `exact`: the value is known to be a capsule this program boxed from
+   * exactly the class `type` names (a `dyn.typedRefKeyIs` test guards the
+   * expression), so the check is one load of the capsule's instance. */
+  /** `adopt`: the declaration-typed boundary's cast (decl-projection.ts).
+   * The conversion preserves identity: a source object or array that
+   * something else still references (reference count above one) is
+   * turned, after the whole check succeeded, into a live capsule of the
+   * value built from it, so every holder sees the same native value; an
+   * unshared source is simply consumed. Values must be plain data
+   * (ordinary objects and arrays without accessors, prototypes, symbols
+   * or frozen state), otherwise the cast throws the path TypeError. */
+  | {
+      kind: "dynCheck";
+      value: IrExpr;
+      preserveRefs?: true;
+      adopt?: true;
+      exact?: true;
+      type: IrType;
+      loc: SrcLoc;
+    };
 
 /** True when a type is a union with an undefined arm — the optional-flavored
  * slot marker shared by the frontend (record literals may omit such fields)
@@ -6101,19 +4091,22 @@ export function isJsonStringifySafeType(
   return isJsonSafeAt(t, getRecord, getUnion, true, false, new Set());
 }
 
-/** A JSON-shaped container with unknown payloads needs the runtime JSON
- * traversal. Its declared structure can be boxed, but payloads may carry
- * omitted values, toJSON methods, or cycles. This predicate does not widen
- * the type-directed serializer, checked-island boundary, or root-undefined
+/** A JSON-shaped container with unknown payloads, or a class instance at
+ * any position, needs the runtime JSON traversal. Its declared structure can
+ * be boxed, but payloads may carry omitted values, toJSON methods, added
+ * properties, or cycles. This predicate does not widen
+ * the type-directed serializer, checked-value boundary, or root-undefined
  * contract; callers must select the checked runtime traversal explicitly. */
 export function isJsonStringifyDynamicType(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
-  return (t.kind === "record" || t.kind === "array" || t.kind === "union") &&
+  return (
+    (t.kind === "record" || t.kind === "array" || t.kind === "union" || isDynTypedRefType(t)) &&
     isJsonSafeAt(t, getRecord, getUnion, true, false, new Set(), true) &&
-    !isJsonStringifySafeType(t, getRecord, getUnion);
+    !isJsonStringifySafeType(t, getRecord, getUnion)
+  );
 }
 
 /** The recursion shared by checked JSON conversion and stringification.
@@ -6137,25 +4130,60 @@ function isJsonSafeAt(
     case "string":
     case "bool":
       return true;
+    // JSON.stringify writes a Date's toJSON(); JSON text never parses to one.
+    case "date":
+      return stringify;
     case "array":
-      return isJsonSafeAt(t.elem, getRecord, getUnion, stringify, stringify, visiting, nativeFields);
+      return isJsonSafeAt(
+        t.elem,
+        getRecord,
+        getUnion,
+        stringify,
+        stringify,
+        visiting,
+        nativeFields,
+      );
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
       if (recordTextCodecClass(shape) !== null) return false;
+      // Accessor slots are not function-valued properties: Node's
+      // JSON.stringify invokes the getter (see accessorSlotProp).
+      if (shapeHasAccessorSlots(shape)) return false;
       // The recursive knot: answer true and let the rest of the graph
       // decide (any unsafe constituent ends the traversal immediately).
       if (visiting.has(t.shapeId)) return true;
       visiting.add(t.shapeId);
       for (const field of shape.fields) {
-        if (!isJsonSafeAt(field.type, getRecord, getUnion, stringify, !shape.tuple || stringify, visiting, nativeFields)) return false;
+        // Stringification omits a function-valued property of an object.
+        if (stringify && !shape.tuple && field.type.kind === "func") continue;
+        if (
+          !isJsonSafeAt(
+            field.type,
+            getRecord,
+            getUnion,
+            stringify,
+            !shape.tuple || stringify,
+            visiting,
+            nativeFields,
+          )
+        )
+          return false;
       }
       // Overflow values sit in record-key position too: dyn is JSON-safe
       // HERE (the checked-dynamic tree serializes itself; undefined-valued entries drop
       // like any undefined-valued key), everything else follows the
       // record-field rule.
       if (shape.indexValue && shape.indexValue.kind !== "dyn") {
-        return isJsonSafeAt(shape.indexValue, getRecord, getUnion, stringify, true, visiting, nativeFields);
+        return isJsonSafeAt(
+          shape.indexValue,
+          getRecord,
+          getUnion,
+          stringify,
+          true,
+          visiting,
+          nativeFields,
+        );
       }
       return true;
     }
@@ -6166,7 +4194,20 @@ function isJsonSafeAt(
       if (visiting.has(key)) return true; // the recursive knot, union-flavored
       visiting.add(key);
       for (const arm of def.arms) {
-        if (!(arm.kind === "undefinedT" ? undefinedAllowed : isJsonSafeAt(arm, getRecord, getUnion, stringify, undefinedAllowed, visiting, nativeFields))) return false;
+        if (
+          !(arm.kind === "undefinedT"
+            ? undefinedAllowed
+            : isJsonSafeAt(
+                arm,
+                getRecord,
+                getUnion,
+                stringify,
+                undefinedAllowed,
+                visiting,
+                nativeFields,
+              ))
+        )
+          return false;
       }
       return true;
     }
@@ -6178,23 +4219,27 @@ function isJsonSafeAt(
       return nativeFields && !stringify;
     case "bytes":
       return nativeFields;
-    case "func":
+    // Class instances stringify through the runtime JSON traversal, which
+    // reads their own enumerable properties and calls toJSON.
     case "object":
+      if (nativeFields && stringify && isDynTypedRefType(t)) return true;
+      return false;
+    case "func":
     // Class values stringify as "{}" husks in Node (own enumerable statics
     // aside — not representable type-directedly); rejected like Maps.
     case "classval":
     // Maps are not JSON (JSON.stringify(new Map()) is "{}" in Node — an
     // empty-object husk nobody wants; stringify/dynCheck reject instead).
     case "map":
-    case "date":
     // URLSearchParams stringifies as the same "{}" husk — rejected; use
     // sp.toString() instead.
     case "searchParams":
     // Symbols are DROPPED by Node's stringify (undefined at the top level,
-    // omitted as object values) — silent divergence banned; rejected.
+    // omitted as object values) — rejected instead of diverging without a
+    // diagnostic.
     case "symbol":
-    case "jsval":
     case "caught":
+    case "jsval":
     case "promise":
     case "generator":
     case "moduleNs":
@@ -6216,139 +4261,8 @@ function isJsonSafeAt(
   }
 }
 
-/** THE island boundary predicate: true when a static type can cross into
- * the island (jsMarshal — primitives by value, composites as deep JSON
- * copies) and back out (jsExit — strict primitive extraction, composites
- * through the dynCheck walker). Primitives are JSON-safe, so the rule
- * coincides with isJsonSafeType; it has its own name because the boundary
- * is its own concept — the frontend's implicit coercions, the explicit-cast
- * lowering, and the validator's jsMarshal/jsExit rules all ask this ONE
- * question, and the boundary rejection messages describe exactly this set. */
-export function canCrossIslandBoundary(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): boolean {
-  return isJsonSafeType(t, getRecord, getUnion);
-}
-
-/** True for a closure type that can cross INTO the island as a host
- * function: every parameter jsval (the engine's arguments pass through as
- * handles — no per-type extraction exists inside a host call) and the
- * result jsval, void, or a primitive (which marshals back by value —
- * `(x) => x * 2` on an 'any' x infers a number return). Contextual typing
- * produces exactly this shape for callbacks passed to package APIs
- * (`.action((a, b) => ...)` against `(...args: any[]) => void`). Arity is
- * capped by the runtime's host-call argument buffer (scr_island.c). */
-export const MAX_ISLAND_CALLBACK_ARITY = 16;
-export function canMarshalFuncIntoIsland(t: IrType): boolean {
-  return (
-    t.kind === "func" &&
-    t.rest !== true &&
-    t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
-    t.params.every((p) => p.kind === "jsval") &&
-    (t.ret.kind === "jsval" || t.ret.kind === "void" ||
-      t.ret.kind === "f64" || t.ret.kind === "bool" || t.ret.kind === "string")
-  );
-}
-
-/** Parameter types a TYPED closure may declare when it crosses INTO the
- * island as a host function: jsval params take the engine argument as a
- * handle (the all-'any' shape above); dyn params normalize scalars or retain
- * engine objects by reference. Every other admitted type converts
- * AT CALL TIME through the validated-exit machinery — strict primitives,
- * JSON round-trip composites (the dynCheck walker: width-tolerant records,
- * path-annotated failures). On top of the jsExit set, a bare `T | undefined`
- * union is admitted here — an absent or undefined engine argument takes the
- * undefined arm, exactly the missing-optional-field rule (and exactly the
- * commander case: `.action((text: string | undefined, opts) => ...)` sees
- * undefined when the command argument is omitted). */
-export function isIslandCallbackParamType(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): boolean {
-  if (t.kind === "jsval" || t.kind === "dyn") return true;
-  if (isJsonSafeType(t, getRecord, getUnion)) return true;
-  if (t.kind === "union") {
-    // A bare undefined-armed union: every non-undefined arm must be
-    // JSON-safe (arms never nest unions, so plain isJsonSafeType applies).
-    const def = getUnion(t.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion));
-  }
-  return false;
-}
-
-/** Classify a typed island callback's RETURN for adapter synthesis: sync
- * kinds marshal back by value ('void'|'jsval'|'f64'|'bool'|'string' — the
- * canMarshalFuncIntoIsland set), 'json' marshals a JSON-safe composite
- * through the type-directed serializer + engine parse (the jsMarshal
- * composite path — commander's option-argument collectors return arrays
- * this way), and a Promise of the by-value kinds wraps as an engine
- * promise settled when the scriptc promise settles (async callbacks —
- * the `.action(async ...)` case). Null for anything else (Promise of
- * composites: still fenced). */
-export function islandCallbackRet(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): { async: boolean; tag: "void" | "jsval" | "f64" | "bool" | "string" | "json" | "dyn" } | null {
-  const tagOf = (r: IrType) =>
-    r.kind === "void" || r.kind === "jsval" || r.kind === "f64" || r.kind === "bool" || r.kind === "string"
-      ? r.kind
-      : null;
-  if (t.kind === "promise") {
-    const tag = tagOf(t.inner);
-    return tag ? { async: true, tag } : null;
-  }
-  const tag = tagOf(t);
-  if (tag) return { async: false, tag };
-  // A CHECKED-DYNAMIC result (a JS getter/callback whose inferred return
-  // degraded — the doc-printer root-indent getter): the dyn value deep-
-  // copies into the engine on return, exactly the jsMarshal dyn rule
-  // (data kinds only; boxed functions/handles throw the catchable
-  // TypeError). Sync only — no engine-promise tag exists for dyn values.
-  if (t.kind === "dyn") return { async: false, tag: "dyn" };
-  return isJsonSafeType(t, getRecord, getUnion) ? { async: false, tag: "json" } : null;
-}
-
-/** The TYPED extension of canMarshalFuncIntoIsland (a strict superset):
- * closures whose params are per-argument-convertible at call time
- * (isIslandCallbackParamType) and whose return classifies
- * (islandCallbackRet). Same arity cap — the runtime's host-call argument
- * buffer. Statically typed closure parameters stay fenced; unknown values
- * enter as checked-dynamic values and are validated at each typed use. */
-export function canMarshalTypedFuncIntoIsland(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): boolean {
-  if (t.kind !== "func") return false;
-  // The ISLAND-REST form (`async (...args) =>` in JS under --dynamic —
-  // the withPlugins wrapper): the trailing ABI param is the ENGINE array
-  // of the call's surplus arguments; leading params convert per argument
-  // like any typed callback. Plain rest signatures (dynRest, typed
-  // rests) stay out — no completed-ABI spelling exists for them here.
-  if (t.rest === true) {
-    return (
-      t.restAbi === "jsval" &&
-      t.params.length >= 1 &&
-      t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
-      t.params[t.params.length - 1]!.kind === "jsval" &&
-      t.params.slice(0, -1).every((p) => isIslandCallbackParamType(p, getRecord, getUnion)) &&
-      islandCallbackRet(t.ret, getRecord, getUnion) !== null
-    );
-  }
-  return (
-    t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
-    t.params.every((p) => isIslandCallbackParamType(p, getRecord, getUnion)) &&
-    islandCallbackRet(t.ret, getRecord, getUnion) !== null
-  );
-}
-
 /* ── the checked-dynamic FUNCTION boundary ──────────────────────────────
- * The STATIC twin of the island's typed-function marshaling
- * (canMarshalTypedFuncIntoIsland): closures cross the dyn boundary as a
+ * Closures cross the checked-value boundary as a
  * callable dyn kind carrying the closure + a compiled per-signature call
  * thunk. Two directions, two predicates, mutually recursive with the
  * conversion domains (function types cannot ride records/unions — jsonSafe
@@ -6395,6 +4309,10 @@ export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }>
   ["http2Session", { tag: "SCR_DYNH_H2_SESSION", cls: "Http2Session" }],
   ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
   ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", cls: "ClientRequest" }],
+  ["dgramSocket", { tag: "SCR_DYNH_DGRAM_SOCKET", cls: "Socket" }],
+  ["dir", { tag: "SCR_DYNH_DIR", cls: "Dir" }],
+  ["cryptoHash", { tag: "SCR_DYNH_HASH", cls: "Hash" }],
+  ["cryptoHmac", { tag: "SCR_DYNH_HMAC", cls: "Hmac" }],
 ]);
 
 /** A class value that crosses an `unknown` slot as a compiler-owned typed
@@ -6416,6 +4334,27 @@ export function isClassOwnEnumerableFieldName(name: string): boolean {
 /** Compiler-owned storage for properties added through untyped references. */
 export const DYN_CLASS_PROPERTIES = "%dynProperties";
 
+/** Compiler-owned integrity state of a class instance whose hierarchy is
+ * passed to Object.freeze, Object.seal, Object.preventExtensions or
+ * Object.defineProperty: an f64 holding CLASS_NOT_EXTENSIBLE, CLASS_SEALED
+ * and CLASS_FROZEN bits. Other hierarchies have no such field. */
+export const CLASS_ATTRIBUTES = "%attributes";
+export const CLASS_NOT_EXTENSIBLE = 1;
+export const CLASS_SEALED = 2;
+export const CLASS_FROZEN = 4;
+
+/** Compiler-owned attributes of one declared field that Object.defineProperty
+ * changes: an f64 holding FIELD_NOT_WRITABLE, FIELD_NOT_ENUMERABLE and
+ * FIELD_NOT_CONFIGURABLE bits (zero is an ordinary data property). */
+export const CLASS_FIELD_ATTRIBUTES_PREFIX = "%attr:";
+export const FIELD_NOT_WRITABLE = 1;
+export const FIELD_NOT_ENUMERABLE = 2;
+export const FIELD_NOT_CONFIGURABLE = 4;
+
+export function classFieldAttributesName(field: string): string {
+  return CLASS_FIELD_ATTRIBUTES_PREFIX + field;
+}
+
 /** A class capsule can always preserve its exact native identity. Its
  * optional property view additionally needs converters in both directions;
  * fields such as Maps may remain opaque without preventing the round trip. */
@@ -6429,8 +4368,11 @@ export function classDynViewSupported(
     if (type.kind === "union") return getUnion(type.unionId)?.arms.every(checkable) ?? false;
     return canDynCheckTo(type, getRecord, getUnion);
   };
-  return fields.every((field) => !isClassOwnEnumerableFieldName(field.name) ||
-    (canConvertToDyn(field.type, getRecord, getUnion) && checkable(field.type)));
+  return fields.every(
+    (field) =>
+      !isClassOwnEnumerableFieldName(field.name) ||
+      (canConvertToDyn(field.type, getRecord, getUnion) && checkable(field.type)),
+  );
 }
 
 /** A static type that CONVERTS into a dyn value — the dynFrom domain:
@@ -6444,6 +4386,7 @@ export function canConvertToDyn(
   visiting: Set<string> = new Set(),
 ): boolean {
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
+  if (textCodecRecordClass(t, getRecord) !== null) return true;
   // numeric typed arrays and boxable functions are dyn kinds the walker boxes
   // ANYWHERE (bytes and functions held by identity), including nested
   // in records/arrays/unions. isJsonSafeType rejects them, but dynFrom
@@ -6479,11 +4422,23 @@ export function canConvertToDyn(
     // invalid-input probes iterate `[1, null, () => {}, true]` — the
     // union's func arm crosses through the checked-dynamic function
     // boundary exactly like a bare func dynFrom).
-    return !!def && def.arms.every((a) =>
-      a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion) ||
-      isDynTypedRefType(a) || a.kind === "classval" || DYN_HANDLE_KINDS.has(a.kind) ||
-      (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion, visiting)) ||
-      (a.kind === "promise" && canConvertToDyn(a, getRecord, getUnion, visiting)),
+    return (
+      !!def &&
+      def.arms.every(
+        (a) =>
+          a.kind === "undefinedT" ||
+          isJsonSafeType(a, getRecord, getUnion) ||
+          // Composite arms (records holding dyn, Map or Set members) box
+          // through the walker beside the promise arm: a method answering
+          // either its result or a promise of it.
+          canBoxDynComposite(a, getRecord, getUnion, visiting) ||
+          isDynTypedRefType(a) ||
+          textCodecRecordClass(a, getRecord) !== null ||
+          a.kind === "classval" ||
+          DYN_HANDLE_KINDS.has(a.kind) ||
+          (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion, visiting)) ||
+          (a.kind === "promise" && canConvertToDyn(a, getRecord, getUnion, visiting)),
+      )
     );
   }
   return false;
@@ -6531,24 +4486,35 @@ function canBoxDynCompositeAt(
     case "regex":
     case "url":
     case "searchParams":
+    case "date":
       return true;
     case "func":
       return canBoxFuncIntoDyn(t, getRecord, getUnion, visiting);
     case "set":
-      return canConvertToDyn(t.elem, getRecord, getUnion, visiting) && canDynCheckTo(t.elem, getRecord, getUnion, visiting);
+      return (
+        canConvertToDyn(t.elem, getRecord, getUnion, visiting) &&
+        canDynCheckTo(t.elem, getRecord, getUnion, visiting)
+      );
     case "map":
-      return canConvertToDyn(t.key, getRecord, getUnion, visiting) && canDynCheckTo(t.key, getRecord, getUnion, visiting) &&
-        canConvertToDyn(t.value, getRecord, getUnion, visiting) && canDynCheckTo(t.value, getRecord, getUnion, visiting);
+      return (
+        canConvertToDyn(t.key, getRecord, getUnion, visiting) &&
+        canDynCheckTo(t.key, getRecord, getUnion, visiting) &&
+        canConvertToDyn(t.value, getRecord, getUnion, visiting) &&
+        canDynCheckTo(t.value, getRecord, getUnion, visiting)
+      );
     case "object":
       return RUNTIME_ERROR_CLASSES.has(t.className) || isDynTypedRefType(t);
     case "array":
       // Process streams have scalar storage only in fields, closures and
       // unions. A direct procStream array has no native ScrArr layout.
-      return t.elem.kind !== "procStream" && canBoxDynComposite(t.elem, getRecord, getUnion, visiting);
+      return (
+        t.elem.kind !== "procStream" && canBoxDynComposite(t.elem, getRecord, getUnion, visiting)
+      );
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
-      if (recordTextCodecClass(shape) !== null) return false;
+      // A codec boxes as its own handle wherever it sits (toDynHelper).
+      if (recordTextCodecClass(shape) !== null) return true;
       // Recursive shapes answer coinductively, like isJsonSafeType.
       if (visiting.has(t.shapeId)) return true;
       visiting.add(t.shapeId);
@@ -6556,7 +4522,9 @@ function canBoxDynCompositeAt(
         for (const field of shape.fields) {
           if (!canBoxDynComposite(field.type, getRecord, getUnion, visiting)) return false;
         }
-        return !shape.indexValue || canBoxDynComposite(shape.indexValue, getRecord, getUnion, visiting);
+        return (
+          !shape.indexValue || canBoxDynComposite(shape.indexValue, getRecord, getUnion, visiting)
+        );
       } finally {
         visiting.delete(t.shapeId);
       }
@@ -6576,7 +4544,9 @@ function canBoxDynCompositeAt(
       }
     }
     default:
-      return false;
+      // Runtime handles (a socket in a diagnostics message) box by
+      // reference wherever the walker meets them, as at the top level.
+      return DYN_HANDLE_KINDS.has(t.kind);
   }
 }
 
@@ -6616,17 +4586,22 @@ function canDynCheckToAt(
 ): boolean {
   if (t.kind === "procStream") return true;
   // Unknown fields keep an owned dyn subtree; checking the surrounding
-  // record/array still validates its layout. This is broader than the
-  // stringify/island JSON domain, which cannot assume opaque slots are
-  // serializable. Backends already retain dyn fields and fill missing
+  // record/array still validates its layout. Backends retain dyn fields and fill missing
   // unknown record fields with the undefined value.
   if (isJsonSafeAt(t, getRecord, getUnion, false, false, new Set(), true)) return true;
-  if (t.kind === "bigint" || t.kind === "symbol" || t.kind === "date" || t.kind === "searchParams") return true;
-  if (t.kind === "map" || t.kind === "set") return canBoxDynComposite(t, getRecord, getUnion, visiting);
+  if (t.kind === "bigint" || t.kind === "symbol" || t.kind === "date" || t.kind === "searchParams")
+    return true;
+  if (t.kind === "map" || t.kind === "set")
+    return canBoxDynComposite(t, getRecord, getUnion, visiting);
   if (t.kind === "bytes") return true;
   if (t.kind === "classval") return true;
   if (t.kind === "generator") return true;
-  if (t.kind === "promise") return t.inner.kind === "dyn" || t.inner.kind === "void" || canDynCheckToAt(t.inner, getRecord, getUnion, visiting);
+  if (t.kind === "promise")
+    return (
+      t.inner.kind === "dyn" ||
+      t.inner.kind === "void" ||
+      canDynCheckToAt(t.inner, getRecord, getUnion, visiting)
+    );
   if (t.kind === "object" && t.className === "%Error") return true;
   // Native class capsules already support checked extraction at ordinary
   // boundaries. Callable adapters use the same identity/brand check.
@@ -6640,13 +4615,16 @@ function canDynCheckToAt(
     visiting.delete(key);
     return result;
   }
+  // A codec handle unboxes to the record it holds.
+  if (textCodecRecordClass(t, getRecord) !== null) return true;
   if (t.kind === "record") {
     const key = typeKey(t);
     if (visiting.has(key)) return false;
     const shape = getRecord(t.shapeId);
     if (!shape || shapeHasAccessorSlots(shape)) return false;
     visiting.add(key);
-    const result = shape.fields.every((field) => canDynCheckTo(field.type, getRecord, getUnion, visiting)) &&
+    const result =
+      shape.fields.every((field) => canDynCheckTo(field.type, getRecord, getUnion, visiting)) &&
       (!shape.indexValue || canDynCheckTo(shape.indexValue, getRecord, getUnion, visiting));
     visiting.delete(key);
     return result;
@@ -6658,7 +4636,13 @@ function canDynCheckToAt(
     // Optional native callbacks and handles retain the same checked
     // conversion as their bare value. The union matcher selects the arm
     // before its adapter/extractor runs.
-    return !!def && def.arms.every((a) => isUnitType(a) || (a.kind !== "union" && canDynCheckTo(a, getRecord, getUnion, visiting)));
+    return (
+      !!def &&
+      def.arms.every(
+        (a) =>
+          isUnitType(a) || (a.kind !== "union" && canDynCheckTo(a, getRecord, getUnion, visiting)),
+      )
+    );
   }
   return false;
 }
@@ -6677,18 +4661,16 @@ export function canBoxFuncIntoDyn(
     t.kind === "func" &&
     // Typed rest occupies the final native array parameter; its thunk
     // checks a fresh array containing all remaining call arguments.
-    // Island rest keeps its separate engine host-callback adapter.
-    (t.rest !== true || t.restAbi === undefined ||
+
+    (t.rest !== true ||
+      t.restAbi === undefined ||
       (t.restAbi === "typed" && t.params.at(-1)?.kind === "array")) &&
-    // A jsval (island) param converts through scr_jsval_from_dyn in the
-    // thunk (wrapped cells unwrap by reference, dyn data deep-copies) —
-    // the checker-'any' callback params of the routed-dispatch lane
-    // (`bag.list.map((x) => ...)` with x typed any).
-    t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" || canDynCheckTo(p, getRecord, getUnion, visiting)) &&
-    // A jsval return converts through the by-reference wrap
-    // (dynFromJsval — the thunk's result conversion), so engine-returning
-    // callbacks box too: the routed-dispatch lane's flatMap shape.
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || t.ret.kind === "jsval" || canConvertToDyn(t.ret, getRecord, getUnion, visiting))
+    // The thunk checks each argument against the declared native type.
+    t.params.every((p) => p.kind === "dyn" || canDynCheckTo(p, getRecord, getUnion, visiting)) &&
+    // The result must be representable as a checked native value.
+    (t.ret.kind === "void" ||
+      t.ret.kind === "dyn" ||
+      canConvertToDyn(t.ret, getRecord, getUnion, visiting))
   );
 }
 
@@ -6705,1397 +4687,11 @@ export function canAdaptDynFuncTo(
   return (
     t.kind === "func" &&
     // Checked rest and arguments packs retain all actual arguments. Typed
-    // and island rest ABIs still require their own conversion plan.
+
     (t.rest !== true || t.restAbi === undefined) &&
     t.params.every((p) => p.kind === "dyn" || canConvertToDyn(p, getRecord, getUnion, visiting)) &&
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || canDynCheckTo(t.ret, getRecord, getUnion, visiting))
+    (t.ret.kind === "void" ||
+      t.ret.kind === "dyn" ||
+      canDynCheckTo(t.ret, getRecord, getUnion, visiting))
   );
 }
-
-/** The MARSHAL-direction boundary (jsMarshal): everything that can cross
- * out and back (canCrossIslandBoundary) plus qualifying closures — those
- * enter as host functions but never EXIT (jsExit keeps the narrower
- * predicate). */
-export function canMarshalIntoIsland(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): boolean {
-  return isJsonSafeType(t, getRecord, getUnion) || canMarshalFuncIntoIsland(t);
-}
-
-/** The EXIT-direction boundary (jsExit): everything round-trippable
- * (canCrossIslandBoundary) plus BARE undefined/null-armed unions whose
- * data arms are all JSON-safe — the engine's undefined takes the
- * undefined arm before the JSON detour (JSON cannot spell undefined, and
- * bare undefined-armed unions are JSON-unsafe for exactly that reason),
- * null and data ride the round trip into the union's dynCheck. The
- * package-API shape `result.headers` : `Record<string, string> |
- * undefined` is the motivating case. */
-/** The static-promise→engine bridge's payload domain: the fulfillment
- * types a scriptc promise may deliver INTO the island as a real engine
- * thenable (scr_jsval_from_promise — the async-callback return bridge,
- * reused by promise VALUES crossing at jsvalIn edges and the island
- * Promise.all arm). Null = outside the domain (the boundary fence). */
-export function islandPromisePayloadTag(
-  inner: IrType,
-): "void" | "f64" | "bool" | "string" | "jsval" | "jsvalArr" | null {
-  switch (inner.kind) {
-    case "void": return "void";
-    case "f64": return "f64";
-    case "bool": return "bool";
-    case "string": return "string";
-    case "jsval": return "jsval";
-    case "array": return inner.elem.kind === "jsval" ? "jsvalArr" : null;
-    default: return null;
-  }
-}
-
-export function canExitIslandToType(
-  t: IrType,
-  getRecord: (shapeId: string) => IrRecordShape | undefined,
-  getUnion: (unionId: string) => IrUnionDef | undefined,
-): boolean {
-  if (canCrossIslandBoundary(t, getRecord, getUnion)) return true;
-  // Uint8Array exits with a validated kind check + copy (engine Buffers
-  // pass — they ARE Uint8Arrays); other element widths stay out.
-  if (t.kind === "bytes" && t.elem === "u8") return true;
-  // `any[]`-declared slots (the jsval-element-array spelling): the engine
-  // array exits Array.isArray-gated, elements BY REFERENCE (identity
-  // crosses; the withPlugins `loadPlugins(plugins)` boundary).
-  if (t.kind === "array" && t.elem.kind === "jsval") return true;
-  if (t.kind === "union") {
-    const def = getUnion(t.unionId);
-    if (!def || !def.arms.some((a) => a.kind === "undefinedT")) return false;
-    if (def.arms.every((a) => isUnitType(a) || isJsonSafeType(a, getRecord, getUnion))) return true;
-    // `any[] | undefined` (the defaulted-parameter spelling): exactly one
-    // jsval-element-array data arm beside units — the engine's undefined
-    // takes the undefined arm, everything else the array exit.
-    const dataArms = def.arms.filter((a) => !isUnitType(a));
-    return dataArms.length === 1 && dataArms[0]!.kind === "array" && dataArms[0]!.elem.kind === "jsval";
-  }
-  return false;
-}
-
-export interface RuntimeFeatures {
-  regex: boolean;
-  copying: boolean;
-  legacyTextDecoder: boolean;
-  fileHandle: boolean;
-  fetch: boolean;
-  processEvents: boolean;
-  emitter: boolean;
-  stream: boolean;
-  zlib: boolean;
-  dc: boolean;
-  assert: boolean;
-  dynInvoke: boolean;
-  dynAsync: boolean;
-  inspect: boolean;
-  childProcess: boolean;
-  net: boolean;
-  symbol: boolean;
-  bigint: boolean;
-  searchParams: boolean;
-  qs: boolean;
-  parseArgs: boolean;
-  fsWatch: boolean;
-  nodeTest: boolean;
-  dgram: boolean;
-  http: boolean;
-  http2: boolean;
-  tls: boolean;
-  tlsCa: boolean;
-}
-
-const DYN_ASYNC_LIB_FNS: ReadonlySet<string> = new Set([
-  "fs.callbackValue", "fs.callbackCall",
-  "async.awaitDyn", "timers.immediatePromise", "crypto.native",
-  "dyn.promiseAll",
-  "process.onUncaughtException", "process.offUncaughtException",
-  "process.onUnhandledRejection", "process.offUnhandledRejection",
-  "process.onRejectionHandled", "process.offRejectionHandled",
-  "process.onWarning", "process.offWarning", "process.emitWarning", "util.styleText",
-  "als.new", "als.get", "als.run", "als.exitRun", "als.enterWith", "als.disable",
-  "dc.chanBindStore", "dc.chanUnbindStore", "dc.chanRunStores",
-]);
-
-/** Inspect types and expressions together in one traversal. This is a fresh
- * snapshot: callers may mutate an IR module between compilation passes. */
-export function moduleRuntimeFeatures(mod: IrModule): RuntimeFeatures {
-  return scanRuntimeFeatures(mod);
-}
-
-function scanRuntimeFeatures(mod: IrModule, stopAt?: keyof RuntimeFeatures): RuntimeFeatures {
-  const features: RuntimeFeatures = {
-    regex: false, copying: false, legacyTextDecoder: false, fileHandle: false,
-    fetch: mod.embedded?.modules.some((m) => m.usesFetch === true) ?? false,
-    processEvents: false, emitter: (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
-    stream: (mod.classes ?? []).some((c) => RUNTIME_STREAM_CLASSES.has(c.name)),
-    zlib: mod.embedded?.edges.some((e) => e.to === "node:zlib") ?? false,
-    dc: false, assert: false, dynInvoke: false,
-    dynAsync: mod.functions.some((fn) => fn.async === true && fn.generator === undefined && fn.returnType.kind === "dyn"),
-    inspect: false,
-    childProcess: false, net: false, symbol: false, bigint: false, searchParams: false,
-    qs: false, parseArgs: false, fsWatch: false, nodeTest: false, dgram: false,
-    http: false, http2: false, tls: false, tlsCa: false,
-  };
-  const keepGoing = (): boolean => stopAt === undefined || !features[stopAt];
-  const expr = (node: IrExpr): boolean => {
-    if (node.kind === "libCall") {
-      const fn = node.fn;
-      if (fn === "regexp.escape" || fn === "dyn.nativeRegexIs" || fn === "util.stripVTControlCharacters") features.regex = true;
-      if (fn === "text.decodeLegacy" || fn === "text.decodeLegacyOptions" || fn === "text.decodeStream") features.legacyTextDecoder = true;
-      if (fn.startsWith("fetch.")) features.fetch = true;
-      if (PROCESS_EVENT_LIB_FNS.has(fn)) features.processEvents = true;
-      if (fn.startsWith("emitter.")) features.emitter = true;
-      if (fn.startsWith("readable.") || fn.startsWith("writable.") || fn.startsWith("duplex.") ||
-          fn.startsWith("transform.") || fn.startsWith("passthrough.") || fn.startsWith("sc.") ||
-          fn.startsWith("stream.set") || fn === "stream.destroy" || fn === "stream.destroyErr" ||
-          fn === "stream.prop" || fn === "stream.errored" || fn === "sp.finished" || fn === "sp.pipeline") features.stream = true;
-      if (fn.startsWith("zlib.")) features.zlib = true;
-      if (fn.startsWith("dc.")) features.dc = true;
-      if (fn.startsWith("assert.")) features.assert = true;
-      if (fn === "dyn.defineProps" || fn === "dyn.definePrototypeProps" || fn === "dyn.defineProperty" || fn === "dyn.objCreateWithProperties" || fn === "dyn.arrayProtoCall" || fn === "dyn.arrayPrototype" || fn === "dyn.functionApply" || fn === "dyn.builtinMethod") features.dynInvoke = true;
-      if (DYN_ASYNC_LIB_FNS.has(fn)) features.dynAsync = true;
-      if (fn.startsWith("insp.") || fn === "console.native" || fn === "global.native" || fn === "util.styleText") features.inspect = true;
-      if (fn.startsWith("cp.") || fn.startsWith("child.") || fn.startsWith("writer.") || fn.startsWith("spawnRes.") ||
-          fn === "process.forkTarget" || fn === "process.connected" || fn === "process.send" || fn === "process.sendCb" ||
-          fn === "process.disconnect" || fn === "process.onMessage" || fn === "process.onDisconnect") features.childProcess = true;
-      if (fn.startsWith("net.")) features.net = true;
-      if (fn.startsWith("http.")) { features.net = true; features.http = true; }
-      if (fn.startsWith("tls.") || fn.startsWith("https.") || fn.startsWith("http2.")) {
-        features.net = true; features.http = true; features.tls = true;
-      }
-      if (fn.startsWith("http2.") && !HTTP2_LEGACY_FNS.has(fn)) features.http2 = true;
-      if (fn.startsWith("sym.") || fn === "util.isDeepStrictEqual") features.symbol = true;
-      if (fn === "process.hrtimeValue") features.bigint = true;
-      if (fn.startsWith("bigint.")) features.bigint = true;
-      if (fn.startsWith("sp.") || fn === "url.searchParams") features.searchParams = true;
-      if (fn === "qs.parse" || fn === "qs.stringify" || fn === "qs.unescape") features.qs = true;
-      if (fn === "util.parseArgs" || fn === "util.isDeepStrictEqual" || fn === "util.styleText") features.parseArgs = true;
-      if (fn === "util.styleText") features.processEvents = true;
-      if (fn.startsWith("fs.watch") || fn.startsWith("watcher.")) features.fsWatch = true;
-      if (fn.startsWith("test.")) features.nodeTest = true;
-      if (fn.startsWith("dgram.") || fn.startsWith("dns.")) features.dgram = true;
-      if (fn.startsWith("tlsca.")) features.tlsCa = true;
-    } else {
-      switch (node.kind) {
-        case "regexLit": case "regexIntrinsic": features.regex = true; break;
-        case "strIntrinsic":
-          if (node.method === "toLowerCase" || node.method === "toUpperCase" || node.method === "normalize") features.regex = true;
-          break;
-        case "arrIntrinsic":
-          if (node.method === "toReversed" || node.method === "toSpliced" || node.method === "with" || node.method === "withUndefined") features.copying = true;
-          break;
-        case "bytesIntrinsic":
-          if (node.method === "toReversed" || node.method === "with" || node.method === "join" || node.method === "toArray") features.copying = true;
-          break;
-        case "jsOp":
-          if (node.op === "globalGet" && node.name === "fetch") features.fetch = true;
-          break;
-        case "dynInvoke": features.dynInvoke = true; break;
-        case "awaitExpr":
-          if (node.type.kind === "dyn") features.dynAsync = true;
-          break;
-        case "dynFrom": {
-          const boxed = node.value.type;
-          if (boxed.kind === "promise" || (boxed.kind === "func" && boxed.ret.kind === "promise")) features.dynAsync = true;
-          break;
-        }
-      }
-    }
-    return keepGoing();
-  };
-  const type = (node: IrType): boolean => {
-    switch (node.kind) {
-      case "regex": features.regex = true; break;
-      case "fileHandle": features.fileHandle = true; break;
-      case "procStream": features.processEvents = true; break;
-      case "child": case "childStream": case "childWriter": case "spawnRes": features.childProcess = true; break;
-      case "netServer": case "netSocket": features.net = true; break;
-      case "http2Session": case "http2Stream": features.net = true; features.http2 = true; break;
-      case "httpReq": case "httpRes": case "httpClientReq": features.net = true; features.http = true; break;
-      case "secureCtx": features.net = true; features.http = true; features.tls = true; break;
-      case "symbol": features.symbol = true; break;
-      case "bigint": features.bigint = true; break;
-      case "searchParams": features.searchParams = true; break;
-      case "fsWatcher": features.fsWatch = true; break;
-      case "testCtx": features.nodeTest = true; break;
-      case "dgramSocket": features.dgram = true; break;
-    }
-    return keepGoing();
-  };
-  if (keepGoing()) everyModuleNode(mod, { expr, stmt: keepGoing, type });
-  return features;
-}
-
-/** True when the module contains any regex construct — a regexLit /
- * regexIntrinsic node or a regex-typed slot anywhere. This is the link
- * switch that pulls scr_regex.c + the vendored libregexp into the binary
- * (native-toolchain.ts); regex-free programs keep the historical command line. The
- * typed traversal visits type slots as well as executable nodes. */
-export function moduleUsesRegex(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "regex").regex;
-}
-
-/** True when the module contains an intrinsic whose implementation lives
- * in scr_copying.c. This is the link switch that keeps the optional
- * Array-copying and typed-array bridge TU out of unrelated binaries. */
-export function moduleUsesCopying(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "copying").copying;
-}
-
-/** True when a non-UTF-8 TextDecoder call survives lowering. This gates the
- * generated legacy mapping tables inside scr_bytes.c; the default UTF-8
- * decoder and unrelated Buffer users keep their prior runtime object. */
-export function moduleUsesLegacyTextDecoder(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "legacyTextDecoder").legacyTextDecoder;
-}
-
-/** True when a FileHandle type survives in the module. This is the link
- * switch for scr_file_handle.c; fs/promises.open carries the type inside its
- * promise result even when no handle method is called. */
-export function moduleUsesFileHandle(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "fileHandle").fileHandle;
-}
-
-/** True when user code lowers static fetch or the embedded npm graph
- * reaches the engine's global fetch — the link switch that pulls scr_fetch.c +
- * its socket/tls/zlib dependencies into the binary (native-toolchain.ts) and has the
- * emitted main call scr_fetch_install. The npm graph records the embedded
- * source fact with a parser + binder, so comments, strings, property names,
- * and local `fetch` bindings do not change the link or target capability.
- * Fetch-free graphs keep their exact historical link lines. */
-export function moduleUsesFetch(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "fetch").fetch;
-}
-
-/** The libCall fns served by the OPTIONAL events unit (scr_events.c):
- * process signal/exit listeners and the piped-stdin surface. */
-const PROCESS_EVENT_LIB_FNS: ReadonlySet<string> = new Set([
-  "process.stdio",
-  "process.onSignal",
-  "process.offSignal",
-  "process.onExit",
-  "process.offExit",
-  "stdin.onData",
-  "stdin.onEnd",
-  "stdin.onError",
-  "stdin.nextChunk",
-  // node:readline rides the stdin unit (scr_readline.c links beside
-  // scr_events.c under the same gate).
-  "rl.create",
-  "rl.question",
-  "rl.close",
-  "rl.onClose",
-]);
-
-/** True when the module uses the process-events surface — the link switch
- * that pulls scr_events.c into the binary and has the emitted main call
- * scr_events_install (native-toolchain.ts + emitter; the scr_regex/scr_fetch/scr_zlib
- * gating precedent). Event-free programs pay zero bytes and keep their
- * exact link line. Same generic-walk shape as moduleUsesRegex. */
-export function moduleUsesProcessEvents(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "processEvents").processEvents;
-}
-
-/** True when the module uses the node:events EventEmitter surface — the
- * link switch that pulls scr_events_emitter.c into the binary (native-toolchain.ts; the
- * scr_events.c gating precedent, but pure data structure: no install, no
- * loop hooks). Two signals: the `%EventEmitter` class def rides the
- * module (any emitter-typed value or `extends EventEmitter` subclass
- * references it, and the emitted RC/trace helpers call scr_emitter_*),
- * or an emitter.* libCall survived (the defaultMaxListeners statics carry
- * no emitter-typed value). Emitter-free programs pay zero bytes and keep
- * their exact link line. */
-export function moduleUsesEmitter(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "emitter").emitter;
-}
-
-/** True when the program touches the node:stream surface (scr_stream.c —
- * the moduleUsesEmitter story: the class defs ride the module whenever a
- * stream-typed value exists, and every stream libCall names its unit).
- * Stream programs always use the emitter unit too — the stream class
- * defs pull `%EventEmitter` through their base chain, so
- * moduleUsesEmitter answers true whenever this does. Stream-free
- * programs pay zero bytes and keep their exact link line. */
-export function moduleUsesStream(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "stream").stream;
-}
-
-/** True when the embedded npm graph has an edge into `builtin` — the
- * island shim needs the corresponding native bridge linked (zlib's is
- * the first; the emitted main installs it before any island entry). */
-export function moduleEmbedsBuiltin(mod: IrModule, builtin: string): boolean {
-  return mod.embedded !== undefined && mod.embedded.edges.some((e) => e.to === builtin);
-}
-
-/** Embedded module texts at least this long are DEFLATE-compressed into
- * the emitted LLVM (island.ts; each stays plain when deflate does not
- * shrink it) and inflated lazily by the island's module loader at first
- * load. Below it the zlib round trip cannot pay for itself. */
-export const NPM_COMPRESS_MIN = 1024;
-
-/** True when the emitted npm tables will carry compressed module text —
- * the SAME candidate test island.ts compresses by, so index.ts's
- * zlib link switch and emitter.ts's inflater installation stay in
- * lockstep with the emission (a candidate whose deflate happens not to
- * shrink stays plain; the installed inflater is then just unused). */
-export function moduleEmbedsCompressedNpm(mod: IrModule): boolean {
-  return (
-    mod.embedded !== undefined &&
-    mod.embedded.modules.some(
-      (m) => m.source.length >= NPM_COMPRESS_MIN || (m.esm ?? "").length >= NPM_COMPRESS_MIN,
-    )
-  );
-}
-
-/** True when the module contains any zlib libCall (the static lowering)
- * OR the embedded npm graph imports node:zlib (the island shim) — the
- * link switch that pulls scr_zlib.c + the system libz into the binary
- * (native-toolchain.ts); zlib-free programs keep their exact link line. Same
- * generic-walk shape as moduleUsesRegex: `kind`/`fn` discriminants live
- * only on IR objects. */
-export function moduleUsesZlib(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "zlib").zlib;
-}
-
-/** True when the module contains any dc.* libCall — the link switch that
- * pulls scr_dc.c (the diagnostics_channel registry and pub/sub) into the
- * binary (native-toolchain.ts). Channel-free binaries keep their exact size class.
- * Same walk shape as moduleUsesZlib. */
-export function moduleUsesDc(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "dc").dc;
-}
-
-/** True when the module contains any assert libCall — the link switch
- * that pulls scr_assert.c into the binary (native-toolchain.ts). scr_regex.c calls the
- * assert throw/inspect helpers (assert.match lives there), so the regex
- * switch also pulls scr_assert.c; assert-free, regex-free binaries keep
- * the historical command line and size. Same walk shape as
- * moduleUsesZlib. */
-export function moduleUsesAssert(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "assert").assert;
-}
-
-/** True when the module contains any dynInvoke node or dyn.defineProps
- * libCall — the link switch that pulls scr_dyn_invoke.c (the prototype-
- * method dispatch on dyn receivers, plus scr_dyn_display and
- * scr_dyn_define_props) into the binary (native-toolchain.ts; the assert gating
- * precedent — dispatch-free binaries keep their exact size class). Same
- * walk shape as moduleUsesZlib. */
-export function moduleUsesDynInvoke(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "dynInvoke").dynInvoke;
-}
-
-/** True when the module contains any insp libCall — the link switch that
- * pulls scr_inspect.c into the binary (native-toolchain.ts; the assert gating
- * precedent — inspect-free binaries keep the historical command line and
- * size class). Same walk shape as moduleUsesZlib. */
-/** True when the module needs scr_async_dyn.c — the checked-dynamic
- * async surfaces (dyn-promise then/catch/finally reactions, await of a
- * dyn value, `new Promise(setImmediate)`, AsyncLocalStorage, the
- * unhandledRejection/warning process events). Also pulled by the
- * dynInvoke and dc gates (their TUs call into this one) — native-toolchain.ts. Same
- * walk shape as moduleUsesZlib. */
-export function moduleUsesDynAsync(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "dynAsync").dynAsync;
-}
-
-export function moduleUsesInspect(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "inspect").inspect;
-}
-
-/** True when the module reaches child_process or carries one of its runtime
- * handle/result types. Besides the existing link consequence, this gates the
- * checked-dynamic ChildProcess handle table installed from scr_child.c. */
-export function moduleUsesChildProcess(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "childProcess").childProcess;
-}
-
-/** True when the module contains any net libCall — the link switch that
- * pulls scr_net.c into the binary and has the emitted main call
- * scr_net_install (native-toolchain.ts + emitter; the scr_events gating precedent).
- * Net-free programs pay zero bytes and keep their exact link line. Same
- * generic-walk shape as moduleUsesZlib. */
-export function moduleUsesNet(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "net").net;
-}
-
-/** True when the module contains any sym.* libCall or a symbol-kind type
- * anywhere in the IR — the link switch that pulls scr_symbol.c into the
- * binary (native-toolchain.ts; the scr_net gating precedent — no install call, the
- * Symbol.for registry initializes lazily). The TYPE check matters like
- * net's: a symbol-typed local whose initializer compiled to a runtime
- * fence still emits release calls that need the unit linked. Symbol-free
- * programs pay zero bytes and keep their exact link line. */
-export function moduleUsesSymbol(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "symbol").symbol;
-}
-
-/** True when bigint runtime operations or bigint-typed storage appears in
- * the IR. The type check keeps retain/release references link-safe even
- * when a producing statement was replaced by a runtime fence. */
-export function moduleUsesBigInt(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "bigint").bigint;
-}
-
-/** True when the module uses the URLSearchParams surface — sp.* libCalls,
- * the url.searchParams getter, or a searchParams-kind type anywhere on
- * the IR (a fenced statement can leave a typed local whose release call
- * still needs the unit linked) — the link switch that pulls
- * scr_url_params.c into the binary (the moduleUsesSymbol precedent: pure
- * data structure, no loop hooks, cross-compiles everywhere). sp-free
- * programs keep their exact link line; scr_url.c itself stays
- * always-linked and never references the unit. */
-export function moduleUsesSearchParams(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "searchParams").searchParams;
-}
-
-/** True when the module uses the node:querystring surface — the qs.*
- * libCalls that live in scr_qs.c (parse/stringify/unescape; qs.escape
- * emits the always-linked component encoder and deliberately does NOT
- * flip this switch) — the link switch that pulls scr_qs.c into the
- * binary (the moduleUsesSearchParams precedent: pure data transforms, no
- * loop hooks, cross-compiles everywhere). qs-free programs keep their
- * exact link line. Same generic-walk shape as moduleUsesZlib. */
-export function moduleUsesQs(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "qs").qs;
-}
-
-/** True when the module uses native util parsing, comparison, or styling.
- * The utility units also follow their required symbol, inspection, and
- * warning features, independently of the island's node:util shim. */
-export function moduleUsesParseArgs(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "parseArgs").parseArgs;
-}
-
-/** True when the module contains any fs.watch/watcher.* libCall — the
- * link switch that pulls scr_watch.c into the binary and has the emitted
- * main call scr_watch_install (native-toolchain.ts + emitter; the scr_net gating
- * precedent). Watch-free programs pay zero bytes and keep their exact
- * link line. Same generic-walk shape as moduleUsesZlib. */
-export function moduleUsesFsWatch(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "fsWatch").fsWatch;
-}
-
-/** True when the module contains any test.* libCall or a testCtx handle
- * type — the link switch that pulls scr_test.c into the binary and has
- * the emitted main return scr_test_exit_code() after the loop drains
- * (native-toolchain.ts + emitter; the moduleUsesDgram shape). Test-free programs pay
- * zero bytes and keep their exact link line. */
-export function moduleUsesNodeTest(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "nodeTest").nodeTest;
-}
-
-/** True when the module contains any dgram.* or dns.* libCall — the
- * link switch that pulls scr_dgram.c into the binary and has the emitted
- * main call scr_dgram_install (native-toolchain.ts + emitter; the scr_net gating
- * precedent — dns.lookup lives in the same unit, so either prefix
- * answers). Dgram-free programs pay zero bytes and keep their exact link
- * line. Same generic-walk shape as moduleUsesZlib. */
-export function moduleUsesDgram(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "dgram").dgram;
-}
-
-/** True when the module contains any http.* libCall — the link switch
- * that pulls scr_http.c into the binary (native-toolchain.ts; moduleUsesNet already
- * answers true for these, so scr_net.c comes along). */
-export function moduleUsesHttpServer(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "http").http;
-}
-
-/** The legacy http2.* libCalls implemented by scr_http.c/scr_tls.c (the
- * allowHTTP1 compatibility slice) — they must NOT pull scr_http2.c, so
- * divergence-57 binaries keep their exact link line. */
-const HTTP2_LEGACY_FNS = new Set([
-  "http2.streamNoop", "http2.streamUndefCall",
-]);
-
-/** True when the module uses the REAL h2 surface (scr_http2.c): any core
- * http2.* libCall, or an h2 handle type left behind by a fenced statement
- * (its emitted release call needs the unit — the moduleUsesNet story). */
-export function moduleUsesHttp2(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "http2").http2;
-}
-
-/** True when the module contains any tls.* or https.* libCall — the link
- * switch that pulls scr_tls.c and the vendored mbedTLS archive into the
- * binary (native-toolchain.ts; moduleUsesNet and moduleUsesHttpServer already answer
- * true for these, so scr_net.c and scr_http.c come along). TLS-free
- * programs keep their exact link line and never build mbedTLS. */
-export function moduleUsesTls(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "tls").tls;
-}
-
-/** True when the module contains any tlsca.* libCall — the link switch
- * for scr_tls_ca.c, the CA-store introspection unit (getCACertificates /
- * rootCertificates / setDefaultCACertificates). Deliberately SEPARATE
- * from moduleUsesTls: the unit is plain PEM-block bookkeeping, so a
- * program that only inspects the CA store never pulls mbedTLS. native-toolchain.ts
- * also compiles the unit whenever TLS itself links — scr_tls.c consults
- * the unit's default-set override for its trust anchors. */
-export function moduleUsesTlsCa(mod: IrModule): boolean {
-  return scanRuntimeFeatures(mod, "tlsCa").tlsCa;
-}
-
-/* ── library mode's async_free gate ──────────────────────────────────────
- * v1 library mode REQUIRES an async_free module graph (ratified): no async
- * functions, no generators, no timers, no event-loop or ambient-process
- * surface anywhere the entry reaches — a static fact of the graph, never a
- * runtime observation. The detector below answers "what does this graph
- * reach that a library artifact cannot link?", first offender with its source anchor;
- * the structural consequence (scr_async.c / scr_child.c and every
- * loop-hooked unit never join a library link) is safe exactly because this
- * refusal ran first. */
-
-/** libCall families a v1 library artifact refuses, with the surface name the SC4005
- * teaching uses. Prefix match over IrLibFn spellings. */
-const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
-  // fs.exists is the one CALLBACK-async fs op with a real implementation:
-  // its fire rides the timer queue (scr_bytes_io.c), which library links
-  // exclude — refuse the surface like the rest of the event-loop family.
-  ["fs.existsChk", "the async fs callback surface (fs.exists)"],
-  ["fs.renameCb", "the async fs callback surface (fs.rename)"],
-  ["fs.callback", "the async filesystem callback surface"],
-  ["zlib.deflateCb", "the async node:zlib callback surface"],
-  ["zlib.inflateCb", "the async node:zlib callback surface"],
-  ["zlib.deflateRawCb", "the async node:zlib callback surface"],
-  ["zlib.inflateRawCb", "the async node:zlib callback surface"],
-  ["zlib.gzipCb", "the async node:zlib callback surface"],
-  ["zlib.gunzipCb", "the async node:zlib callback surface"],
-  ["zlib.unzipCb", "the async node:zlib callback surface"],
-  ["process.stdoutWriteBytesCb", "process.stdout.write completion callbacks"],
-  ["process.stderrWriteBytesCb", "process.stderr.write completion callbacks"],
-  ["timers.", "the timers surface (setTimeout family)"],
-  ["tp.", "the timers/promises surface"],
-  ["cp.", "the child_process surface"],
-  ["child.", "the child_process surface"],
-  ["spawnRes.", "the child_process surface"],
-  ["process.on", "process signal/exit listeners"],
-  ["process.off", "process signal/exit listeners"],
-  ["stdin.", "the stdin event surface"],
-  ["rl.", "the node:readline surface"],
-  ["net.", "the node:net surface"],
-  ["http.", "the node:http surface"],
-  ["https.", "the node:https surface"],
-  ["http2.", "the node:http2 surface"],
-  ["h2.", "the node:http2 surface"],
-  ["dgram.", "the node:dgram surface"],
-  ["dns.", "the node:dns surface"],
-  ["tls.", "the node:tls surface"],
-  ["fs.watch", "fs.watch"],
-  ["watcher.", "fs.watch"],
-  ["test.", "the node:test surface"],
-  ["readable.", "the node:stream surface"],
-  ["writable.", "the node:stream surface"],
-  ["duplex.", "the node:stream surface"],
-  ["transform.", "the node:stream surface"],
-  ["passthrough.", "the node:stream surface"],
-  ["stream.", "the node:stream surface"],
-  ["als.", "AsyncLocalStorage"],
-  ["urj.", "unhandled-rejection tracking"],
-  ["dc.", "the diagnostics_channel surface"],
-];
-
-/** Value/type kinds whose mere presence means an excluded unit's code (or
- * a fiber) would have to link. */
-const LIB_MODE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
-  ["promise", "promise values"],
-  ["generator", "generator values"],
-  ["awaitExpr", "await"],
-  ["awaitUnionExpr", "await"],
-  ["yieldExpr", "yield"],
-  ["child", "the child_process surface"],
-  ["spawnRes", "the child_process surface"],
-  ["childStream", "the child_process surface"],
-  ["childWriter", "the child_process surface"],
-  ["netServer", "the node:net surface"],
-  ["netSocket", "the node:net surface"],
-  ["http2Session", "the node:http2 surface"],
-  ["http2Stream", "the node:http2 surface"],
-  ["dgramSocket", "the node:dgram surface"],
-  ["fsWatcher", "fs.watch"],
-  ["testCtx", "the node:test surface"],
-  ["httpReq", "the node:http surface"],
-  ["httpRes", "the node:http surface"],
-  ["httpClientReq", "the node:http surface"],
-  ["secureCtx", "the node:tls surface"],
-]);
-
-/** First async/event-loop/ambient-process surface the module graph
- * reaches, or null when the graph is async_free (the v1 library requirement).
- * Typed slots use their declaration location and executable nodes use their
- * own location, so the refusal anchors at the reaching construct; the
- * coarse moduleUses* predicates are the safety net behind the fine-grained
- * table (a surface reached only through a spelling the table misses still
- * refuses, anchored at the entry). */
-export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
-  for (const fn of mod.functions) {
-    if (fn.async === true) return { surface: `an async function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
-    if (fn.generator !== undefined) {
-      return { surface: `a generator function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
-    }
-  }
-  const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
-  let found: { surface: string; loc: SrcLoc } | null = null;
-  const checkKind = (kind: string, loc: SrcLoc): boolean => {
-    const surface = LIB_MODE_REFUSED_KINDS.get(kind);
-    if (surface === undefined) return true;
-    found = { surface, loc };
-    return false;
-  };
-  everyModuleNode(mod, {
-    type: (node, loc) => checkKind(node.kind, loc),
-    stmt: () => true,
-    expr: (node) => {
-      if (!checkKind(node.kind, node.loc)) return false;
-      if (node.kind === "libCall") {
-        for (const [prefix, surface] of LIB_MODE_REFUSED_PREFIXES) {
-          if (node.fn.startsWith(prefix)) {
-            found = { surface, loc: node.loc };
-            return false;
-          }
-        }
-      }
-      return true;
-    },
-  });
-  if (found !== null) return found;
-  // Safety net: the coarse unit predicates, entry-anchored. Every one of
-  // these units is excluded from library links, so a true answer that the
-  // fine-grained table missed must still refuse.
-  const features = moduleRuntimeFeatures(mod);
-  const coarse: [boolean, string][] = [
-    [features.processEvents, "process signal/exit listeners or the stdin event surface"],
-    [features.net, "the node:net surface"],
-    [features.http, "the node:http surface"],
-    [features.http2, "the node:http2 surface"],
-    [features.dgram, "the node:dgram surface"],
-    [features.fsWatch, "fs.watch"],
-    [features.stream, "the node:stream surface"],
-    [features.tls, "the node:tls surface"],
-    [features.fetch, "fetch"],
-    [features.nodeTest, "the node:test surface"],
-    [features.dynAsync, "the checked-dynamic async surface"],
-    [features.dc, "the diagnostics_channel surface"],
-  ];
-  for (const [on, surface] of coarse) {
-    if (on) return { surface, loc: entryLoc };
-  }
-  return null;
-}
-
-/* ── the sidecar's determinism attestation ───────────────────────────────
- * `deterministic` is true exactly when the compiled module graph reaches
- * no ambient-nondeterminism or ambient-authority surface (random, live
- * clock, environment, filesystem, machine identity) — a static fact of
- * the graph, proven at compile time, never a runtime hope. Network,
- * timers, scheduling, and child processes are already impossible here:
- * the SC4005 async_free gate refused them before any library artifact
- * emitted. The scan is CONSERVATIVE by design: an ambient family reached
- * anywhere in the graph demotes the attestation even when a finer
- * analysis might prove the specific call pure (e.g. date formatting of a
- * stored value) — the attestation may honestly under-claim, never
- * over-claim (schema rule V14: computed, never defaulted). */
-
-/** libCall families that demote `deterministic` (prefix match over
- * IrLibFn spellings). process.stdout/stderr writes are deliberately NOT
- * here: output is an effect, not a nondeterminism input, and console
- * policy is the profile's ask-5 business. process.platform/arch and the
- * version constants fold at compile time, so they are per-binary
- * constants, not ambient reads. Exported for the attestation-parity test
- * (tests/harness/surface-manifest.test.ts): every spelling this table
- * demotes on must be deniable by a manifest-id fence, or the ask-5 §4
- * invariant (compiles under full fences ⇒ deterministic) cannot be
- * stated. */
-export const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
-  ["math.random", "Math.random"],
-  ["crypto.random", "crypto randomness"],
-  ["date.", "the live clock (Date)"],
-  ["perf.", "the live clock (performance)"],
-  ["process.env", "environment reads"],
-  ["process.argv", "process.argv"],
-  ["process.cwd", "process.cwd"],
-  ["process.chdir", "process.chdir"],
-  ["process.pid", "process identity"],
-  ["process.getuid", "process identity"],
-  ["process.getgid", "process identity"],
-  ["process.execPath", "process identity"],
-  ["process.uptime", "the live clock (process.uptime)"],
-  ["process.availableMemory", "machine memory state"],
-  ["process.constrainedMemory", "machine memory state"],
-  // process.memoryUsage carries NO row: nothing lowers it — no IrLibFn
-  // spelling exists for it, so a prefix here would be dead. If a lowering
-  // ever lands, its spellings must join this table AND the manifest's
-  // ambient projection (the parity test fails until both agree).
-  ["process.rusage", "machine resource usage (process.resourceUsage)"],
-  ["process.cpu", "the process CPU clock (process.cpuUsage)"],
-  ["process.threadCpu", "the thread CPU clock (process.threadCpuUsage)"],
-  ["process.isTTY", "terminal attachment (isTTY)"],
-  ["process.columns", "terminal geometry (columns)"],
-  ["process.rows", "terminal geometry (rows)"],
-  ["process.kill", "process authority (kill)"],
-  ["process.umask", "process authority (umask)"],
-  ["process.exit", "process authority (exit)"],
-  ["process.setExitCode", "process authority (exit status)"],
-  ["fs.", "the filesystem"],
-  ["os.", "machine/OS identity"],
-  // The CA-store surface reads the host's certificate bundle (and the
-  // NODE_EXTRA_CA_CERTS environment) — machine identity by another name.
-  ["tlsca.", "the host CA store"],
-];
-
-/** First ambient-nondeterminism or ambient-authority surface the module
- * graph reaches, or null when the graph is clean (the sidecar then
- * attests `deterministic: true`). */
-export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
-  let found: string | null = null;
-  const expr = (node: IrExpr): boolean => {
-    if (node.kind === "libCall") {
-      for (const [prefix, surface] of LIB_NONDETERMINISTIC_PREFIXES) {
-        if (node.fn.startsWith(prefix)) {
-          found = surface;
-          return false;
-        }
-      }
-    }
-    return everyExprChild(node, expr, stmt);
-  };
-  const stmt = (node: IrStmt): boolean => everyStmtChild(node, expr, stmt);
-  for (const fn of mod.functions) {
-    if (!fn.body.every(stmt)) break;
-  }
-  return found;
-}
-
-/** The may-throw seed: libCall members that can raise. Every fs.* member
- * EXCEPT existsSync (which, like Node's, swallows errors and returns false)
- * throws a catchable error on failure; json.parse throws a catchable
- * SyntaxError-shaped string on malformed input. Backends' may-throw analyses must treat a function containing one
- * of these as throwing, exactly like a `throw` statement (and must ALSO
- * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
- * failure / promise rejection). */
-export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "text.encodeInto",
-  "buffer.isAscii",
-  "buffer.isUtf8",
-  "buffer.transcode",
-  "cp.spawnDynamic",
-  "child.onDyn",
-  "text.decoderEncoding",
-  "dyn.construct",
-  "dyn.reflectApply",
-  "dyn.reflectGet",
-  "dyn.reflectSet",
-  "dyn.reflectDefine",
-  "dyn.abstractEq",
-  "text.decodeOptions",
-  "text.decodeStream",
-  "text.decodeLegacyOptions",
-  "dyn.nativeSetNew",
-  "ffi.argument",
-  "ffi.memoryModule",
-  "process.stdoutWrite",
-  "process.stderrWrite",
-  "process.stdoutWriteBytes",
-  "process.stderrWriteBytes",
-  "procStream.write",
-  "weakMap.new",
-  "weakSet.new",
-  "dyn.fromEntries",
-  "bytes.constructor",
-  "bytes.instanceOf",
-  "buffer.byteLenDyn",
-  "bytes.construct",
-  "arrayBuffer.new",
-  "arrayBuffer.byteLengthGetter",
-  "arrayBuffer.viewU8C",
-  "arrayBuffer.viewI8",
-  "arrayBuffer.viewU16",
-  "arrayBuffer.viewI16",
-  "arrayBuffer.viewU8",
-  "arrayBuffer.viewU32",
-  "arrayBuffer.viewI32",
-  "arrayBuffer.viewF32",
-  "arrayBuffer.viewF64",
-  "arrayBuffer.viewDV",
-  "bytes.bufferSource",
-  "text.decodeBufferSource",
-
-  "bigint.parse",
-  "bigint.fromF64",
-  "bigint.div",
-  "bigint.mod",
-  "bigint.pow",
-  "bigint.shl",
-  "bigint.shr",
-  "bigint.toString",
-  "bigint.asUintN",
-  "bigint.asIntN",
-  "bigint.bufferRead",
-  "bigint.bufferWrite",
-  "bigint.dataViewGet",
-  "bigint.dataViewSet",
-  "fetch.requestNew",
-  "fetch.headersNew",
-  "fetch.responseNew",
-  "fetch.abortTimeout",
-  "fetch.abortAny",
-  "abort.timeout",
-  "abort.any",
-  "fetch.streamNew",
-  "fetch.streamFrom",
-  "num.toFixed",
-  "num.toStringRadix",
-  "insp.jsonDyn",
-  // diagnostics_channel: publish runs subscribers synchronously (a throw
-  // propagates — the documented divergence from triggerUncaughtException);
-  // the subscribe/unsubscribe forms throw Node's ERR_INVALID_ARG_TYPE for
-  // non-function subscribers.
-  "dc.publish",
-  "dc.subscribe",
-  "dc.unsubscribe",
-  "dc.chanSubscribe",
-  "dc.chanUnsubscribe",
-  "dc.tcSubscribe",
-  "dc.tcUnsubscribe",
-  "dc.tcTraceSync",
-  "dc.tcTraceCallback",
-  "dc.tcTracePromise",
-  "process.onUncaughtException",
-  "process.offUncaughtException",
-  "process.onSignal",
-  "process.offSignal",
-  "process.onUnhandledRejection",
-  "process.onRejectionHandled",
-  "async.awaitDyn",
-  "als.run",
-  "als.exitRun",
-  "dc.chanBindStore",
-  "dc.chanRunStores",
-  "http.resWriteHeadDyn",
-  "http.resWriteContinue",
-  "http.resWriteProcessing",
-  "http.resWriteEarlyHints",
-  "http.validateHeaderName",
-  "http.validateHeaderValue",
-  "http.serverTimeoutGet",
-  "http.serverTimeoutOptionSet",
-  "net.sockSetEncoding",
-  "http.reqSetEncoding",
-  "fs.readFileSyncBuf",
-  "fs.readFileSyncDyn",
-  // tls/https runtime options records: the walks throw the catchable
-  // runtime fence for out-of-bounds members and non-PEM values (the
-  // divergence-66 stance).
-  "tls.pemDyn",
-  "tls.createServerDyn",
-  "tls.createSecureContextDyn",
-  "tls.caCertsChk",
-  "tls.createServerDynCb",
-  "https.createServerDyn",
-  "https.createServerDynCb",
-  "http2.createSecureServerDyn",
-  "http2.createSecureServerDynCb",
-  "tls.connect",
-  "tls.connectCb",
-  // The CA-store surface: an unknown getCACertificates type throws
-  // Node's ERR_INVALID_ARG_VALUE TypeError; setDefaultCACertificates
-  // throws Node's ERR_CRYPTO_OPERATION_FAILED on a certificate-free
-  // array.
-  "tlsca.get",
-  "tlsca.set",
-  // EventEmitter dispatch runs user listeners synchronously (emit), and
-  // the mutation forms fire the newListener/removeListener meta events —
-  // any of them can throw. emitError additionally THROWS its payload when
-  // 'error' has no listener, Node's unhandled-'error' contract.
-  "emitter.emit",
-  "emitter.emitFlex",
-  "emitter.emitError",
-  "emitter.on",
-  "emitter.off",
-  "emitter.checkListener",
-  "emitter.onDyn",
-  "emitter.onFlex",
-  "emitter.offDyn",
-  "emitter.onData",
-  "emitter.onDataDyn",
-  "emitter.emitData",
-  "readable.nextChunk",
-  "readable.nextChunkDyn",
-  // The checked-dynamic chunk forms throw Node's ERR_INVALID_ARG_TYPE
-  // chunk TypeError on a non-string/Buffer dyn kind.
-  "net.sockWriteDyn",
-  "net.sockEndDyn",
-  "http.resWriteDyn",
-  "http.resEndDyn",
-  "http.resAddTrailers",
-  "http.resFlushHeaders",
-  "http.resUncork",
-  "http.resWriteHead",
-  "http.resWriteHeadN",
-  "http.resWriteHeadPairs",
-  "http.resWrite",
-  "http.resWriteBytes",
-  "http.resEnd",
-  "http.resEndStr",
-  "http.resEndBytes",
-  "http.clientWriteDyn",
-  "http.clientEndDyn",
-  "http.clientAddTrailers",
-  "http.clientFlushHeaders",
-  "http.clientUncork",
-  "http.clientWrite",
-  "http.clientWriteBytes",
-  "http.clientEnd",
-  "http.clientEndStr",
-  "http.clientEndBytes",
-  // The URL-string client form throws catchably on an unparsable input
-  // ("Invalid URL") or a non-http scheme (ERR_INVALID_PROTOCOL).
-  "http.requestUrl",
-  "http.requestUrlCb",
-  // The h2 client's throwing entries: connect on a bad/non-http
-  // authority (ERR_INVALID_URL / ERR_INVALID_PROTOCOL), request on a
-  // closed/destroyed session (ERR_HTTP2_INVALID_SESSION), setEncoding on
-  // an unknown name (ERR_UNKNOWN_ENCODING). Event fires run user code
-  // synchronously (the stream-operations stance below), so the data/
-  // write paths that can fire inline join too.
-  "http2.connect",
-  "http2.connectCb",
-  "http2.sessionRequest",
-  "http2.streamSetEncoding",
-  "http2.streamRespond",
-  "http2.streamWrite",
-  "http2.streamWriteBytes",
-  "http2.streamEnd",
-  "http2.streamEndStr",
-  "http2.streamEndBytes",
-  "emitter.removeAll",
-  // Stream operations run user code synchronously (option callbacks and
-  // 'data'/'drain'/... listeners on the caller's stack, like emit) — any
-  // of them may leave a listener's throw pending. destroy with no 'error'
-  // listener throws the payload itself (the emitter.emitError contract).
-  // The dyn-options constructors walk the record at runtime: a consumed-
-  // but-unlowered option (objectMode, construct, ...) throws the compile
-  // fence's runtime twin; a bad encoding throws ERR_UNKNOWN_ENCODING.
-  "stream.finished",
-  "stream.finishedDyn",
-  "stream.pipeline",
-  "stream.pipelineDyn",
-  "sp.finished",
-  "sp.pipeline",
-  "sc.text",
-  "sc.json",
-  "sc.buffer",
-  "readable.newDyn",
-  "writable.newDyn",
-  "duplex.newDyn",
-  "transform.newDyn",
-  "passthrough.newDyn",
-  "readable.initDyn",
-  "writable.initDyn",
-  "duplex.initDyn",
-  "transform.initDyn",
-  "passthrough.initDyn",
-  "readable.push",
-  "readable.pushStr",
-  "readable.pushStrEnc",
-  "readable.pushNull",
-  "readable.pushU",
-  "readable.pushDyn",
-  "readable.unshift",
-  "readable.unshiftStr",
-  "readable.read",
-  "readable.readDyn",
-  "stream.onDyn",
-  "readable.resume",
-  "readable.pipe",
-  "readable.unpipe",
-  "writable.write",
-  "writable.writeStr",
-  "writable.writeU",
-  "writable.writeDyn",
-  "writable.end",
-  "writable.uncork",
-  "stream.destroy",
-  "stream.destroyErr",
-  "stream.iteratorClose",
-  // setMaxListeners(n) throws Node's ERR_OUT_OF_RANGE RangeError for
-  // negative/NaN arguments; the static form's default-max write validates
-  // identically (Node's validateNumber(n, "setMaxListeners", 0)).
-  "emitter.setMax",
-  "emitter.setDefaultMax",
-  // The createConnection request forms run the caller's dialer closure
-  // synchronously — a throw there propagates like Node's.
-  "http.requestConn",
-  "http.requestConnCb",
-  "process.kill",
-  "process.killNum",
-  "process.setExitCode",
-  // cpuUsage(prev)'s field validation: negative/non-finite prev fields
-  // throw Node's ERR_INVALID_ARG_VALUE RangeError, catchably.
-  "process.cpuPrevValidate",
-  // Non-TTY stdin: Node's stdin has no setRawMode member, so the call is
-  // the exact catchable TypeError.
-  "process.stdinSetRawMode",
-  // The unguarded h2-only stream call: always throws Node's TypeError.
-  "http2.streamUndefCall",
-  "http.reqH2StreamOrThrow",
-  // A read of a declare-d const nothing defines: always throws Node's
-  // catchable ReferenceError.
-  "global.undefRead",
-  // The compiler-resolved Node-parity throw: always throws, catchably.
-  "error.nodeThrow",
-  // USVString coercion runs user toString/valueOf — throws propagate.
-  "dyn.toStringCoerce",
-  "dyn.stringConstructor",
-  "dyn.propertyKey",
-  "dyn.toNumeric",
-  "dyn.increment",
-  // Error messages use the same coercion protocol before installing cause.
-  "error.newOptions",
-  "error.ctorOptions",
-  "error.toString",
-  "error.stack",
-  "error.cause",
-  "error.setCause",
-  "error.deleteCause",
-  "dyn.objectTag",
-  // Numeric coercion runs user valueOf/toString — throws propagate.
-  "dyn.numberConstructor",
-  "dyn.bigintConstructor",
-  "dyn.toNumberCoerce",
-  "dyn.add",
-  "dyn.arithmetic",
-  "dyn.compare",
-  "dyn.bitwise",
-  "dyn.proxyNew",
-  "dyn.classBasePrototype",
-  "dyn.classInherit",
-  "dyn.classSuper",
-  "dyn.hasKey",
-  "child.kill",
-  // The caller's lookup runs synchronously inside the connect call — a
-  // throw there propagates like Node's.
-  "net.connectLookup",
-  "cp.execSync",
-  "cp.execCapture",
-  // The client request constructors validate the method token
-  // synchronously (Node's ClientRequest ctor throw:
-  // ERR_INVALID_HTTP_TOKEN).
-  "http.request",
-  "http.requestCb",
-  "http.requestConn",
-  "http.requestConnCb",
-  // The agent rows add the runtime agent-value gates (a non-Agent value
-  // is Node's ERR_INVALID_ARG_TYPE); agentNew's keepAlive: true throws
-  // the named pooling fence.
-  "http.agentNew",
-  "http.requestAgent",
-  "http.requestAgentCb",
-  "https.requestAgent",
-  "https.requestAgentCb",
-  "https.request",
-  "https.requestCb",
-  // The URL-string form's parse, exactly http.requestUrl's (an
-  // unparsable input, or a scheme that is not https).
-  "https.requestUrl",
-  "https.requestUrlCb",
-  "https.requestFn",
-  "https.requestFnCb",
-  "rl.question",
-  "island.eval",
-  "island.import",
-  "island.castFail",
-  "json.parse",
-  "json.parseReviver",
-  "json.stringifyReplacer",
-  "json.stringifyValue",
-  "date.nativeNew",
-  "date.checkedValue",
-  "util.parseArgs",
-  "util.parseEnv",
-  "util.getSystemErrorName",
-  "util.getSystemErrorMessage",
-  "util.stripVTControlCharacters",
-  "util.isDeepStrictEqual",
-  "util.styleText",
-  "util.toUSVString",
-  // decodeURIComponent throws the spec's URIError on bad hex/invalid
-  // UTF-8 octets (encodeURIComponent never throws — see the IrLibFn doc).
-  "str.decodeUriComponent",
-  "str.decodeUri",
-  // The base64 globals: atob/btoa throw the catchable DOMException
-  // InvalidCharacterError on malformed input; the zero-argument form
-  // always throws Node's TypeError [ERR_MISSING_ARGS].
-  "str.atob",
-  "str.btoa",
-  "str.b64Missing",
-  // queueMicrotask's checked-dynamic form throws ERR_INVALID_ARG_TYPE
-  // synchronously on a non-function argument (the closure form never
-  // throws — the callback's own throw surfaces at drain, uncaught).
-  "timers.queueMicrotaskDyn",
-  // structuredClone: option validation throws Node's TypeErrors,
-  // functions/handles the spec's DataCloneError, cycles the scriptc
-  // fence; the zero-argument form always throws ERR_MISSING_ARGS. The
-  // DOMException clone shares the option validation.
-  "dyn.structuredClone",
-  "dyn.cloneMissing",
-  "dyn.cloneTransferFail",
-  // the dyn Object walks throw on null/undefined receivers
-  "dyn.objKeys",
-  "dyn.forInKeys",
-  "dyn.hasOwn",
-  "dyn.propertyIsEnumerable",
-  "dyn.assign",
-  "dyn.copyDataProperties",
-  "dyn.objectRest",
-  // variadic Object.assign: spread flattening throws V8's spread-call
-  // TypeErrors; the final copy throws ToObject on a nullish target
-  "dyn.packPushSpread",
-  "dyn.packPushSpreadIter",
-  "dyn.assignAll",
-  "dyn.objCreate",
-  "dyn.objCreateWithProperties",
-  "dyn.getPrototype",
-  "dyn.setPrototype",
-  "dyn.getOwnPropertyNames",
-  "dyn.ownKeys",
-  "dyn.getOwnPropertySymbols",
-  "dyn.getOwnPropertyDescriptors",
-  "dyn.preventExtensions",
-  "dyn.isExtensible",
-  "dyn.seal",
-  "dyn.isSealed",
-  "dyn.objValues",
-  "dyn.objEntries",
-  "error.domClone",
-  // new RegExp compiles the pattern eagerly: an invalid pattern or flag
-  // throws Node's catchable SyntaxError at construction.
-  "regex.new",
-  "regex.resetLastIndex",
-  "regex.newChecked",
-  "dyn.keySet",
-  "dyn.keySetComputed",
-  "process.builtinId",
-  "process.builtinModule",
-  "process.builtinUnsupported",
-  "fs.callbackValue",
-  "fs.callbackCall",
-  "dyn.keyDelete",
-  "dyn.keyDeleteComputed",
-  "dyn.hasKeyComputed",
-  "dyn.hasOwnComputed",
-  "dyn.propertyIsEnumerableComputed",
-  // the destructuring pack throws V8's TypeError on non-iterable dyn kinds
-  "dyn.iterPack",
-  "dyn.arrayFromIterator",
-  "dyn.iterator",
-  "dyn.iteratorResult",
-  "dyn.mapSeedEntries",
-  "dyn.mapSeedEntry",
-  "dyn.freeze",
-  "dyn.isFrozen",
-  "dyn.toString",
-  "string.fromCodePoint",
-  "dyn.defineProps",
-  "dyn.definePrototypeProps",
-  "dyn.bagGet",
-  "dyn.bagSet",
-  "dyn.defineProperty",
-  "dyn.getOwnPropertyDescriptor",
-  "dyn.arrayProtoCall",
-  "process.chdir",
-  "process.loadEnvFile",
-  "fs.realpathSync",
-  "fs.realpathNativeSync",
-  "fs.readFileSync",
-  "fs.writeFileSync",
-  "fs.appendFileSync",
-  "fs.mkdirSync",
-  "fs.rmSync",
-  "fs.rmdirSync",
-  "fs.readdirSync",
-  "fs.readdirTypesSync",
-  "url.new",
-  "url.newBase",
-  "url.set",
-  "url.setChecked",
-  "url.fileURLToPathUrl",
-  "url.fileURLToPathChecked",
-  "url.fileURLToPathOptions",
-  "url.fileURLToPathBuffer",
-  "url.pathToFileURLChecked",
-  "url.fileURLToPathStr",
-  // The win32-target flavor of pathToFileURL (same runtime entry point —
-  // the bridge dispatches by the binary's platform): Node's win32 arm
-  // raises ERR_INVALID_ARG_VALUE TypeErrors for malformed UNC inputs, so
-  // only THIS flavor seeds may-throw — posix emission stays untouched.
-  "url.pathToFileURLWin32",
-  "url.pathToFileURLPlatform",
-  // URLSearchParams from a string[][]: Node's ERR_INVALID_TUPLE TypeError
-  // on a row that is not a [name, value] pair. The rest of the sp family
-  // never throws.
-  "sp.fromPairs",
-  "sp.newChecked",
-  "fs.statSync",
-  "crypto.randomBytesToString",
-  "crypto.randomBytes",
-  "crypto.hashDigestStr",
-  "crypto.hashDigestBytes",
-  "crypto.hashNew",
-  "crypto.hmacNewStr",
-  "crypto.hmacNewBytes",
-  "crypto.hashUpdateStr",
-  "crypto.hashUpdateBytes",
-  "crypto.hmacUpdateStr",
-  "crypto.hmacUpdateBytes",
-  "crypto.hashCopy",
-  "crypto.hashDigestString",
-  "crypto.hashDigestBuffer",
-  "crypto.hmacDigestString",
-  "crypto.hmacDigestBuffer",
-  "crypto.timingSafeEqual",
-  "crypto.randomFill",
-  "crypto.randomFillRest",
-  "crypto.randomInt",
-  "crypto.pbkdf2",
-  "crypto.randomBytesCb",
-  "crypto.pbkdf2Cb",
-  "crypto.hkdf",
-  "crypto.hkdfCb",
-  "crypto.scrypt",
-  "crypto.scryptCb",
-  "buffer.concat",
-  "buffer.concatLen",
-  "buffer.fromDyn",
-  // The checked-dynamic compare/equals validators: Node's argument
-  // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.
-  "buffer.compareChk",
-  "bytes.equalsChk",
-  "bytes.compareChk",
-  "buffer.newStringFail",
-  "fs.toUnixTimestamp",
-  "fs.existsChk",
-  "fs.mkdtempChk",
-  "fs.mkdtempSyncChk",
-  "fs.readFileChk",
-  "fs.opendirChk",
-  "fs.watchFileChk",
-  "fs.lchmodChk",
-  "fs.lchmodSyncChk",
-  "fsp.lchmodChk",
-  "fs.readChk",
-  "fs.streamOptsChk",
-  "net.connectAttempt",
-  "net.connectOptsChk",
-  "net.setAutoSelTimeout",
-  "error.argTypeThrow",
-  "error.propTypeThrow",
-  "emitter.setMaxChk",
-  "emitter.setDefaultMaxChk",
-  "fs.readFileSyncBytes",
-  "fs.writeFileSyncBytes",
-  "fs.appendFileSyncBytes",
-  "zlib.inflateSync",
-  "zlib.inflateRawSync",
-  "zlib.gunzipSync",
-  "zlib.unzipSync",
-  "zlib.crc32",
-  "date.toISOString",
-  "date.toISOStringValue",
-  "fs.mkdirRecursiveSync",
-  "fs.rmOptsSync",
-  "fs.rmRetrySync",
-  "fs.mkdtempSync",
-  "fs.accessSync",
-  "fs.readFdSync",
-  "fs.readFdSyncBytes",
-  // node:dgram state errors (Node throws synchronously): bind on a bound
-  // socket, connect on a connected one, send/close/address on a closed or
-  // never-bound one.
-  "dgram.bind",
-  "dgram.bindCb",
-  "dgram.connect",
-  "dgram.connectCb",
-  "dgram.sendStr",
-  "dgram.sendBytes",
-  "dgram.sendChk",
-  "dgram.address",
-  "dgram.close",
-  "dgram.closeCb",
-  // The assert surface: every entry point except sameValue, bytesDeepEq,
-  // and the shape accumulator's begin/slot/test calls throws the
-  // catchable AssertionError on failure.
-  "assert.ok",
-  "assert.eqF64",
-  "assert.eqBigInt",
-  "assert.eqStr",
-  "assert.eqBool",
-  "assert.eqSym",
-  "assert.eqDyn",
-  "assert.looseResult",
-  "assert.deepResult",
-  "assert.match",
-  "assert.refEqBytes",
-  "assert.refEqFn",
-  "assert.throwsNone",
-  "assert.throwsMismatch",
-  "assert.throwsRegex",
-  "assert.shapeEnd",
-  "assert.unwantedRejection",
-  "assert.unwantedError",
-  "assert.noErrorPredicate",
-  "assert.regexDynTest",
-  "assert.expectsErrDyn",
-  "assert.ifErrorErr",
-  "assert.ifErrorF64",
-  "assert.ifErrorStr",
-  "assert.ifErrorBool",
-  "assert.ifErrorDyn",
-  // util.inspect of an island `any` composite: the runtime tag is all
-  // there is, so the honest answer is a catchable TypeError.
-  "insp.jsval",
-  // The wider sync fs slice: same catchable errno throws as the rest.
-  "fs.unlinkSync",
-  "fs.chmodSync",
-  "fs.chownSync",
-  "fs.copyFileSync",
-  "fs.renameSync",
-  "fs.lstatSync",
-  "fs.fstatSync",
-  "fs.fchmodSync",
-  "fs.fsyncSync",
-  "fs.fdatasyncSync",
-  "fs.ftruncateSync",
-  "fs.utimesSync",
-  "fs.futimesSync",
-  "fs.lutimesSync",
-  "fs.readvSync",
-  "fs.writevSync",
-  "fs.linkSync",
-  "fs.symlinkSync",
-  "fs.readlinkSync",
-  "fs.statfsSync",
-  "fs.readlinkSyncStr",
-  "fs.readlinkSyncBuffer",
-  "fs.writeFileModeSync",
-  "fs.mkdirModeSync",
-  "fs.mkdirRecursiveModeSync",
-  "fs.openSync",
-  "fs.openNumericSync",
-  "fs.readSync",
-  "fs.writeSync",
-  "fs.writeStrSync",
-  "fs.closeSync",
-  "fs.watch",
-  "fs.watchCb",
-  "crypto.x509Fingerprint",
-  "crypto.x509FingerprintStr",
-  "crypto.x509ValidFrom",
-  "crypto.x509ValidFromStr",
-  "crypto.x509ValidTo",
-  "crypto.x509ValidToStr",
-]);

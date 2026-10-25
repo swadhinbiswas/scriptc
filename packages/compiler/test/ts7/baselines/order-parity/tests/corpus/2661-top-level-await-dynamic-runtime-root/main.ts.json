@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2661-top-level-await-dynamic-runtime-root/main.ts"
+ ],
+ "diags": []
+}

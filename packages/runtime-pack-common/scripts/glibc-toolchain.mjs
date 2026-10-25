@@ -17,7 +17,6 @@ export function glibcRuntimeToolchain(architecture) {
     archiver: "zig",
     archiverArgs: ["ar"],
     targetArgs: ["-target", `${targetArchitecture}-linux-gnu.${GLIBC_RUNTIME_FLOOR}`],
-    compilerFlags: ["-fno-sanitize=undefined"],
-    forbiddenArtifactStrings: ["__isoc23_", "__ubsan_"],
+    forbiddenArtifactStrings: ["__isoc23_"],
   };
 }

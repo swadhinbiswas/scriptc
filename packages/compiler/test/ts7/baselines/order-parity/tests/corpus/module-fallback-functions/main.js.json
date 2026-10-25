@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/module-fallback-functions/platform.js",
+  "<repo>/tests/corpus/module-fallback-functions/main.js"
+ ],
+ "diags": []
+}

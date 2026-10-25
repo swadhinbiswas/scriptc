@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4905-bigint-fixed-width-fusion.ts"
+ ],
+ "diags": []
+}

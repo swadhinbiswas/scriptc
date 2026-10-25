@@ -12,7 +12,9 @@ import { release as osRelease, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 
-const supported = process.platform === "darwin" && process.arch === "arm64" &&
+const supported =
+  process.platform === "darwin" &&
+  process.arch === "arm64" &&
   Number.parseInt(osRelease().split(".", 1)[0] ?? "", 10) >= 24;
 const repoRoot = join(import.meta.dirname, "../..");
 const fixture = join(repoRoot, "examples/native-object");
@@ -28,34 +30,43 @@ describe.runIf(supported)("external native object example", () => {
     const linkInfo = join(scratch, "stale-link-info.json");
     mkdirSync(runtimeRoot, { recursive: true });
     mkdirSync(traps, { recursive: true });
-    writeFileSync(join(runtimeRoot, "package.json"), JSON.stringify({
-      name: "@scriptc/runtime",
-      version: "2.0.0",
-    }));
+    writeFileSync(
+      join(runtimeRoot, "package.json"),
+      JSON.stringify({
+        name: "@scriptc/runtime",
+        version: "2.0.0",
+      }),
+    );
     const clang = join(traps, "clang");
     writeFileSync(clang, `#!/bin/sh\nprintf invoked > '${trapLog}'\nexit 97\n`);
     chmodSync(clang, 0o755);
-    writeFileSync(linkInfo, JSON.stringify({
-      schema: "scriptc.native-link-info.v1",
-      runtime_pack: {
-        package: "@scriptc/runtime",
-        version: "1.0.0",
-        root: runtimeRoot,
-        objects: [], archives: [],
-      },
-      program: { object: join(scratch, "missing.o") },
-      ffi: { libraries: [] },
-      link: { driver_flags: [], system_libraries: [], frameworks: [] },
-    }));
+    writeFileSync(
+      linkInfo,
+      JSON.stringify({
+        schema: "scriptc.native-link-info.v1",
+        runtime_pack: {
+          package: "@scriptc/runtime",
+          version: "1.0.0",
+          root: runtimeRoot,
+          objects: [],
+          archives: [],
+        },
+        program: { object: join(scratch, "missing.o") },
+        ffi: { libraries: [] },
+        link: { driver_flags: [], system_libraries: [], frameworks: [] },
+      }),
+    );
 
     let failure: { stderr?: Buffer } | null = null;
     try {
-      execFileSync(process.execPath, [
-        join(fixture, "link.mjs"), "cc", linkInfo, join(scratch, "stale-program"),
-      ], {
-        env: { ...process.env, PATH: `${traps}:${process.env["PATH"] ?? ""}` },
-        stdio: "pipe",
-      });
+      execFileSync(
+        process.execPath,
+        [join(fixture, "link.mjs"), "cc", linkInfo, join(scratch, "stale-program")],
+        {
+          env: { ...process.env, PATH: `${traps}:${process.env["PATH"] ?? ""}` },
+          stdio: "pipe",
+        },
+      );
     } catch (error) {
       failure = error as { stderr?: Buffer };
     }
@@ -70,19 +81,34 @@ describe.runIf(supported)("external native object example", () => {
     const programObject = join(scratch, "app.o");
     const manifest = join(scratch, "ffi.json");
     const linkInfo = join(scratch, "link-info.json");
-    const raw = JSON.parse(readFileSync(join(fixture, "ffi.json"), "utf8")) as { libraries: string[] };
+    const raw = JSON.parse(readFileSync(join(fixture, "ffi.json"), "utf8")) as {
+      libraries: string[];
+    };
     raw.libraries = [nativeObject];
     writeFileSync(manifest, JSON.stringify(raw));
     execFileSync("clang", [
-      "-target", "arm64-apple-macosx14.0.0", "-O2", "-c",
-      join(fixture, "native.c"), "-o", nativeObject,
+      "-target",
+      "arm64-apple-macosx14.0.0",
+      "-O2",
+      "-c",
+      join(fixture, "native.c"),
+      "-o",
+      nativeObject,
     ]);
-    const json = execFileSync("node", [
-      join(repoRoot, "packages/cli/dist/main.js"),
-      "build", join(fixture, "main.ts"),
-      "--ffi", manifest,
-      "--print=native-link-info", "-o", programObject,
-    ], { encoding: "utf8" });
+    const json = execFileSync(
+      "node",
+      [
+        join(repoRoot, "packages/cli/dist/main.js"),
+        "build",
+        join(fixture, "main.ts"),
+        "--ffi",
+        manifest,
+        "--print=native-link-info",
+        "-o",
+        programObject,
+      ],
+      { encoding: "utf8" },
+    );
     writeFileSync(linkInfo, json);
 
     for (const mode of ["cc", "ld"] as const) {

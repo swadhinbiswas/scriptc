@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/class-specialized-computed-base.mjs"
+ ],
+ "diags": []
+}

@@ -5,8 +5,7 @@
  * (moduleUsesQs — the scr_url_params gating precedent), so qs-free
  * programs pay zero bytes. querystring.escape never reaches this unit at
  * all: Node's qsEscape encodes exactly the component unreserved set, so
- * the frontend lowers it to the always-linked
- * scr_str_encode_uri_component.
+ * the frontend lowers it to the always-linked scr_qs_escape.
  *
  * Everything here is a quirk-faithful port of lib/querystring.js (Node is
  * the oracle): parse's interleaved sep/eq scan with its naive
@@ -257,12 +256,20 @@ ScrStr *scr_qs_unescape(const ScrStr *s) {
 
 /* ── parse ───────────────────────────────────────────────────────────── */
 
-/* addKeyVal's tail: decode-if-encoded, then group into the overflow map
- * (first value = the str_tag arm; a repeat REPLACES it with a two-element
- * string[] in the arr_tag arm; later repeats push). key/value move in. */
-static void qs_add_key_val(ScrMap *out, ScrStr *key, ScrStr *value,
-                           bool key_encoded, bool val_encoded,
-                           uint32_t str_tag, uint32_t arr_tag) {
+/* Where parse's pairs land: the typed ParsedUrlQuery dictionary's overflow
+ * map (its string and string[] union tags), or a checked-dynamic
+ * null-prototype object (url.parse's parsed query). */
+typedef struct {
+  ScrMap *map;
+  uint32_t str_tag, arr_tag;
+  ScrDyn *obj;
+} QsSink;
+
+/* addKeyVal's tail: decode-if-encoded, then group (first value = a
+ * string; a repeat REPLACES it with a two-element string array; later
+ * repeats push). key/value move in. */
+static void qs_add_key_val(QsSink *out, ScrStr *key, ScrStr *value,
+                           bool key_encoded, bool val_encoded) {
   if (key->len > 0 && key_encoded) {
     ScrStr *dec = scr_qs_unescape(key);
     scr_str_release(key);
@@ -273,9 +280,27 @@ static void qs_add_key_val(ScrMap *out, ScrStr *key, ScrStr *value,
     scr_str_release(value);
     value = dec;
   }
-  ScrUnion *cell = scr_map_get_str_ref(out, key);
+  if (out->obj) {
+    ScrDyn *cur = scr_dyn_obj_get(out->obj, key->data, key->len);
+    ScrDyn *boxed = scr_dyn_new_str(value);
+    scr_str_release(value);
+    if (!cur) {
+      scr_dyn_obj_set(out->obj, key->data, key->len, boxed);
+    } else if (cur->kind == SCR_DYN_STR) {
+      ScrDyn *rows = scr_dyn_new_arr();
+      scr_dyn_arr_push(rows, scr_dyn_retain(cur));
+      scr_dyn_arr_push(rows, boxed);
+      scr_dyn_obj_set(out->obj, key->data, key->len, rows);
+    } else {
+      scr_dyn_arr_push(cur, boxed);
+    }
+    scr_str_release(key);
+    return;
+  }
+  uint32_t str_tag = out->str_tag, arr_tag = out->arr_tag;
+  ScrUnion *cell = scr_map_get_str_ref(out->map, key);
   if (!cell) {
-    scr_map_set_str_ref(out, key,
+    scr_map_set_str_ref(out->map, key,
                         scr_union_new_ref(str_tag, value, &scr_str_retain_v,
                                           &scr_str_release_v, NULL));
     scr_str_release(key);
@@ -286,7 +311,7 @@ static void qs_add_key_val(ScrMap *out, ScrStr *key, ScrStr *value,
     ScrArr *rows = scr_arr_new(SCR_ELEM_STR, 2);
     scr_arr_push_ref(rows, scr_str_retain_v(scr_union_peek(cell)));
     scr_arr_push_ref(rows, value);
-    scr_map_set_str_ref(out, key,
+    scr_map_set_str_ref(out->map, key,
                         scr_union_new_ref(arr_tag, rows, &scr_arr_retain_v,
                                           &scr_arr_release_v, NULL));
   } else {
@@ -296,9 +321,8 @@ static void qs_add_key_val(ScrMap *out, ScrStr *key, ScrStr *value,
   scr_str_release(key);
 }
 
-void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
-                       const ScrStr *eq, double max_keys, uint32_t str_tag,
-                       uint32_t arr_tag) {
+static void qs_parse(QsSink *out, const ScrStr *qs, const ScrStr *sep,
+                     const ScrStr *eq, double max_keys) {
   if (qs->len == 0) return;
   /* Node's falsy rule: undefined/null/'' all mean the default. */
   const char *sep_b = (sep && sep->len) ? sep->data : "&";
@@ -345,7 +369,7 @@ void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
 
         qs_add_key_val(out, scr_str_new(key.data, key.len),
                        scr_str_new(value.data, value.len), key_encoded,
-                       val_encoded, str_tag, arr_tag);
+                       val_encoded);
 
         if (--pairs == 0) { returned = true; break; }
         key_encoded = val_encoded = false;
@@ -420,22 +444,46 @@ void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
     if (!ended_empty) {
       qs_add_key_val(out, scr_str_new(key.data, key.len),
                      scr_str_new(value.data, value.len), key_encoded,
-                     val_encoded, str_tag, arr_tag);
+                     val_encoded);
     }
   }
   free(key.data);
   free(value.data);
 }
 
+void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
+                       const ScrStr *eq, double max_keys, uint32_t str_tag,
+                       uint32_t arr_tag) {
+  QsSink sink = {.map = out, .str_tag = str_tag, .arr_tag = arr_tag};
+  qs_parse(&sink, qs, sep, eq, max_keys);
+}
+
+ScrDyn *scr_qs_parse_dyn(const ScrStr *qs) {
+  QsSink sink = {.obj = scr_dyn_new_obj_null_proto()};
+  qs_parse(&sink, qs, NULL, NULL, 1000);
+  /* Rebuild in JS own-key order (array-index keys ascending first), the
+   * order Node's object holds them in. */
+  ScrDyn *keys = scr_dyn_obj_keys(sink.obj);
+  ScrDyn *out = scr_dyn_new_obj_null_proto();
+  for (size_t i = 0; i < keys->v.arr.len; i++) {
+    const ScrStr *k = keys->v.arr.items[i]->v.str;
+    ScrDyn *v = scr_dyn_obj_get(sink.obj, k->data, k->len);
+    scr_dyn_obj_set(out, k->data, k->len, scr_dyn_retain(v));
+  }
+  scr_dyn_release(keys);
+  scr_dyn_release(sink.obj);
+  return out;
+}
+
 /* ── stringify ───────────────────────────────────────────────────────── */
 
 /* Node's encodeStringified over one dyn value: strings escape, finite
- * numbers render then escape, booleans are bare, everything else is the
- * empty value. Appends to b. */
+ * numbers render then escape, bigints and booleans are bare, everything
+ * else is the empty value. Appends to b. */
 static void qs_stringify_value(QsBuf *b, const ScrDyn *v) {
   switch (v->kind) {
     case SCR_DYN_STR: {
-      ScrStr *enc = scr_str_encode_uri_component(v->v.str);
+      ScrStr *enc = scr_qs_escape(v->v.str);
       qb_append_str(b, enc);
       scr_str_release(enc);
       return;
@@ -449,12 +497,18 @@ static void qs_stringify_value(QsBuf *b, const ScrDyn *v) {
       scr_str_release(num);
       return;
     }
+    case SCR_DYN_BIGINT: {
+      ScrStr *text = scr_bigint_to_string(v->v.bigint, 10);
+      qb_append_str(b, text);
+      scr_str_release(text);
+      return;
+    }
     case SCR_DYN_BOOL:
       if (v->v.b) qb_append(b, "true", 4);
       else qb_append(b, "false", 5);
       return;
     default:
-      return; /* null/undefined/objects/arrays/functions → '' */
+      return; /* null/undefined/symbols/objects/arrays/functions → '' */
   }
 }
 
@@ -484,7 +538,7 @@ ScrStr *scr_qs_stringify(const ScrDyn *obj, const ScrStr *sep,
     ScrDyn *view = v->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(v) : NULL;
     if (view) v = view;
     if (scr_exc_pending()) { scr_dyn_release(view); scr_dyn_release(keys); free(fields.data); return NULL; }
-    ScrStr *ks = scr_str_encode_uri_component((ScrStr *)k);
+    ScrStr *ks = scr_qs_escape((ScrStr *)k);
     if (v->kind == SCR_DYN_ARR) {
       for (size_t j = 0; j < v->v.arr.len; j++) {
         if (fields.len) qb_append(&fields, sep_b, sep_len);
@@ -502,5 +556,9 @@ ScrStr *scr_qs_stringify(const ScrDyn *obj, const ScrStr *sep,
     scr_dyn_release(view);
   }
   scr_dyn_release(keys);
+  if (scr_exc_pending()) { /* a lone surrogate: URIError [ERR_INVALID_URI] */
+    free(fields.data);
+    return NULL;
+  }
   return qb_take(&fields);
 }

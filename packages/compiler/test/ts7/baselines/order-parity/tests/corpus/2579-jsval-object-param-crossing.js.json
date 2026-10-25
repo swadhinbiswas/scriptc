@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2579-jsval-object-param-crossing.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2871-optional-promise-to-unknown.ts"
+ ],
+ "diags": []
+}

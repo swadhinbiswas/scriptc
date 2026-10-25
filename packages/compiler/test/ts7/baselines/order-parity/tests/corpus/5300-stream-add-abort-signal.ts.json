@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5300-stream-add-abort-signal.ts"
+ ],
+ "diags": []
+}

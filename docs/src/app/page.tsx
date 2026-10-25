@@ -24,20 +24,20 @@ $ scriptc coverage hello.ts
   statements analyzed   2
   compile statically    2  (100%)
 
-  fully static — this program has no dynamic remainder.`;
+  fully static — all analyzed statements compile to native code.`;
 
-const tiers = [
+const steps = [
   {
-    title: "Compiled statically",
-    body: "Supported TypeScript and JavaScript operations compile to native code. Static executables run without Node.js or a JavaScript engine.",
+    title: "Type-check",
+    body: "The TypeScript compiler checks your program against your tsconfig.json. scriptc uses the checked types to choose a native representation for every value.",
   },
   {
-    title: "Runs dynamically",
-    body: "Enable --dynamic to run npm packages and supported any-typed code in an embedded JavaScript engine. Values converted to static types are checked at runtime.",
+    title: "Compile",
+    body: "LLVM generates machine code for your program and the npm packages it imports. Anything unsupported is reported with a code, a location, and a hint.",
   },
   {
-    title: "Rejected at compile time",
-    body: "Unsupported operations produce a diagnostic with an error code, a source location, and a rewrite hint where available.",
+    title: "Ship",
+    body: "The result is one executable for macOS, Linux, or Windows, or a WebAssembly module. It runs without Node.js installed.",
   },
 ];
 
@@ -47,16 +47,16 @@ const points = [
     body: "The compiler uses TypeScript's type information and narrowing rules to select native representations and identify unsupported operations.",
   },
   {
-    title: "Native executables",
-    body: "Build a program into an executable for a supported target. JavaScript dependencies used with --dynamic are embedded at build time.",
+    title: "npm packages included",
+    body: "Packages your program imports compile into the executable, which doesn't read node_modules at runtime.",
   },
   {
-    title: "Compilation coverage",
-    body: "Coverage reports show static and dynamic statement counts and list compilation blockers for the program being analyzed.",
+    title: "Cross-compilation",
+    body: "Build for Linux, Windows, and WebAssembly from one machine, and build static libraries for iOS and Android apps.",
   },
   {
-    title: "Differentially tested",
-    body: "The test corpus compares program output and exit codes under Node.js and compiled execution. A sanitizer lane checks for memory errors.",
+    title: "Tested against Node.js",
+    body: "The test suite runs each test program under Node.js and as a compiled executable and compares their output and exit codes. AddressSanitizer builds check for memory errors.",
   },
 ];
 
@@ -115,25 +115,31 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Three tiers */}
+      {/* How it works */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16">
-          <h2 className="text-heading-24 text-gray-1000">Compilation modes</h2>
+          <h2 className="text-heading-24 text-gray-1000">From TypeScript to a native binary</h2>
           <p className="mt-3 max-w-2xl text-copy-14 text-gray-900">
-            Programs can combine native code and an optional embedded JavaScript engine.
-            Unsupported operations produce compilation diagnostics.
+            Write the same TypeScript you run on Node.js. {siteName} turns it into machine code in
+            three steps.
           </p>
           <div className="mt-8 grid gap-6 md:grid-cols-3">
-            {tiers.map((tier, i) => (
-              <div key={tier.title} className="rounded-lg border border-gray-alpha-400 p-6">
+            {steps.map((step, i) => (
+              <div key={step.title} className="rounded-lg border border-gray-alpha-400 p-6">
                 <div className="text-label-12 font-medium uppercase tracking-wider text-gray-700">
-                  Tier {i + 1}
+                  Step {i + 1}
                 </div>
-                <h3 className="mt-2 text-heading-16 text-gray-1000">{tier.title}</h3>
-                <p className="mt-2 text-copy-13 text-gray-900">{tier.body}</p>
+                <h3 className="mt-2 text-heading-16 text-gray-1000">{step.title}</h3>
+                <p className="mt-2 text-copy-13 text-gray-900">{step.body}</p>
               </div>
             ))}
           </div>
+          <Link
+            href="/docs/how-it-works"
+            className="mt-6 inline-block text-label-14 text-gray-1000 underline underline-offset-4"
+          >
+            How it works →
+          </Link>
         </div>
       </section>
 
@@ -144,9 +150,8 @@ export default function Home() {
             <div>
               <h2 className="text-heading-24 text-gray-1000">Check compilation support</h2>
               <p className="mt-3 text-copy-14 text-gray-900">
-                Use {siteName} coverage to analyze a program before building it. The report
-                identifies operations that compile statically, require the embedded engine,
-                or remain unsupported.
+                Run {siteName} coverage on an existing program to see how much of it compiles
+                before you build. The report explains anything unsupported and suggests a fix.
               </p>
               <Link
                 href="/docs/coverage"

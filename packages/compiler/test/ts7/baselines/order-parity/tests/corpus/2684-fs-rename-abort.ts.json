@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2684-fs-rename-abort.ts"
+ ],
+ "diags": []
+}

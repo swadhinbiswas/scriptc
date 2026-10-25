@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5336-stream-operators-promise-timing.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2413-dowhile-kill-renarrow.ts"
+ ],
+ "diags": []
+}

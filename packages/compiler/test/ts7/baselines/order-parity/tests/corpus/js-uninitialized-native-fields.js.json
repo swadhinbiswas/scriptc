@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-uninitialized-native-fields.js"
+ ],
+ "diags": []
+}

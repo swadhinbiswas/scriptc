@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-inferred-class-array-return.js"
+ ],
+ "diags": []
+}

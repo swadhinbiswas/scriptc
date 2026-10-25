@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1479-destructuring-assign.ts"
+ ],
+ "diags": []
+}

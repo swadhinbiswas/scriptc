@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5547-fs-write-stream.cjs"
+ ],
+ "diags": []
+}

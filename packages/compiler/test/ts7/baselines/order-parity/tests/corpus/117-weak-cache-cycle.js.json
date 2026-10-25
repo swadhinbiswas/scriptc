@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/117-weak-cache-cycle.js"
+ ],
+ "diags": []
+}

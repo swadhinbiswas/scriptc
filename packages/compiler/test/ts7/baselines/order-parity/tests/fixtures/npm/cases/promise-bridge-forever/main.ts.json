@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/promise-bridge-forever/main.ts"
+ ],
+ "diags": []
+}

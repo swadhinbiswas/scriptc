@@ -1,7 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterAll, afterEach, expect, test as vitestTest } from "vitest";
@@ -55,13 +67,19 @@ function cacheTestSelected(name: string): boolean {
 
 const test = Object.assign(
   (name: string, ...args: unknown[]) =>
-    Reflect.apply(cacheTestSelected(name) ? vitestTest : vitestTest.skip, undefined, [name, ...args]),
+    Reflect.apply(cacheTestSelected(name) ? vitestTest : vitestTest.skip, undefined, [
+      name,
+      ...args,
+    ]),
   {
-    skipIf: (condition: boolean) => (name: string, ...args: unknown[]) =>
-      Reflect.apply(condition || !cacheTestSelected(name) ? vitestTest.skip : vitestTest, undefined, [
-        name,
-        ...args,
-      ]),
+    skipIf:
+      (condition: boolean) =>
+      (name: string, ...args: unknown[]) =>
+        Reflect.apply(
+          condition || !cacheTestSelected(name) ? vitestTest.skip : vitestTest,
+          undefined,
+          [name, ...args],
+        ),
   },
 ) as typeof vitestTest;
 
@@ -119,18 +137,22 @@ afterEach(() => {
 test("the production cache root follows overrides, platform defaults, and the hard disable", () => {
   expect(resolveBuildCacheRoot({ SCRIPTC_NO_CACHE: "1" }, "linux", "/home/tester")).toBeNull();
   expect(resolveBuildCacheRoot({ SCRIPTC_CACHE_DIR: "" }, "linux", "/home/tester")).toBeNull();
-  expect(resolveBuildCacheRoot({ SCRIPTC_CACHE_DIR: "/var/tmp/custom" }, "linux", "/home/tester")).toBe(
-    "/var/tmp/custom",
-  );
+  expect(
+    resolveBuildCacheRoot({ SCRIPTC_CACHE_DIR: "/var/tmp/custom" }, "linux", "/home/tester"),
+  ).toBe("/var/tmp/custom");
   expect(resolveBuildCacheRoot({ XDG_CACHE_HOME: "/var/tmp/xdg" }, "linux", "/home/tester")).toBe(
     "/var/tmp/xdg/scriptc/build",
   );
   expect(resolveBuildCacheRoot({}, "darwin", "/Users/tester")).toBe(
     "/Users/tester/Library/Caches/scriptc/build",
   );
-  expect(resolveBuildCacheRoot({ LOCALAPPDATA: "/Users/tester/AppData/Local" }, "win32", "/Users/tester")).toBe(
-    "/Users/tester/AppData/Local/scriptc/cache/build",
-  );
+  expect(
+    resolveBuildCacheRoot(
+      { LOCALAPPDATA: "/Users/tester/AppData/Local" },
+      "win32",
+      "/Users/tester",
+    ),
+  ).toBe("/Users/tester/AppData/Local/scriptc/cache/build");
 });
 
 test("executable section elimination flags are target-aware", () => {
@@ -209,7 +231,7 @@ test.skipIf(process.platform === "win32")(
       writeFile(secondCompiler, "#!/bin/sh\nexit 0\n"),
       writeFile(
         join(binDir, "clang"),
-        "#!/bin/sh\nselected=$(cat \"$SCRIPTC_TEST_EFFECTIVE_COMPILER\")\nprintf '\"%s\" \"-cc1\"\\n' \"$selected\" >&2\n",
+        '#!/bin/sh\nselected=$(cat "$SCRIPTC_TEST_EFFECTIVE_COMPILER")\nprintf \'"%s" "-cc1"\\n\' "$selected" >&2\n',
       ),
       writeFile(selector, `${firstCompiler}\n`),
     ]);
@@ -239,107 +261,100 @@ test("native cache identities separate host architectures while cross targets re
   expect(cacheTargetIdentity({ target: "x86_64-linux-gnu.2.36" }, "darwin", "arm64")).toBe(
     "cross:x86_64-linux-gnu.2.36",
   );
-  expect(vendorCacheTargetFlavor({ target: null }, "darwin", "arm64")).toBe(
-    "native-darwin-arm64",
+  expect(vendorCacheTargetFlavor({ target: null }, "darwin", "arm64")).toBe("native-darwin-arm64");
+  expect(vendorCacheTargetFlavor({ target: null }, "darwin", "x64")).toBe("native-darwin-x64");
+  expect(vendorCacheTargetFlavor({ target: "x86_64-linux-gnu.2.36" }, "darwin", "arm64")).toBe(
+    "x86_64-linux-gnu.2.36",
   );
-  expect(vendorCacheTargetFlavor({ target: null }, "darwin", "x64")).toBe(
-    "native-darwin-x64",
-  );
-  expect(
-    vendorCacheTargetFlavor({ target: "x86_64-linux-gnu.2.36" }, "darwin", "arm64"),
-  ).toBe("x86_64-linux-gnu.2.36");
 });
 
 test.skipIf(
-  process.platform === "win32" || zigExecutable === undefined ||
-  clangExecutable === undefined || arExecutable === undefined,
-)("targetless Zig vendor caches are separate from host-clang and reusable", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "scriptc-zig-vendor-cache-"));
-  scratch.push(dir);
-  const cacheRoot = join(dir, "cache");
-  const vendorRoot = join(dir, "vendor-cache");
-  const cPath = join(dir, "program.c");
-  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
-  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
-  const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
-  const oldCc = process.env["SCRIPTC_CC"];
-  const oldTarget = process.env["SCRIPTC_TARGET"];
+  process.platform === "win32" ||
+    zigExecutable === undefined ||
+    clangExecutable === undefined ||
+    arExecutable === undefined,
+)(
+  "targetless Zig vendor caches are separate from host-clang and reusable",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-zig-vendor-cache-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const vendorRoot = join(dir, "vendor-cache");
+    const cPath = join(dir, "program.c");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+    const oldCc = process.env["SCRIPTC_CC"];
+    const oldTarget = process.env["SCRIPTC_TARGET"];
 
-  try {
-    await writeFile(cPath, "int main(void) { return 0; }\n");
-    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
-    process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorRoot;
-    delete process.env["SCRIPTC_NO_CACHE"];
-    delete process.env["SCRIPTC_TARGET"];
+    try {
+      await writeFile(cPath, "int main(void) { return 0; }\n");
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      delete process.env["SCRIPTC_TARGET"];
 
-    process.env["SCRIPTC_CC"] = "clang";
-    await compileC({
-      cPath,
-      outPath: join(dir, "host"),
-      cacheIdentity: TEST_CACHE_IDENTITY,
-      dynamic: true,
-      net: true,
-      http: true,
-      tls: true,
-      zlib: true,
-      // Keep the complete executable tier out of this test: the second Zig
-      // invocation must walk the vendor cache and prove its artifacts are
-      // reusable independently of the output path.
-      systemLibraries: ["m"],
-    });
-    const hostEngine = (await readdir(vendorRoot)).find((name) =>
-      /^3c8f3d689539-plain-/.test(name)
-    );
-    const hostTls = (await readdir(vendorRoot)).find((name) => name.startsWith("mbedtls-"));
-    expect(hostEngine).toBeDefined();
-    expect(hostTls).toBeDefined();
+      process.env["SCRIPTC_CC"] = "clang";
+      await compileC({
+        cPath,
+        outPath: join(dir, "host"),
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        net: true,
+        http: true,
+        tls: true,
+        zlib: true,
+        // Keep the complete executable tier out of this test: the second Zig
+        // invocation must walk the vendor cache and prove its artifacts are
+        // reusable independently of the output path.
+        systemLibraries: ["m"],
+      });
+      const hostTls = (await readdir(vendorRoot)).find((name) => name.startsWith("mbedtls-"));
+      expect(hostTls).toBeDefined();
 
-    process.env["SCRIPTC_CC"] = "zigcc";
-    const zigOptions = {
-      cPath,
-      cacheIdentity: TEST_CACHE_IDENTITY,
-      dynamic: true,
-      net: true,
-      http: true,
-      tls: true,
-      zlib: true,
-      systemLibraries: ["m"],
-    } as const;
-    await compileC({ ...zigOptions, outPath: join(dir, "zig-first") });
+      process.env["SCRIPTC_CC"] = "zigcc";
+      const zigOptions = {
+        cPath,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        net: true,
+        http: true,
+        tls: true,
+        zlib: true,
+        systemLibraries: ["m"],
+      } as const;
+      await compileC({ ...zigOptions, outPath: join(dir, "zig-first") });
 
-    let vendorEntries = await readdir(vendorRoot);
-    expect(vendorEntries.filter((name) => /^3c8f3d689539-plain-/.test(name))).toHaveLength(2);
-    expect(vendorEntries.filter((name) => name.startsWith("mbedtls-")).length).toBe(2);
-    // Host clang uses system zlib, so only the Zig build materializes a zlib
-    // object family in the shared vendor root.
-    expect(vendorEntries.filter((name) => name.startsWith("zlib-")).length).toBe(1);
-    // Invalidate the host archive. A targetless Zig rebuild must continue to
-    // use the separately keyed Zig archive instead of repairing or consuming
-    // the host-clang entry.
-    await writeFile(join(vendorRoot, hostEngine!, "libqjs.a"), "host archive intentionally invalid\n");
-    await writeFile(join(vendorRoot, hostTls!, "libmbedtls.a"), "host archive intentionally invalid\n");
-    await compileC({ ...zigOptions, outPath: join(dir, "zig-second") });
-    vendorEntries = await readdir(vendorRoot);
-    expect(vendorEntries.filter((name) => /^3c8f3d689539-plain-/.test(name))).toHaveLength(2);
-    expect(await readFile(join(vendorRoot, hostEngine!, "libqjs.a"), "utf8")).toBe(
-      "host archive intentionally invalid\n",
-    );
-    expect(await readFile(join(vendorRoot, hostTls!, "libmbedtls.a"), "utf8")).toBe(
-      "host archive intentionally invalid\n",
-    );
-  } finally {
-    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
-    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
-    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
-    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
-    if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
-    else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
-    if (oldCc === undefined) delete process.env["SCRIPTC_CC"];
-    else process.env["SCRIPTC_CC"] = oldCc;
-    if (oldTarget === undefined) delete process.env["SCRIPTC_TARGET"];
-    else process.env["SCRIPTC_TARGET"] = oldTarget;
-  }
-}, 600_000);
+      let vendorEntries = await readdir(vendorRoot);
+      expect(vendorEntries.filter((name) => name.startsWith("mbedtls-")).length).toBe(2);
+      // Host clang uses system zlib, so only the Zig build materializes a zlib
+      // object family in the shared vendor root.
+      expect(vendorEntries.filter((name) => name.startsWith("zlib-")).length).toBe(1);
+      // Invalidate the host archive. A targetless Zig rebuild must continue to
+      // use the separately keyed Zig archive instead of repairing or consuming
+      // the host-clang entry.
+      await writeFile(
+        join(vendorRoot, hostTls!, "libmbedtls.a"),
+        "host archive intentionally invalid\n",
+      );
+      await compileC({ ...zigOptions, outPath: join(dir, "zig-second") });
+      vendorEntries = await readdir(vendorRoot);
+      expect(await readFile(join(vendorRoot, hostTls!, "libmbedtls.a"), "utf8")).toBe(
+        "host archive intentionally invalid\n",
+      );
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+      else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
+      if (oldCc === undefined) delete process.env["SCRIPTC_CC"];
+      else process.env["SCRIPTC_CC"] = oldCc;
+      if (oldTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+      else process.env["SCRIPTC_TARGET"] = oldTarget;
+    }
+  },
+  600_000,
+);
 
 test("Zig COFF dry-run parsing retains every linker input on its single command line", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-link-trace-"));
@@ -358,10 +373,10 @@ test("Zig COFF dry-run parsing retains every linker input on its single command 
 
   const output = [
     "lld-link",
-    `\"${join(probeDir, "empty.o")}\"`,
-    `\"${first}\"`,
-    `\"${second}\"`,
-    `\"${third}\"`,
+    `"${join(probeDir, "empty.o")}"`,
+    `"${first}"`,
+    `"${second}"`,
+    `"${third}"`,
   ].join(" ");
   expect(await parseLinkTraceFiles(output, probeDir, probeDir, true)).toEqual(
     [first, second, third].sort(),
@@ -370,7 +385,9 @@ test("Zig COFF dry-run parsing retains every linker input on its single command 
 
 test("the toolchain environment joins cache identities", () => {
   const base = toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/one" });
-  expect(toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/two" })).not.toBe(base);
+  expect(toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/two" })).not.toBe(
+    base,
+  );
   expect(toolchainEnvironmentFingerprint({ ZIG_LIB_DIR: "/zig/one" })).not.toBe(
     toolchainEnvironmentFingerprint({ ZIG_LIB_DIR: "/zig/two" }),
   );
@@ -542,11 +559,9 @@ test.skipIf(process.platform === "win32")(
         cp(originalRuntime, fakeRuntime, { recursive: true }),
         mkdir(projectDir),
         mkdir(join(dir, "runtime", "vendor"), { recursive: true }).then(() =>
-          cp(
-            join(originalRuntime, "..", "vendor", "ryu"),
-            join(dir, "runtime", "vendor", "ryu"),
-            { recursive: true },
-          )
+          cp(join(originalRuntime, "..", "vendor", "ryu"), join(dir, "runtime", "vendor", "ryu"), {
+            recursive: true,
+          }),
         ),
       ]);
       await mkdir(join(fakeRuntime, "sys"));
@@ -610,71 +625,70 @@ test("implicit dependency seeds include separately compiled vendor system header
 });
 
 test.skipIf(
-  process.platform === "win32" || clangExecutable === undefined || arExecutable === undefined ||
-  ldExecutable === undefined,
-)(
-  "public native builds re-probe ccache availability after PATH changes",
-  async () => {
-    const dir = await mkdtemp(join(tmpdir(), "scriptc-ccache-reset-"));
-    scratch.push(dir);
-    const binDir = join(dir, "bin");
-    const cacheRoot = join(dir, "cache");
-    const cPath = join(dir, "program.c");
-    const ccacheLog = join(dir, "ccache.log");
-    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
-    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
-    const oldPath = process.env["PATH"];
-    const oldCcacheLog = process.env["SCRIPTC_TEST_CCACHE_LOG"];
+  process.platform === "win32" ||
+    clangExecutable === undefined ||
+    arExecutable === undefined ||
+    ldExecutable === undefined,
+)("public native builds re-probe ccache availability after PATH changes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-ccache-reset-"));
+  scratch.push(dir);
+  const binDir = join(dir, "bin");
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const ccacheLog = join(dir, "ccache.log");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldPath = process.env["PATH"];
+  const oldCcacheLog = process.env["SCRIPTC_TEST_CCACHE_LOG"];
 
-    try {
-      await Promise.all([mkdir(binDir), mkdir(cacheRoot, { mode: 0o700 })]);
-      await Promise.all([
-        symlink(clangExecutable!, join(binDir, "clang")),
-        symlink(arExecutable!, join(binDir, "ar")),
-        symlink(ldExecutable!, join(binDir, "ld")),
-        writeFile(cPath, "int main(void) { return 0; }\n"),
-      ]);
-      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
-      process.env["PATH"] = binDir;
-      delete process.env["SCRIPTC_NO_CACHE"];
+  try {
+    await Promise.all([mkdir(binDir), mkdir(cacheRoot, { mode: 0o700 })]);
+    await Promise.all([
+      symlink(clangExecutable!, join(binDir, "clang")),
+      symlink(arExecutable!, join(binDir, "ar")),
+      symlink(ldExecutable!, join(binDir, "ld")),
+      writeFile(cPath, "int main(void) { return 0; }\n"),
+    ]);
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    process.env["PATH"] = binDir;
+    delete process.env["SCRIPTC_NO_CACHE"];
 
-      await compileC({
-        cPath,
-        outPath: join(dir, "first"),
-        cacheIdentity: TEST_CACHE_IDENTITY,
-        regex: true,
-      });
+    await compileC({
+      cPath,
+      outPath: join(dir, "first"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
 
-      await writeFile(
-        join(binDir, "ccache"),
-        `#!/bin/sh
+    await writeFile(
+      join(binDir, "ccache"),
+      `#!/bin/sh
 if [ "$1" = "--version" ]; then exit 0; fi
 printf '%s\n' "$*" >> "$SCRIPTC_TEST_CCACHE_LOG"
 exec "$@"
 `,
-      );
-      await chmod(join(binDir, "ccache"), 0o755);
-      process.env["SCRIPTC_TEST_CCACHE_LOG"] = ccacheLog;
+    );
+    await chmod(join(binDir, "ccache"), 0o755);
+    process.env["SCRIPTC_TEST_CCACHE_LOG"] = ccacheLog;
 
-      await compileC({
-        cPath,
-        outPath: join(dir, "second"),
-        cacheIdentity: TEST_CACHE_IDENTITY,
-        dynamic: true,
-      });
-      expect((await readFile(ccacheLog, "utf8")).trim()).not.toBe("");
-    } finally {
-      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
-      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
-      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
-      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
-      if (oldPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = oldPath;
-      if (oldCcacheLog === undefined) delete process.env["SCRIPTC_TEST_CCACHE_LOG"];
-      else process.env["SCRIPTC_TEST_CCACHE_LOG"] = oldCcacheLog;
-    }
-  },
-);
+    await compileC({
+      cPath,
+      outPath: join(dir, "second"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      tls: true,
+    });
+    expect((await readFile(ccacheLog, "utf8")).trim()).not.toBe("");
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    if (oldPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = oldPath;
+    if (oldCcacheLog === undefined) delete process.env["SCRIPTC_TEST_CCACHE_LOG"];
+    else process.env["SCRIPTC_TEST_CCACHE_LOG"] = oldCcacheLog;
+  }
+});
 
 test.skipIf(process.platform === "win32")(
   "opaque compiler wrappers bypass persistent caches",
@@ -838,14 +852,15 @@ exec "$SCRIPTC_TEST_REAL_AR" "$@" "$SCRIPTC_TEST_AR_EXTRA"
         cacheIdentity: TEST_CACHE_IDENTITY,
       });
       expect(runProbe()).toBe("1");
-      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+        (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+      );
       expect(objectSets).toHaveLength(1);
       await expect(stat(join(cacheRoot, "lib"))).rejects.toMatchObject({ code: "ENOENT" });
 
       // The wrapper executable/version and every scriptc-owned input remain
       // unchanged. Only the mutable object it injects into `ar rcs` changes.
-      // A complete archive hit would silently retain the first definition.
+      // A complete archive hit would retain the first definition without an error.
       await buildHelper(2);
       await compileLibArchive({
         cPath,
@@ -854,8 +869,9 @@ exec "$SCRIPTC_TEST_REAL_AR" "$@" "$SCRIPTC_TEST_AR_EXTRA"
       });
       expect(runProbe()).toBe("2");
       expect(
-        (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-          .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-")),
+        (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+          (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+        ),
       ).toHaveLength(1);
       await expect(stat(join(cacheRoot, "lib"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -938,8 +954,9 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("2");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
-      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+        (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+      );
       expect(objectSets).toHaveLength(2);
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
@@ -1038,8 +1055,9 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       await writeFile(header, "#define SCRIPTC_WRAPPER_HEADER_VALUE 2\n");
       await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("2");
-      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+        (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+      );
       expect(objectSets).toHaveLength(2);
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
@@ -1305,7 +1323,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       await chmod(wrapper, 0o755);
       await writeFile(
         cPath,
-        '#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_PROBE); return 0; }\n',
+        "#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_PROBE); return 0; }\n",
       );
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
@@ -1326,8 +1344,9 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
-      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+        (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+      );
       expect(objectSets).toHaveLength(2);
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
@@ -1382,7 +1401,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -isystem "$SCRIPTC_TEST_PROGRAM_HEADER_DIR" "$@"
       await chmod(wrapper, 0o755);
       await writeFile(
         cPath,
-        '#include <stdio.h>\n#include <scriptc_program_probe.h>\nint main(void) { puts(SCRIPTC_PROGRAM_HEADER); return 0; }\n',
+        "#include <stdio.h>\n#include <scriptc_program_probe.h>\nint main(void) { puts(SCRIPTC_PROGRAM_HEADER); return 0; }\n",
       );
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
       process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
@@ -1468,7 +1487,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$selected" "$@"
         writeFile(secondHeader, '#define SCRIPTC_IMPLICIT_REDIRECT "two"\n'),
         writeFile(
           cPath,
-          '#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_REDIRECT); return 0; }\n',
+          "#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_REDIRECT); return 0; }\n",
         ),
       ]);
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
@@ -1676,13 +1695,16 @@ test.skipIf(process.platform === "win32" || zigExecutable === undefined)(
       // lld-link rejects GNU ld's `-t`; the Zig `-###` fallback must still
       // capture every absolute CRT/import-library input. Pin the object-cache
       // mtimes: a complete hit never stages them, while a miss promotes them.
-      const [objectSet] = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      const [objectSet] = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter(
+        (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+      );
       expect(objectSet).toBeDefined();
       const objectDir = join(cacheRoot, "obj", objectSet!.name);
       const objectNames = (await readdir(objectDir)).filter((name) => name.endsWith(".o"));
       const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
-      await Promise.all(objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)));
+      await Promise.all(
+        objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)),
+      );
       const hitOut = join(dir, "hit.exe");
       await compileC({ cPath, outPath: hitOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(await readFile(hitOut)).toEqual(await readFile(firstOut));
@@ -1807,7 +1829,11 @@ test("cache hits honor the current umask", async () => {
 
     process.umask(0o022);
     const firstArchivePath = join(dir, "first.lib.a");
-    await compileLibArchive({ cPath, outPath: firstArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    await compileLibArchive({
+      cPath,
+      outPath: firstArchivePath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
     const firstArchive = await readFile(firstArchivePath);
     if (process.platform !== "win32") {
       const [cachedArchive] = await completeArtifacts(cacheRoot, "lib");
@@ -1952,7 +1978,7 @@ test("mutable compiler inputs bypass caches when files change in place", async (
     await mkdir(headers);
     await writeFile(
       cPath,
-      '#include <stdio.h>\n#include <cache_probe.h>\nint main(void) { puts(CACHE_PROBE); return 0; }\n',
+      "#include <stdio.h>\n#include <cache_probe.h>\nint main(void) { puts(CACHE_PROBE); return 0; }\n",
     );
     process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
     process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorCacheRoot;
@@ -1981,11 +2007,19 @@ test("mutable compiler inputs bypass caches when files change in place", async (
     expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
 
     const firstArchivePath = join(dir, "first.lib.a");
-    await compileLibArchive({ cPath, outPath: firstArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    await compileLibArchive({
+      cPath,
+      outPath: firstArchivePath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
     const firstArchive = await readFile(firstArchivePath);
     await writeFile(headerPath, '#define CACHE_PROBE "three"\n');
     const secondArchivePath = join(dir, "second.lib.a");
-    await compileLibArchive({ cPath, outPath: secondArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    await compileLibArchive({
+      cPath,
+      outPath: secondArchivePath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
     expect(await readFile(secondArchivePath)).not.toEqual(firstArchive);
 
     // CPATH can mutate behind a stable string, so no cache tier is populated.
@@ -2077,13 +2111,15 @@ test.skipIf(process.platform === "win32")(
       await Promise.all([
         cp(originalRuntime, fakeRuntime, { recursive: true }),
         mkdir(join(fakeRuntimeRoot, "vendor"), { recursive: true }).then(() =>
-          Promise.all(["quickjs-ng", "ryu"].map((name) =>
-            cp(
-              join(originalRuntime, "..", "vendor", name),
-              join(fakeRuntimeRoot, "vendor", name),
-              { recursive: true },
-            )
-          ))
+          Promise.all(
+            ["quickjs-ng", "ryu"].map((name) =>
+              cp(
+                join(originalRuntime, "..", "vendor", name),
+                join(fakeRuntimeRoot, "vendor", name),
+                { recursive: true },
+              ),
+            ),
+          ),
         ),
       ]);
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
@@ -2102,7 +2138,10 @@ test.skipIf(process.platform === "win32")(
       expect((await readdir(vendorRoot)).filter((name) => name.includes("-lre-"))).toHaveLength(1);
 
       const libregexp = join(fakeRuntimeRoot, "vendor", "quickjs-ng", "libregexp.c");
-      await writeFile(libregexp, `${await readFile(libregexp, "utf8")}\n/* cache identity probe */\n`);
+      await writeFile(
+        libregexp,
+        `${await readFile(libregexp, "utf8")}\n/* cache identity probe */\n`,
+      );
       await writeFile(cPath, "int main(void) { return 0; } /* second */\n");
       await compileC({
         cPath,
@@ -2144,11 +2183,13 @@ test.skipIf(process.platform === "win32")(
       await Promise.all([
         cp(originalRuntime, fakeRuntime, { recursive: true }),
         mkdir(fakeVendor, { recursive: true }).then(() =>
-          Promise.all(["quickjs-ng", "ryu"].map((name) =>
-            cp(join(originalRuntime, "..", "vendor", name), join(fakeVendor, name), {
-              recursive: true,
-            })
-          ))
+          Promise.all(
+            ["quickjs-ng", "ryu"].map((name) =>
+              cp(join(originalRuntime, "..", "vendor", name), join(fakeVendor, name), {
+                recursive: true,
+              }),
+            ),
+          ),
         ),
       ]);
       process.env["SCRIPTC_CACHE_DIR"] = join(dir, "cache");
@@ -2189,19 +2230,22 @@ test("native cache warming seeds exact runtime and vendor families without compl
     process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
     delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
     delete process.env["SCRIPTC_NO_CACHE"];
-    const warmed = await warmNativeCaches({ profiles: ["runtime", "tls", "dynamic"] });
+    const warmed = await warmNativeCaches({ profiles: ["runtime", "tls"] });
     expect(warmed.cacheRoot).toBe(cacheRoot);
-    expect(warmed.profiles.map(({ profile }) => profile)).toEqual(["runtime", "tls", "dynamic"]);
+    expect(warmed.profiles.map(({ profile }) => profile)).toEqual(["runtime", "tls"]);
     expect(warmed.profiles.every(({ elapsedMs }) => elapsedMs >= 0)).toBe(true);
-    expect((await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter((e) => e.isDirectory())).toHaveLength(3);
+    expect(
+      (await readdir(join(cacheRoot, "obj"), { withFileTypes: true })).filter((e) =>
+        e.isDirectory(),
+      ),
+    ).toHaveLength(2);
     expect(await readdir(join(cacheRoot, "bin")).catch(() => [])).toEqual([]);
     const vendorEntries = await readdir(vendorCacheRoot);
     const tlsEntry = vendorEntries.find((name) => name.startsWith("mbedtls-"));
-    const engineEntry = vendorEntries.find((name) => /^3c8f3d689539-plain-/.test(name));
     expect(tlsEntry).toBeDefined();
-    expect(engineEntry).toBeDefined();
-    expect((await stat(join(vendorCacheRoot, tlsEntry!, "libmbedtls.a.sha256"))).isFile()).toBe(true);
-    expect((await stat(join(vendorCacheRoot, engineEntry!, "libqjs.a.sha256"))).isFile()).toBe(true);
+    expect((await stat(join(vendorCacheRoot, tlsEntry!, "libmbedtls.a.sha256"))).isFile()).toBe(
+      true,
+    );
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -2227,28 +2271,26 @@ test("damaged shared vendor archives are rejected and rebuilt before linking", a
     delete process.env["SCRIPTC_NO_CACHE"];
     delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
     await writeFile(cPath, "int main(void) { return 0; }\n");
-    await warmNativeCaches({ profiles: ["dynamic"] });
+    await warmNativeCaches({ profiles: ["tls"] });
 
     const vendorRoot = join(cacheRoot, "vendor");
-    const engineDir = (await readdir(vendorRoot)).find((name) =>
-      /^3c8f3d689539-plain-/.test(name)
-    );
-    expect(engineDir).toBeDefined();
-    const engineArchive = join(vendorRoot, engineDir!, "libqjs.a");
-    expect((await stat(`${engineArchive}.sha256`)).isFile()).toBe(true);
-    await writeFile(engineArchive, corruption);
+    const tlsDir = (await readdir(vendorRoot)).find((name) => name.startsWith("mbedtls-"));
+    expect(tlsDir).toBeDefined();
+    const tlsArchive = join(vendorRoot, tlsDir!, "libmbedtls.a");
+    expect((await stat(`${tlsArchive}.sha256`)).isFile()).toBe(true);
+    await writeFile(tlsArchive, corruption);
 
     await compileC({
       cPath,
       outPath,
       cacheIdentity: TEST_CACHE_IDENTITY,
-      dynamic: true,
+      tls: true,
     });
 
     expect((await stat(outPath)).isFile()).toBe(true);
-    const repaired = await readFile(engineArchive);
+    const repaired = await readFile(tlsArchive);
     expect(repaired).not.toEqual(corruption);
-    expect((await readFile(`${engineArchive}.sha256`, "utf8")).trim()).toBe(
+    expect((await readFile(`${tlsArchive}.sha256`, "utf8")).trim()).toBe(
       createHash("sha256").update(repaired).digest("hex"),
     );
   } finally {
@@ -2261,7 +2303,7 @@ test("damaged shared vendor archives are rejected and rebuilt before linking", a
   }
 }, 120_000);
 
-test("dynamic builds promote staged vendor archives before bounded LRU eviction", async () => {
+test("TLS builds promote staged vendor archives before bounded LRU eviction", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-vendor-lru-"));
   scratch.push(dir);
   const cacheRoot = join(dir, "cache");
@@ -2277,21 +2319,19 @@ test("dynamic builds promote staged vendor archives before bounded LRU eviction"
     delete process.env["SCRIPTC_CACHE_MAX_MB"];
     delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
     await writeFile(cPath, "int main(void) { return 0; }\n");
-    await warmNativeCaches({ profiles: ["dynamic"] });
+    await warmNativeCaches({ profiles: ["tls"] });
 
     const vendorRoot = join(cacheRoot, "vendor");
-    const engineDir = (await readdir(vendorRoot)).find((name) =>
-      /^3c8f3d689539-plain-/.test(name)
-    );
-    expect(engineDir).toBeDefined();
-    const engineArchive = join(vendorRoot, engineDir!, "libqjs.a");
+    const tlsDir = (await readdir(vendorRoot)).find((name) => name.startsWith("mbedtls-"));
+    expect(tlsDir).toBeDefined();
+    const tlsArchive = join(vendorRoot, tlsDir!, "libmbedtls.a");
     const initialBytes = await cacheTreeBytes(cacheRoot);
-    const capMb = Math.max(4, Math.ceil(initialBytes * 2 / (1024 * 1024)));
+    const capMb = Math.max(4, Math.ceil((initialBytes * 2) / (1024 * 1024)));
     const filler = join(cacheRoot, "filler.bin");
     const staleArchiveTime = new Date("2000-01-01T00:00:00.000Z");
     const fillerTime = new Date("2001-01-01T00:00:00.000Z");
     await writeFile(filler, Buffer.alloc(capMb * 1024 * 1024));
-    await utimes(engineArchive, staleArchiveTime, staleArchiveTime);
+    await utimes(tlsArchive, staleArchiveTime, staleArchiveTime);
     await utimes(filler, fillerTime, fillerTime);
     process.env["SCRIPTC_CACHE_MAX_MB"] = String(capMb);
 
@@ -2299,11 +2339,11 @@ test("dynamic builds promote staged vendor archives before bounded LRU eviction"
       cPath,
       outPath,
       cacheIdentity: TEST_CACHE_IDENTITY,
-      dynamic: true,
+      tls: true,
     });
 
     expect((await stat(outPath)).isFile()).toBe(true);
-    expect((await stat(engineArchive)).mtimeMs).toBeGreaterThan(fillerTime.getTime());
+    expect((await stat(tlsArchive)).mtimeMs).toBeGreaterThan(fillerTime.getTime());
     expect(await cacheTreeBytes(cacheRoot)).toBeLessThanOrEqual(capMb * 1024 * 1024);
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
@@ -2352,20 +2392,24 @@ test("native cache warming refuses environments that disable persistent objects"
 });
 
 test("native cache warm profiles follow target capabilities", () => {
-  expect(supportedNativeCacheWarmProfiles({
-    argv: ["zig", "cc"],
-    target: "wasm32-wasi",
-    zigTarget: "wasm32-wasi",
-    targetArgs: [],
-    linkArgs: [],
-  })).toEqual([]);
-  expect(supportedNativeCacheWarmProfiles({
-    argv: ["zig", "cc"],
-    target: "aarch64-apple-ios",
-    zigTarget: "aarch64-ios.15.0",
-    targetArgs: [],
-    linkArgs: [],
-  })).toEqual([]);
+  expect(
+    supportedNativeCacheWarmProfiles({
+      argv: ["zig", "cc"],
+      target: "wasm32-wasi",
+      zigTarget: "wasm32-wasi",
+      targetArgs: [],
+      linkArgs: [],
+    }),
+  ).toEqual([]);
+  expect(
+    supportedNativeCacheWarmProfiles({
+      argv: ["zig", "cc"],
+      target: "aarch64-apple-ios",
+      zigTarget: "aarch64-ios.15.0",
+      targetArgs: [],
+      linkArgs: [],
+    }),
+  ).toEqual([]);
 });
 
 test("parallel native cache warming fails cleanly when the bounded cache cannot retain its profiles", async () => {
@@ -2425,10 +2469,11 @@ test.skipIf(process.platform !== "darwin")(
 
       const lreCaches = (await readdir(vendorCacheRoot)).filter((name) => name.includes("-lre-"));
       expect(lreCaches).toHaveLength(2);
-      const minVersions = lreCaches.map((cache) =>
-        execFileSync("vtool", ["-show-build", join(vendorCacheRoot, cache, "libregexp.o")], {
-          encoding: "utf8",
-        }).match(/minos\s+(\S+)/)?.[1],
+      const minVersions = lreCaches.map(
+        (cache) =>
+          execFileSync("vtool", ["-show-build", join(vendorCacheRoot, cache, "libregexp.o")], {
+            encoding: "utf8",
+          }).match(/minos\s+(\S+)/)?.[1],
       );
       expect(new Set(minVersions)).toEqual(new Set(["11.0", "14.0"]));
     } finally {
@@ -2674,8 +2719,8 @@ exec "$@"
 
       await Promise.all([rm(signal, { force: true }), rm(release, { force: true })]);
       const libPath = join(dir, "library.c");
-      const libOne = "const char *scriptc_cache_race_value = \"lib-race-one-unique\";\n";
-      const libTwo = "const char *scriptc_cache_race_value = \"lib-race-two-unique\";\n";
+      const libOne = 'const char *scriptc_cache_race_value = "lib-race-one-unique";\n';
+      const libTwo = 'const char *scriptc_cache_race_value = "lib-race-two-unique";\n';
       process.env["SCRIPTC_TEST_RACE_SOURCE"] = libPath;
       await writeFile(libPath, libOne);
       const firstArchivePath = join(dir, "first.lib.a");
@@ -2750,7 +2795,8 @@ test.skipIf(process.platform === "win32")(
     expect(realClang).toBeDefined();
 
     const waitForSignal = async (): Promise<void> => {
-      const deadline = Date.now() + 10_000;
+      // A cold runtime compile shares CPUs with the full Sandbox gate.
+      const deadline = Date.now() + 60_000;
       while (!existsSync(signal)) {
         if (Date.now() > deadline) throw new Error("timed out waiting for final compilation");
         await new Promise((resolveWait) => setTimeout(resolveWait, 10));
@@ -2780,7 +2826,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       await chmod(wrapper, 0o755);
       await writeFile(
         cPath,
-        '#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_RACE); return 0; }\n',
+        "#include <stdio.h>\nint main(void) { puts(SCRIPTC_IMPLICIT_RACE); return 0; }\n",
       );
       await writeFile(header, '#define SCRIPTC_IMPLICIT_RACE "one"\n');
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
@@ -3020,7 +3066,9 @@ test("explicit native link inputs relink while runtime objects remain cached", a
     // cover its dependencies, so every native-input build performs this link.
     await expect(stat(join(cacheRoot, "bin"))).rejects.toMatchObject({ code: "ENOENT" });
     const objectSets = await readdir(join(cacheRoot, "obj"), { withFileTypes: true });
-    expect(objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-"))).toBe(true);
+    expect(
+      objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-")),
+    ).toBe(true);
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -3082,7 +3130,9 @@ test("system libraries relink after an in-place rebuild while runtime objects re
     // runtime-object half of the persistent cache remains active.
     await expect(stat(join(cacheRoot, "bin"))).rejects.toMatchObject({ code: "ENOENT" });
     const objectSets = await readdir(join(cacheRoot, "obj"), { withFileTypes: true });
-    expect(objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-"))).toBe(true);
+    expect(
+      objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-")),
+    ).toBe(true);
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -3109,13 +3159,15 @@ test("frontend-generated same-output builds no-op only while output and dependen
     await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("valid"); return 0; }\n');
 
     await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
-    const stampPath = join(
-      cacheRoot,
-      "local",
-      createHash("sha256").update(outPath).digest("hex"),
-    );
+    const stampPath = join(cacheRoot, "local", createHash("sha256").update(outPath).digest("hex"));
     const stamp = JSON.parse(await readFile(stampPath, "utf8")) as {
-      dependencies: { path: string; kind: "file" | "directory"; size: number; mtimeMs: number; ctimeMs: number }[];
+      dependencies: {
+        path: string;
+        kind: "file" | "directory";
+        size: number;
+        mtimeMs: number;
+        ctimeMs: number;
+      }[];
       integrity: string;
     };
     expect(stamp.dependencies.length).toBeGreaterThan(0);
@@ -3176,11 +3228,7 @@ test("pre-section-GC output-local stamps cannot restore an old executable", asyn
     await writeFile(cPath, "int main(void) { return 0; }\n");
     await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
 
-    const stampPath = join(
-      cacheRoot,
-      "local",
-      createHash("sha256").update(outPath).digest("hex"),
-    );
+    const stampPath = join(cacheRoot, "local", createHash("sha256").update(outPath).digest("hex"));
     const current = JSON.parse(await readFile(stampPath, "utf8")) as Record<string, unknown>;
     const legacy = { ...current, key: "old-non-gc-output", version: 1 };
     await writeFile(stampPath, `${JSON.stringify(legacy)}\n`);
@@ -3210,14 +3258,15 @@ test("artifact-ready callbacks expose native dependencies on builds and validate
     delete process.env["SCRIPTC_NO_CACHE"];
     await writeFile(cPath, "int main(void) { return 0; }\n");
     const observations: string[][] = [];
-    const build = (): Promise<void> => compileC({
-      cPath,
-      outPath,
-      cacheIdentity: "scriptc-generated-v1",
-      onArtifactReady: async ({ dependencies }) => {
-        observations.push(dependencies.map((dependency) => dependency.path));
-      },
-    });
+    const build = (): Promise<void> =>
+      compileC({
+        cPath,
+        outPath,
+        cacheIdentity: "scriptc-generated-v1",
+        onArtifactReady: async ({ dependencies }) => {
+          observations.push(dependencies.map((dependency) => dependency.path));
+        },
+      });
     await build();
     await build();
     expect(observations).toHaveLength(2);
@@ -3329,11 +3378,7 @@ test("fresh processes preserve output-local dependency coverage after source edi
       stdio: "pipe",
     });
   };
-  const stampPath = join(
-    cacheRoot,
-    "local",
-    createHash("sha256").update(outPath).digest("hex"),
-  );
+  const stampPath = join(cacheRoot, "local", createHash("sha256").update(outPath).digest("hex"));
   const dependencyPaths = async (): Promise<string[]> => {
     const stamp = JSON.parse(await readFile(stampPath, "utf8")) as {
       dependencies: { path: string }[];
@@ -3373,7 +3418,9 @@ test("native metadata snapshots survive source edits and repair after tampering"
     const metadataNames = await readdir(metadataDir);
     expect(metadataNames.length).toBeGreaterThanOrEqual(3);
     const pinnedTime = new Date("2002-01-01T00:00:00.000Z");
-    await Promise.all(metadataNames.map((name) => utimes(join(metadataDir, name), pinnedTime, pinnedTime)));
+    await Promise.all(
+      metadataNames.map((name) => utimes(join(metadataDir, name), pinnedTime, pinnedTime)),
+    );
 
     // Program bytes are not toolchain identity. A source edit should reuse the
     // validated target/compiler/link snapshots without republishing them.
@@ -3456,7 +3503,9 @@ test("damaged complete artifacts are rejected and rebuilt", async () => {
       cacheIdentity: TEST_CACHE_IDENTITY,
     });
     expect((await readFile(repairedArchive)).includes(corruption)).toBe(false);
-    expect(execFileSync("ar", ["t", repairedArchive], { encoding: "utf8" })).toContain("program.program.o");
+    expect(execFileSync("ar", ["t", repairedArchive], { encoding: "utf8" })).toContain(
+      "program.program.o",
+    );
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -3560,13 +3609,17 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     expect(await completeArtifacts(cacheRoot, "lib")).toHaveLength(1);
 
     const objectSets = await readdir(join(cacheRoot, "obj"), { withFileTypes: true });
-    const objectSet = objectSets.find((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+    const objectSet = objectSets.find(
+      (entry) => entry.isDirectory() && !entry.name.startsWith("build-"),
+    );
     expect(objectSet).toBeDefined();
     const objectDir = join(cacheRoot, "obj", objectSet!.name);
     const objectNames = (await readdir(objectDir)).filter((name) => name.endsWith(".o"));
     expect(objectNames.length).toBeGreaterThan(10);
     const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
-    await Promise.all(objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)));
+    await Promise.all(
+      objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)),
+    );
 
     // A content hit still performs fresh compiler/toolchain discovery, but it
     // must not stage or promote the cached runtime objects.
@@ -3614,7 +3667,9 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     const memberNames = await readdir(cachedMembers);
     expect(await readdir(uncachedMembers)).toEqual(memberNames);
     for (const name of memberNames) {
-      expect(await readFile(join(uncachedMembers, name))).toEqual(await readFile(join(cachedMembers, name)));
+      expect(await readFile(join(uncachedMembers, name))).toEqual(
+        await readFile(join(cachedMembers, name)),
+      );
     }
     expect(await completeArtifacts(cacheRoot, "lib")).toHaveLength(2);
   } finally {
@@ -3653,8 +3708,9 @@ test("library identity edits reuse the cached large program object", async () =>
       outPath,
       cacheIdentity: TEST_CACHE_IDENTITY,
     });
-    const [objectName] = (await readdir(join(cacheRoot, "program-obj")))
-      .filter((name) => !name.endsWith(".sha256"));
+    const [objectName] = (await readdir(join(cacheRoot, "program-obj"))).filter(
+      (name) => !name.endsWith(".sha256"),
+    );
     expect(objectName).toBeDefined();
     const objectPath = join(cacheRoot, "program-obj", objectName!);
     const objectDigest = await readFile(`${objectPath}.sha256`, "utf8");
@@ -3674,12 +3730,14 @@ test("library identity edits reuse the cached large program object", async () =>
     });
     expect(await readFile(`${objectPath}.sha256`, "utf8")).toBe(objectDigest);
     expect((await stat(objectPath)).mtimeMs).toBeGreaterThan(old.getTime());
-    expect((await readdir(join(cacheRoot, "program-obj"))).filter((name) => !name.endsWith(".sha256"))).toEqual([objectName]);
+    expect(
+      (await readdir(join(cacheRoot, "program-obj"))).filter((name) => !name.endsWith(".sha256")),
+    ).toEqual([objectName]);
     const probeSource = join(dir, "probe.c");
     const probe = join(dir, "probe");
     await writeFile(
       probeSource,
-      "#include <stdio.h>\nint scriptc_large_program_value(void);\nunsigned long long scriptc_build_id(void);\nint main(void) { printf(\"%d %llu\\n\", scriptc_large_program_value(), scriptc_build_id()); }\n",
+      '#include <stdio.h>\nint scriptc_large_program_value(void);\nunsigned long long scriptc_build_id(void);\nint main(void) { printf("%d %llu\\n", scriptc_large_program_value(), scriptc_build_id()); }\n',
     );
     execFileSync("clang", [probeSource, outPath, "-lm", "-o", probe]);
     expect(execFileSync(probe, { encoding: "utf8" })).toBe("7 2\n");
@@ -3742,17 +3800,21 @@ entry:
         });
       };
       await build(7);
-      const initial = (await readdir(join(cacheRoot, "program-shard")))
-        .filter((name) => !name.endsWith(".sha256"));
+      const initial = (await readdir(join(cacheRoot, "program-shard"))).filter(
+        (name) => !name.endsWith(".sha256"),
+      );
       expect(initial).toHaveLength(3);
 
       await build(9);
-      const after = (await readdir(join(cacheRoot, "program-shard")))
-        .filter((name) => !name.endsWith(".sha256"));
+      const after = (await readdir(join(cacheRoot, "program-shard"))).filter(
+        (name) => !name.endsWith(".sha256"),
+      );
       expect(after).toHaveLength(4);
       expect(initial.filter((name) => after.includes(name))).toHaveLength(3);
       const old = new Date("2000-01-01T00:00:00.000Z");
-      await Promise.all(after.map((name) => utimes(join(cacheRoot, "program-shard", name), old, old)));
+      await Promise.all(
+        after.map((name) => utimes(join(cacheRoot, "program-shard", name), old, old)),
+      );
       await build(9);
       for (const name of after) {
         // The completed archive hit returns before shard lookup/merge; exact
@@ -3764,7 +3826,7 @@ entry:
       const probe = join(dir, "probe");
       await writeFile(
         probeSource,
-        "#include <stdio.h>\nlong long scriptc_public_value(void);\nint main(void) { printf(\"%lld\\n\", scriptc_public_value()); }\n",
+        '#include <stdio.h>\nlong long scriptc_public_value(void);\nint main(void) { printf("%lld\\n", scriptc_public_value()); }\n',
       );
       execFileSync("clang", [probeSource, outPath, "-lm", "-o", probe]);
       expect(execFileSync(probe, { encoding: "utf8" })).toBe("9\n");
@@ -3827,19 +3889,23 @@ entry:
         });
       };
       await build(7);
-      const initial = (await readdir(join(cacheRoot, "program-shard")))
-        .filter((name) => !name.endsWith(".sha256"));
+      const initial = (await readdir(join(cacheRoot, "program-shard"))).filter(
+        (name) => !name.endsWith(".sha256"),
+      );
       expect(initial).toHaveLength(3);
       expect(spawnSync(outPath).status).toBe(7);
 
       await build(9);
-      const after = (await readdir(join(cacheRoot, "program-shard")))
-        .filter((name) => !name.endsWith(".sha256"));
+      const after = (await readdir(join(cacheRoot, "program-shard"))).filter(
+        (name) => !name.endsWith(".sha256"),
+      );
       expect(after).toHaveLength(4);
       expect(initial.filter((name) => after.includes(name))).toHaveLength(3);
       expect(spawnSync(outPath).status).toBe(9);
       const old = new Date("2000-01-01T00:00:00.000Z");
-      await Promise.all(after.map((name) => utimes(join(cacheRoot, "program-shard", name), old, old)));
+      await Promise.all(
+        after.map((name) => utimes(join(cacheRoot, "program-shard", name), old, old)),
+      );
       await build(9);
       for (const name of after) {
         // The completed executable hit returns before shard lookup/merge.
@@ -3850,7 +3916,9 @@ entry:
         // any program shards, including on case-insensitive macOS volumes.
         await rm(`${outPath}.dSYM`, { recursive: true });
         await build(9);
-        expect((await stat(join(`${outPath}.dSYM`, "Contents/Resources/DWARF/program"))).size).toBeGreaterThan(0);
+        expect(
+          (await stat(join(`${outPath}.dSYM`, "Contents/Resources/DWARF/program"))).size,
+        ).toBeGreaterThan(0);
         for (const name of after) {
           expect((await stat(join(cacheRoot, "program-shard", name))).mtimeMs).toBe(old.getTime());
         }
@@ -3865,8 +3933,10 @@ entry:
 );
 
 test.skipIf(
-  process.platform === "win32" || clangExecutable === undefined ||
-  ldExecutable === undefined || (process.platform === "linux" && objcopyExecutable === undefined),
+  process.platform === "win32" ||
+    clangExecutable === undefined ||
+    ldExecutable === undefined ||
+    (process.platform === "linux" && objcopyExecutable === undefined),
 )("LLVM executable shards fall back without publishing a shard-derived binary", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-exe-program-shard-fallback-"));
   scratch.push(dir);
@@ -3899,7 +3969,7 @@ test.skipIf(
         : []),
       writeFile(
         join(binDir, "ld"),
-        "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = -r ]; then exit 1; fi; done\nexec \"$SCRIPTC_TEST_REAL_LD\" \"$@\"\n",
+        '#!/bin/sh\nfor arg in "$@"; do if [ "$arg" = -r ]; then exit 1; fi; done\nexec "$SCRIPTC_TEST_REAL_LD" "$@"\n',
       ),
       writeFile(cPath, programSource),
     ]);
@@ -3913,11 +3983,13 @@ test.skipIf(
       programShards: [
         {
           name: "program-f000.ll",
-          source: "define i32 @main() {\nentry:\n  ret i32 7\n}\ndeclare hidden i64 @other_value()\n",
+          source: () =>
+            "define i32 @main() {\nentry:\n  ret i32 7\n}\ndeclare hidden i64 @other_value()\n",
         },
         {
           name: "program-f001.ll",
-          source: "declare i32 @main()\ndefine hidden i64 @other_value() {\nentry:\n  ret i64 9\n}\n",
+          source: () =>
+            "declare i32 @main()\ndefine hidden i64 @other_value() {\nentry:\n  ret i64 9\n}\n",
         },
       ],
       programPublicSymbols: ["main"],
@@ -3966,11 +4038,11 @@ test.skipIf(!nativeShardMergeAvailable)(
     const programShards = [
       {
         name: "program-f000.ll",
-        source: "define i64 @foo() {\nentry:\n  ret i64 1\n}\ndeclare i64 @bar()\n",
+        source: () => "define i64 @foo() {\nentry:\n  ret i64 1\n}\ndeclare i64 @bar()\n",
       },
       {
         name: "program-f001.ll",
-        source: "declare i64 @foo()\ndefine i64 @bar() {\nentry:\n  ret i64 2\n}\n",
+        source: () => "declare i64 @foo()\ndefine i64 @bar() {\nentry:\n  ret i64 2\n}\n",
       },
     ];
     try {
@@ -4010,7 +4082,7 @@ test.skipIf(!nativeShardMergeAvailable)(
       // The canonical TU and ABI stay fixed, but the exact shard projection
       // changes. The merged-object tier must not reuse the previous layout.
       await build("bar", join(dir, "bar-commented.lib.a"), [
-        { ...programShards[0]!, source: `; projection edit\n${programShards[0]!.source}` },
+        { ...programShards[0]!, source: () => `; projection edit\n${programShards[0]!.source()}` },
         programShards[1]!,
       ]);
       expect(await completeArtifacts(cacheRoot, "lib")).toHaveLength(3);
@@ -4027,8 +4099,11 @@ test.skipIf(!nativeShardMergeAvailable)(
 );
 
 test.skipIf(
-  process.platform === "win32" || clangExecutable === undefined || arExecutable === undefined ||
-  ldExecutable === undefined || (process.platform === "linux" && objcopyExecutable === undefined),
+  process.platform === "win32" ||
+    clangExecutable === undefined ||
+    arExecutable === undefined ||
+    ldExecutable === undefined ||
+    (process.platform === "linux" && objcopyExecutable === undefined),
 )("LLVM merged-object caches follow in-place shard merge-tool replacements", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-program-shard-merge-tool-"));
   scratch.push(dir);
@@ -4056,11 +4131,11 @@ test.skipIf(
   const programShards = [
     {
       name: "program-f000.ll",
-      source: "define i64 @foo() {\nentry:\n  ret i64 1\n}\ndeclare i64 @bar()\n",
+      source: () => "define i64 @foo() {\nentry:\n  ret i64 1\n}\ndeclare i64 @bar()\n",
     },
     {
       name: "program-f001.ll",
-      source: "declare i64 @foo()\ndefine i64 @bar() {\nentry:\n  ret i64 2\n}\n",
+      source: () => "declare i64 @foo()\ndefine i64 @bar() {\nentry:\n  ret i64 2\n}\n",
     },
   ];
   const ldWrapper = (generation: string): string => `#!/bin/sh
@@ -4084,15 +4159,16 @@ exec "$SCRIPTC_TEST_REAL_LD" "$@"
     process.env["SCRIPTC_TEST_REAL_LD"] = ldExecutable!;
     process.env["SCRIPTC_TEST_MERGE_LOG"] = mergeLog;
     delete process.env["SCRIPTC_NO_CACHE"];
-    const build = (outPath: string): Promise<void> => compileLibArchive({
-      cPath,
-      programSource,
-      programShards,
-      programPublicSymbols: ["foo", "bar"],
-      outPath,
-      cacheIdentity: TEST_CACHE_IDENTITY,
-      optimization: "dev",
-    });
+    const build = (outPath: string): Promise<void> =>
+      compileLibArchive({
+        cPath,
+        programSource,
+        programShards,
+        programPublicSymbols: ["foo", "bar"],
+        outPath,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        optimization: "dev",
+      });
 
     await build(join(dir, "first.lib.a"));
     await writeFile(join(binDir, "ld"), ldWrapper("second"));
@@ -4151,8 +4227,8 @@ test.skipIf(
       // If compilation reaches either shard, this build fails. Missing ld
       // (and objcopy on Linux) must select the valid canonical TU instead.
       programShards: [
-        { name: "program-f000.ll", source: "not valid LLVM IR\n" },
-        { name: "program-f001.ll", source: "also not valid LLVM IR\n" },
+        { name: "program-f000.ll", source: () => "not valid LLVM IR\n" },
+        { name: "program-f001.ll", source: () => "also not valid LLVM IR\n" },
       ],
       programPublicSymbols: ["public_value"],
       outPath,
@@ -4170,8 +4246,10 @@ test.skipIf(
 });
 
 test.skipIf(
-  process.platform === "win32" || clangExecutable === undefined || arExecutable === undefined ||
-  (process.platform === "linux" && objcopyExecutable === undefined),
+  process.platform === "win32" ||
+    clangExecutable === undefined ||
+    arExecutable === undefined ||
+    (process.platform === "linux" && objcopyExecutable === undefined),
 )("LLVM library shards fall back when an available host merge tool fails", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-program-shard-merge-failure-"));
   scratch.push(dir);
@@ -4215,11 +4293,13 @@ test.skipIf(
       programShards: [
         {
           name: "program-f000.ll",
-          source: "define i64 @public_value() {\nentry:\n  ret i64 7\n}\ndeclare i64 @other_value()\n",
+          source: () =>
+            "define i64 @public_value() {\nentry:\n  ret i64 7\n}\ndeclare i64 @other_value()\n",
         },
         {
           name: "program-f001.ll",
-          source: "declare i64 @public_value()\ndefine i64 @other_value() {\nentry:\n  ret i64 9\n}\n",
+          source: () =>
+            "declare i64 @public_value()\ndefine i64 @other_value() {\nentry:\n  ret i64 9\n}\n",
         },
       ],
       programPublicSymbols: ["public_value", "other_value"],
@@ -4285,23 +4365,29 @@ test.skipIf(process.platform === "win32" || zigExecutable === undefined)(
         ].join("\n"),
         outPath: archivePath,
         cacheIdentity: TEST_CACHE_IDENTITY,
-        localizeSymbols: [
-          "scriptc_large_program_value",
-          "scriptc_build_id",
-          "scriptc_abi_version",
-        ],
+        localizeSymbols: ["scriptc_large_program_value", "scriptc_build_id", "scriptc_abi_version"],
       });
-      await writeFile(probePath, [
-        "int scriptc_large_program_value(void);",
-        "unsigned long long scriptc_build_id(void);",
-        "unsigned scriptc_abi_version(void);",
-        "int main(void) {",
-        "  return scriptc_large_program_value() != 7 || scriptc_build_id() != 2 || scriptc_abi_version() != 1;",
-        "}",
-        "",
-      ].join("\n"));
+      await writeFile(
+        probePath,
+        [
+          "int scriptc_large_program_value(void);",
+          "unsigned long long scriptc_build_id(void);",
+          "unsigned scriptc_abi_version(void);",
+          "int main(void) {",
+          "  return scriptc_large_program_value() != 7 || scriptc_build_id() != 2 || scriptc_abi_version() != 1;",
+          "}",
+          "",
+        ].join("\n"),
+      );
       execFileSync(zigExecutable!, [
-        "cc", "-target", target, probePath, archivePath, "-lm", "-o", probeOutput,
+        "cc",
+        "-target",
+        target,
+        probePath,
+        archivePath,
+        "-lm",
+        "-o",
+        probeOutput,
       ]);
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
@@ -4325,12 +4411,21 @@ for (const cached of [false, true]) {
       const wrapperDirectory = join(directory, "tools");
       const invocationLog = join(directory, "invocations.jsonl");
       const source = join(directory, "program.c");
-      const environmentKeys = ["PATH", "SCRIPTC_CC", "SCRIPTC_TARGET", "SCRIPTC_CACHE_DIR", "SCRIPTC_NO_CACHE", "SCRIPTC_TEST_DISABLE_CCACHE"];
+      const environmentKeys = [
+        "PATH",
+        "SCRIPTC_CC",
+        "SCRIPTC_TARGET",
+        "SCRIPTC_CACHE_DIR",
+        "SCRIPTC_NO_CACHE",
+        "SCRIPTC_TEST_DISABLE_CCACHE",
+      ];
       const previous = new Map(environmentKeys.map((key) => [key, process.env[key]]));
       try {
         await mkdir(wrapperDirectory);
         await writeFile(join(directory, "sibling.h"), '#define MESSAGE "sanitized dev"\n');
-        await writeFile(source, `#include <stdio.h>
+        await writeFile(
+          source,
+          `#include <stdio.h>
 #include "sibling.h"
 #if defined(__OPTIMIZE__)
 #error dev program must remain unoptimized
@@ -4339,8 +4434,11 @@ for (const cached of [false, true]) {
 #error program must retain AddressSanitizer
 #endif
 int main(void) { puts(MESSAGE); return 0; }
-`);
-        await writeFile(join(wrapperDirectory, "clang"), `#!/usr/bin/env node
+`,
+        );
+        await writeFile(
+          join(wrapperDirectory, "clang"),
+          `#!/usr/bin/env node
 const { appendFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
@@ -4348,7 +4446,8 @@ if ((args.includes('-c') || args.some(arg => arg.endsWith('/scr_cycle.c'))) && !
 const result = spawnSync(${JSON.stringify(clangExecutable)}, args, { stdio: 'inherit' });
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);
-`);
+`,
+        );
         await chmod(join(wrapperDirectory, "clang"), 0o755);
         process.env["PATH"] = wrapperDirectory + delimiter + (previous.get("PATH") ?? "");
         process.env["SCRIPTC_CC"] = "clang";
@@ -4358,19 +4457,31 @@ process.exit(result.status ?? 1);
         else process.env["SCRIPTC_NO_CACHE"] = "1";
         delete process.env["SCRIPTC_TARGET"];
         trustInstrumentedCompilerWrapper();
-        const options = { cPath: source, sanitize: true, optimization: "dev" as const,
-          ...(cached ? { cacheIdentity: TEST_CACHE_IDENTITY, systemLibraries: ["m"] } : {}) };
+        const options = {
+          cPath: source,
+          sanitize: true,
+          optimization: "dev" as const,
+          ...(cached ? { cacheIdentity: TEST_CACHE_IDENTITY, systemLibraries: ["m"] } : {}),
+        };
         for (let index = 0; index < (cached ? 2 : 1); index++) {
           const output = join(directory, "program-" + index);
           await compileC({ ...options, outPath: output });
           expect(execFileSync(output, { encoding: "utf8" })).toBe("sanitized dev\n");
           if (process.platform === "darwin") expect(existsSync(output + ".dSYM")).toBe(true);
         }
-        const invocations = (await readFile(invocationLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as string[]);
-        const programCompiles = invocations.filter((args) => args.some((arg) => arg.endsWith("/program.c")));
+        const invocations = (await readFile(invocationLog, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[]);
+        const programCompiles = invocations.filter((args) =>
+          args.some((arg) => arg.endsWith("/program.c")),
+        );
         expect(programCompiles.length).toBeGreaterThanOrEqual(cached ? 2 : 1);
-        for (const args of programCompiles) expect(args.filter((arg) => /^-O\d$/.test(arg)).at(-1)).toBe("-O0");
-        const runtimeCompiles = invocations.filter((args) => args.some((arg) => arg.endsWith("/scr_cycle.c")));
+        for (const args of programCompiles)
+          expect(args.filter((arg) => /^-O\d$/.test(arg)).at(-1)).toBe("-O0");
+        const runtimeCompiles = invocations.filter((args) =>
+          args.some((arg) => arg.endsWith("/scr_cycle.c")),
+        );
         expect(runtimeCompiles).toHaveLength(1);
         expect(runtimeCompiles[0]!.filter((arg) => /^-O\d$/.test(arg)).at(-1)).toBe("-O1");
         expect(runtimeCompiles[0]).toContain("-fsanitize=address");

@@ -1,0 +1,17 @@
+contract-nothrow-handlers.ts:15:51 - error SC7001: 'cleanup' is declared NoThrow but may throw: calls 'parseDigit' at contract-nothrow-handlers.ts:17:12 → throw statement at contract-nothrow-handlers.ts:11:27
+
+  14 | 
+  15 | function cleanup(text: string, counter: Counter): NoThrow<number> {
+     |                                                   ^~~~~~~~~~~~~~~
+  16 |   try {
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
+
+contract-nothrow-handlers.ts:23:34 - error SC7001: 'rethrows' is declared NoThrow but may throw: rethrow at contract-nothrow-handlers.ts:27:26
+
+  22 | 
+  23 | function rethrows(text: string): NoThrow<number> {
+     |                                  ^~~~~~~~~~~~~~~
+  24 |   try {
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow

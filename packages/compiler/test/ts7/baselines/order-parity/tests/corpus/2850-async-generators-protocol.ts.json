@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2850-async-generators-protocol.ts"
+ ],
+ "diags": []
+}

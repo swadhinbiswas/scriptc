@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/module-resolution-introspection.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4081-hoisted-function-tdz.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2614-trap-binding-later-writes.ts"
+ ],
+ "diags": []
+}

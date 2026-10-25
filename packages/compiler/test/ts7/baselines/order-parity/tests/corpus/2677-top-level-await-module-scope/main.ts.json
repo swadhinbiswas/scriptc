@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2677-top-level-await-module-scope/a.ts",
+  "<repo>/tests/corpus/2677-top-level-await-module-scope/b.ts",
+  "<repo>/tests/corpus/2677-top-level-await-module-scope/main.ts"
+ ],
+ "diags": []
+}

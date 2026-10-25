@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1840-jsdoc-import-type-only/main.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/retired-engine-2084-destructuring-primitive-sources.ts"
+ ],
+ "diags": []
+}

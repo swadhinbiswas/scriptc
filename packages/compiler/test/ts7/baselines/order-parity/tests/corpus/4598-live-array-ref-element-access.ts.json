@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4598-live-array-ref-element-access.ts"
+ ],
+ "diags": []
+}

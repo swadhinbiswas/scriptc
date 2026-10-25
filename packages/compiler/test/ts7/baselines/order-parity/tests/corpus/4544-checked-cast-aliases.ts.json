@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4544-checked-cast-aliases.ts"
+ ],
+ "diags": []
+}

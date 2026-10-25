@@ -38,9 +38,7 @@ export function emitLibraryIdentityLines(
   ];
 }
 
-function identityOffsets(
-  source: string,
-): { start: number; end: number } | null {
+function identityOffsets(source: string): { start: number; end: number } | null {
   const { begin, end } = identityMarkers();
   const start = source.indexOf(`${begin}\n`);
   if (start < 0) return null;
@@ -48,17 +46,16 @@ function identityOffsets(
     throw new InternalCompilerError("generated library TU contains multiple identity regions");
   }
   const endStart = source.indexOf(end, start + begin.length);
-  if (endStart < 0) throw new InternalCompilerError("generated library TU has an unterminated identity region");
+  if (endStart < 0)
+    throw new InternalCompilerError("generated library TU has an unterminated identity region");
   return { start, end: endStart + end.length };
 }
 
 /** Refresh only the volatile identity block in a cached public TU. */
-export function replaceLibraryIdentity(
-  source: string,
-  identity: LibraryIdentityValues,
-): string {
+export function replaceLibraryIdentity(source: string, identity: LibraryIdentityValues): string {
   const offsets = identityOffsets(source);
-  if (offsets === null) throw new InternalCompilerError("generated public library TU has no identity region");
+  if (offsets === null)
+    throw new InternalCompilerError("generated public library TU has no identity region");
   const replacement = emitLibraryIdentityLines(identity).join("\n");
   return source.slice(0, offsets.start) + replacement + source.slice(offsets.end);
 }
@@ -66,9 +63,7 @@ export function replaceLibraryIdentity(
 /** Remove the generated identity region from a complete caller-visible
  * library TU. Archive assembly compiles this stable projection beside the
  * small volatile identity object, while the public TU remains complete. */
-export function stripLibraryIdentity(
-  source: string,
-): string {
+export function stripLibraryIdentity(source: string): string {
   const offsets = identityOffsets(source);
   if (offsets === null) return source;
   const endOffset = offsets.end;

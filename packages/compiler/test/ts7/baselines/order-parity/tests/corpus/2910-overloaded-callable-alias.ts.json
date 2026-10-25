@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2910-overloaded-callable-alias.ts"
+ ],
+ "diags": []
+}

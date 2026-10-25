@@ -1,4 +1,3 @@
-// @dynamic
 // Object.create under --dynamic routes through the ENGINE's own
 // Object.create — the checker types the result 'any' (an engine value),
 // and the engine answers with REAL prototype semantics: reads delegate

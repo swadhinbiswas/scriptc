@@ -11,7 +11,9 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const repoRoot = join(import.meta.dirname, "../../..");
 const cliEntry = join(repoRoot, "packages/cli/src/main.ts");
-const tsxLoader = pathToFileURL(join(dirname(require.resolve("tsx/package.json")), "dist/loader.mjs")).href;
+const tsxLoader = pathToFileURL(
+  join(dirname(require.resolve("tsx/package.json")), "dist/loader.mjs"),
+).href;
 const dirs: string[] = [];
 
 afterEach(async () => {
@@ -57,35 +59,47 @@ test("rejects the subsystem option outside Windows executable builds", async () 
       stderr: expect.stringContaining("--windows-subsystem"),
     });
   }
-  await expect(cli(["build", entry, "--windows-subsystem=gui"], {
-    ...process.env,
-    SCRIPTC_TARGET: "wasm32-wasi",
-  })).rejects.toMatchObject({
+  await expect(
+    cli(["build", entry, "--windows-subsystem=gui"], {
+      ...process.env,
+      SCRIPTC_TARGET: "wasm32-wasi",
+    }),
+  ).rejects.toMatchObject({
     code: 1,
     stderr: expect.stringContaining("requires a Windows executable target"),
   });
-  await expect(readFile(join(dir, ".scriptc", "app.wasm"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readFile(join(dir, ".scriptc", "app.wasm"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 });
 
 test.skipIf(process.platform !== "win32" && process.env["SCRIPTC_WIN_SUBSYSTEM"] !== "1")(
   "builds console and GUI PE executables without cross-subsystem cache hits",
   async () => {
     const { dir, entry } = await fixture();
-    const env = process.platform === "win32"
-      ? { ...process.env, SCRIPTC_CACHE_DIR: join(dir, "cache") }
-      : {
-          ...process.env,
-          SCRIPTC_CC: "zigcc",
-          SCRIPTC_TARGET: "x86_64-windows-gnu",
-          SCRIPTC_CACHE_DIR: join(dir, "cache"),
-          ZIG_GLOBAL_CACHE_DIR: join(dir, "zig-cache"),
-        };
+    const env =
+      process.platform === "win32"
+        ? { ...process.env, SCRIPTC_CACHE_DIR: join(dir, "cache") }
+        : {
+            ...process.env,
+            SCRIPTC_CC: "zigcc",
+            SCRIPTC_TARGET: "x86_64-windows-gnu",
+            SCRIPTC_CACHE_DIR: join(dir, "cache"),
+            ZIG_GLOBAL_CACHE_DIR: join(dir, "zig-cache"),
+          };
     const llvmOut = join(dir, "llvm.exe");
     const build = async (backend: "llvm", out: string, subsystem?: "console" | "gui") => {
-      await cli([
-        "build", entry, `--backend=${backend}`, "-o", out,
-        ...(subsystem === undefined ? [] : [`--windows-subsystem=${subsystem}`]),
-      ], env);
+      await cli(
+        [
+          "build",
+          entry,
+          `--backend=${backend}`,
+          "-o",
+          out,
+          ...(subsystem === undefined ? [] : [`--windows-subsystem=${subsystem}`]),
+        ],
+        env,
+      );
       return peSubsystem(out);
     };
     expect(await build("llvm", llvmOut)).toBe(3);

@@ -1,26 +1,32 @@
-import { emitLlvmLayouts } from "./layouts.js";
-import { llvmBytes as llBytes } from "../literals.js";
+import type { TargetCpu } from "../target-cpu.js";
+import { relieveHeapPressure } from "../../heap-pressure.js";
+import { wasmBoundsChecks } from "./wasm-modules.js";
+import { jsTruthy } from "./jsval.js";
+import { JsIcSites } from "../../ir/js-ic.js";
+import { type ArraySearchKind } from "./array-search.js";
+import { emitStringInputs } from "./string-lifetimes.js";
+import { emitThreadSlotsIntrinsic } from "./thread-slots.js";
+import {
+  CYC_BUF,
+  CYC_HDR,
+  FIRST_EMITTED_CYC_KIND,
+  inlineAllocSupported,
+  RECORD_SOURCES_GATE,
+  WEAK_KEYS_GATE,
+} from "./alloc.js";
+import { youngNurseryRequested } from "../young-nursery.js";
+import { llvmBytes as llBytes, wtf8Bytes } from "../literals.js";
 import { InternalCompilerError } from "../../errors.js";
-/** Lower typed IR to LLVM, using the runtime's C ABI.
- *
- * Reference-counted temporaries own one reference. Declarations, assignments,
- * returns and arguments move that ownership; frame and scope exits release
- * everything remaining. Slot-backed entries release the slot's current value.
- *
- * Exceptions use a pending flag and explicit cleanup edges. Throwing calls
- * test scr_exc_pending before consuming results, release the scopes crossed,
- * and branch to the innermost handler or return to the caller. Catch bindings
- * hold ScrCaught snapshots; finally runs on normal, throwing and returning
- * paths. This keeps ownership cleanup intact without nonlocal jumps.
- *
- * Program objects are emitted by the packaged LLVM helper and linked with
- * runtime packs. Sanitizer development builds use an external LLVM driver.
- * Dynamic values and islands share the runtime ABI; embedded npm modules use
- * compressed source tables that the runtime inflates on demand.
- */
-import { deflateRawSync } from "node:zlib";
-import { endsWithJump, matchStringSelfConcat, streamTypedRefEligible } from "../../ir/analysis.js";
-import { emitLibraryIdentityLines } from "../library-identity-markers.js";
+import { serializeModuleParts } from "../../ir/serialize.js";
+import { createHash } from "node:crypto";
+import {
+  endsWithJump,
+  matchFieldSelfConcat,
+  readsArraySlot,
+  streamTypedRefEligible,
+  undefinedArmTag,
+} from "../../ir/analysis.js";
+import { loopTestsEveryIteration } from "../loop-polls.js";
 import type {
   IrBytesElem,
   IrExpr,
@@ -36,73 +42,375 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/ir.js";
-import { CAUGHT, ffiCallbackType, isDynTypedRefType, isFfiContextParam, isRefCounted, isUnitType, moduleRuntimeFeatures, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, NPM_COMPRESS_MIN, POINTER_KINDS, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, typeKey, VOID } from "../../ir/ir.js";
-import { matchIntegerArrayForLoop, matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
-import { scalarizeNumericRecords } from "../../ir/scalar-records.js";
-import { everyStmtList } from "../../ir/traverse.js";
-import { analyzeIntegerRanges, type IntegerRanges } from "../../ir/integer-ranges.js";
-import { findIntegerViews } from "./integer-views.js";
+import {
+  isDynTypedRefType,
+  isRefCounted,
+  isUnitType,
+  POINTER_KINDS,
+  RUNTIME_EMITTER_CLASS,
+  RUNTIME_EVENT_CLASS,
+  RUNTIME_EVENT_TARGET_CLASS,
+  RUNTIME_ERROR_CLASSES,
+  RUNTIME_STREAM_CLASSES,
+  typeEquals,
+  typeKey,
+  VOID,
+  classJsName,
+  classValueAbiEquals,
+} from "../../ir/ir.js";
+import { moduleRuntimeFeatures, type RuntimeFeatures } from "../../ir/runtime-features.js";
+import { captureFreeFunctions, observesStacks } from "../stack-observations.js";
+import { findInitializedByteLoopBindings } from "./byte-windows.js";
+import { matchBytesLoopVersion } from "./bytes-loop-versions.js";
+import { globalSlotAlias } from "./bytes-alias.js";
+import type { IntegerCountedForLoop, IntegerPairedForLoop } from "../../ir/integer-loops.js";
+import {
+  materializeSplitPiece,
+  type SplitSpan,
+  type StoredSplitSnapshot,
+  type StringSplit,
+} from "./split-loops.js";
+import { scalarizeLiteralResults, scalarizeNumericRecords } from "../../ir/scalar-records.js";
+import { addRecordResultEntries, resultEntryName } from "./record-results.js";
+import { specializeCallbackCalls } from "../../ir/callback-specialization.js";
+import {
+  type ChunkResult,
+  EmitJournal,
+  registerReplay,
+  renameChunk,
+  replayJournal,
+} from "./emit-journal.js";
+import { specializeNumericCalls } from "../../ir/numeric-call-specialization.js";
+import { versionLoopBoundParameters } from "../../ir/parameter-versions.js";
+import { inlineExpressionFunctions } from "../../ir/expression-inlining.js";
+import { pairRowSums } from "../../ir/row-pairs.js";
+import {
+  allocatedLiteral,
+  fillAllocationLength,
+  int32ArrayKey,
+  selectInt32Arrays,
+  type Int32ArrayProof,
+  type Int32ArrayRevision,
+} from "../../ir/int32-arrays.js";
+import { everyExpr, everyExprChild, everyStmtChild, everyStmtList } from "../../ir/traverse.js";
+import {
+  INT32_RANGE,
+  withinInt32,
+  type IntegerRange,
+  type IntegerRanges,
+} from "../../ir/integer-ranges.js";
+import { unshareNodes } from "../../ir/unshare.js";
+import { runPairedWhileLoopsAsFor } from "../../ir/paired-while-loops.js";
+import { copyStableCaptures } from "../../ir/capture-values.js";
+import { resolveSelfCaptures } from "../../ir/self-captures.js";
+import {
+  analyzeInt32Slots,
+  dynamicFieldStores,
+  Int32RevisionConflict,
+  type DynamicFieldStores,
+  Int32Slots,
+} from "../../ir/int32-slots.js";
+import { analyzeFinalFields, type FinalFields } from "../../ir/final-fields.js";
+import { foldConstantGlobals } from "../../ir/constant-globals.js";
+import { dropUnwrittenPropertyBags } from "../../ir/property-bags.js";
+import { freezeInitOnlyGlobals } from "../../ir/init-only-globals.js";
+import { hoistFinalFieldReads } from "../../ir/field-values.js";
+import { holdCharLocalsAsUnits } from "../../ir/char-unit-locals.js";
+import { unitSafeFunctions } from "./string-unit-versions.js";
+import { stringScanInline } from "./string-reads.js";
+import {
+  findInt32Abis,
+  INT32_ABI_SUFFIX,
+  SCALAR_UNION_DUMMY,
+  SCALAR_UNION_RESULT,
+  type Int32Abi,
+} from "./int32-abi.js";
+import { type Int32Local } from "./int32-locals.js";
+import { findIntegerClones, NO_INTEGER_CLONES, type IntegerClones } from "./integer-clones.js";
+import { exactInteger, narrowInteger, widenInteger, type LlInteger } from "./integer-values.js";
+import { findInitializerBindings } from "../../ir/initializer-bindings.js";
 import { findConstantNumericTables, type ConstantNumericTable } from "../../ir/constant-tables.js";
-import { allocateFfiCallbackAdapters, hasForeignFfiCallback, hasRetainedFfiCallback, type FfiCallbackAdapter } from "../ffi-callbacks.js";
-import { RUNTIME_ABI_MARKER } from "../runtime-abi.js";
+import {
+  allocateFfiCallbackAdapters,
+  hasForeignFfiCallback,
+  hasRetainedFfiCallback,
+  type FfiCallbackAdapter,
+} from "../ffi-callbacks.js";
 import { computeMayThrow } from "../may-throw.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleBorrowedFunction, mangleClassObj, mangleClassStruct, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordStruct, mangleTrampoline, mangleWrapper, mangleVtInstance } from "../mangle.js";
+import {
+  UNWIND_PERSONALITY,
+  UNWIND_RAISE,
+  UNWIND_RAISE_DECLARATION,
+  UNWIND_RESUME,
+  UNWIND_SLOT,
+  UnwindAbiViolation,
+  bridgePlainUnwindCalls,
+  unwindAbiFunctions,
+} from "./unwind-abi.js";
+import {
+  mangleAsyncInlineAwaitCall,
+  mangleAsyncSpawn,
+  mangleBorrowedFunction,
+  mangleClassObj,
+  mangleFnClosure,
+  mangleFunction,
+  mangleGenSpawn,
+  mangleGlobal,
+  mangleLocal,
+  mangleRecordStruct,
+  mangleWrapper,
+  mangleBorrowingWrapper,
+} from "../mangle.js";
 import { analyzeCallLifetimes, type CallLifetimes } from "./call-lifetimes.js";
-import { emitStackUnion, findLocalStackUnions } from "./stack-unions.js";
+import {
+  stackObjectStruct,
+  type StackObjectField,
+  type StackObjectSource,
+} from "./stack-objects.js";
+import {
+  type LocalUnionStorageProof,
+  type LocalUnionStorage,
+  type UnionSources,
+} from "./local-union-storage.js";
 import { BlockBuilder } from "./blocks.js";
-import { emitLocalArrayRead, findArrayPreservingFunctions, findLocalArrayReads, findCallArrayReads, OptionalArrayReads, type LocalArrayRead } from "./local-array-reads.js";
-import { emitStackMapRead, findMapReadLifetimes, type MapReadLifetimes } from "./map-read-lifetimes.js";
-import { emitBorrowedFieldSequence } from "./borrowed-receivers.js";
+import { NullableRefFields, type NullableRefField } from "./nullable-fields.js";
+import {
+  InlineUnionFields,
+  loadInlineUnion,
+  presentBits,
+  stackUnionBox,
+  storeInlineUnion,
+  unionBoxBits,
+} from "./inline-unions.js";
+import { OptionalArrayReads, type LocalArrayRead } from "./local-array-reads.js";
+import { CheckedNarrows } from "./checked-narrows.js";
+import {
+  emitDenseArraySet,
+  emitDenseSlotUnlink,
+  SCR_ELEM_I32,
+  type ArrayAccess,
+} from "./dense-array-access.js";
+import { matchMapRead, type MapReadLifetimes } from "./map-read-lifetimes.js";
+import { type MapEntryFusion } from "./map-entry-fusion.js";
+import { emitBorrowedFieldSequence, guardedValue } from "./borrowed-receivers.js";
+import { emitBorrowedInputs } from "./borrowed-inputs.js";
+import { findWalkBorrows, type WalkBorrowHost } from "./walk-borrows.js";
+import { eachNodeOfKinds, IrNodeIndex, type IrNodeKind } from "../../ir/node-index.js";
+import { lastUseRead } from "./local-extents.js";
+import { findReboundParameters } from "./rebound-parameters.js";
+import { ReferenceEffects } from "./reference-effects.js";
+import { ReferenceWrites, type Writes } from "./reference-writes.js";
 import { LlvmDebugInfo } from "./debug-info.js";
-import { f64Lit, ffiNativeTypeLl, ffiNativeParamLl, ffiNativeReturnLl, llvmCommentText } from "./common.js";
+import { StackCallbacks } from "./stack-callbacks.js";
+import { findAppendedArrayLiterals, reservedArrayLength } from "./appended-array-literals.js";
+import { AmbientReceiverReaders, findConstantCallbacks } from "./constant-callbacks.js";
+import {
+  findLentRecordFields,
+  findLentStringParameters,
+  findRecordFieldProducers,
+  type LendingFacts,
+  type StringSliceSnapshot,
+} from "./string-slices.js";
+import { LazyCaptures } from "./lazy-captures.js";
+import { StackCaptures } from "./stack-captures.js";
+import { emitFieldAbsentTest, f64Lit, SCR_ARR_FIELD, SCR_ARR_FROZEN } from "./common.js";
 import { ffiExtendsNarrowIntegers } from "../targets.js";
-import { emitLiteralExpr, emitOperatorExpr, emitStringExpr, emitContainerExpr, emitRecordExpr } from "./expr-primitives.js";
+import {
+  emitLiteralExpr,
+  emitOperatorExpr,
+  emitStringExpr,
+  emitContainerExpr,
+  emitRecordExpr,
+} from "./expr-primitives.js";
 import { emitControlExpr } from "./expr-control.js";
 import { emitCallExpr } from "./expr-calls.js";
 import { emitDynamicExpr } from "./expr-dynamic.js";
 import { emitIntrinsicExpr, emitSerializationExpr, emitAsyncExpr } from "./expr-async.js";
-import { emitJsInteropExpr, emitExpr } from "./expr-dispatch.js";
-import { emitJsMarshal, emitJsOp, emitJsExit, islandAdapter, islandTypedAdapter } from "./expr-island.js";
-import { dynKind, raceAdapterFor, genResultThunkFor, childExitThunkFor, childExitSignalThunkFor, childDataThunkFor, execFileThunkFor, ipcMessageThunkFor, ipcSendThunkFor, emitterFixedAdapter, wrapEmitterListener, unwrapNullableClosure, closeBindThunkFor, closeOverrideWrapFor } from "./expr-callbacks.js";
-import { streamDataAdapter, streamDoneFnFor, cryptoBytesThunkFor, fsRenameThunkFor, streamCbThunkFor, zlibBytesThunkFor } from "./expr-stream-callbacks.js";
-import { emitStableReceiver, resolveThunkFor, tagInSet, arrPush, emitArrayCopyLoop, emitStrIntrinsic, emitArrIntrinsic, wrapNullable, emitMapNew, mapSet, emitMapLikeIntrinsic, emitSetNew } from "./expr-containers.js";
-import { emitIntegerLoopIndex, emitBytesIndex, emitBytesData, emitBytesLength, emitBytesGet, emitToUint32, emitBytesSet, emitBytesIntrinsic } from "./expr-bytes.js";
+import { PublishWalkers } from "./publish.js";
+import { computeImmutableFields, stableGlobals, type ImmutableFields } from "../immutability.js";
+import { computeCycleMutability, hierarchyUnitOfClass } from "../cycle-mutability.js";
+import { computePublishedTypes, type PublishedTypes } from "../publication.js";
+import { emitExpr } from "./expr-dispatch.js";
+import { LOOPS } from "./loop-state.js";
+
+import {
+  dynKind,
+  raceAdapterFor,
+  genResultThunkFor,
+  childExitThunkFor,
+  childExitSignalThunkFor,
+  childDataDynThunkFor,
+  childDataThunkFor,
+  execFileThunkFor,
+  ipcMessageThunkFor,
+  ipcSendThunkFor,
+  emitterFixedAdapter,
+  emitterOnceAdapter,
+  wrapEmitterListener,
+  unwrapNullableClosure,
+  closeBindThunkFor,
+  closeOverrideWrapFor,
+} from "./expr-callbacks.js";
+import {
+  streamDataAdapter,
+  streamDoneFnFor,
+  cryptoBytesThunkFor,
+  cryptoIntThunkFor,
+  type BytesThunkValue,
+  fsRenameThunkFor,
+  streamCbThunkFor,
+  zlibBytesThunkFor,
+} from "./expr-stream-callbacks.js";
+import {
+  emitStableReceiver,
+  resolveThunkFor,
+  tagInSet,
+  arrPush,
+  emitArrayCopyLoop,
+  emitStrIntrinsic,
+  emitArrIntrinsic,
+  wrapNullable,
+  emitMapNew,
+  mapSet,
+  emitMapLikeIntrinsic,
+  emitSetNew,
+} from "./expr-containers.js";
+import {
+  emitIntegerLoopIndex,
+  emitBytesIndex,
+  emitBytesData,
+  emitBytesLength,
+  emitBytesGet,
+  emitToUint32,
+  emitBytesSet,
+  emitBytesIntrinsic,
+} from "./expr-bytes.js";
 import { emitRegexIntrinsic, emitRecordKeyGet, keyedRecordReadInto } from "./expr-records.js";
-import { dynPromiseAdapter, streamTypedRefCommitAdapter, liveDynUnionRefAdapter, streamTypedRefBoxValue, streamTypedRefMaterializeAdapter, streamFromArrayAdapter } from "./expr-stream-bridges.js";
-import { emitWebLibCall, emitDynamicLibCall, emitFilesystemLibCall, emitPathUrlLibCall, emitPrimitiveLibCall } from "./lib-filesystem.js";
-import { emitChildProcessLibCall, emitAsyncContextLibCall, emitProcessLibCall, emitErrorsEventsLibCall } from "./lib-process.js";
+import {
+  dynPromiseAdapter,
+  streamTypedRefCommitAdapter,
+  liveDynUnionRefAdapter,
+  streamTypedRefBoxValue,
+  streamTypedRefMaterializeAdapter,
+  streamFromArrayAdapter,
+} from "./expr-stream-bridges.js";
+import {
+  emitWebLibCall,
+  emitDynamicLibCall,
+  emitFilesystemLibCall,
+  emitPathUrlLibCall,
+  emitPrimitiveLibCall,
+} from "./lib-filesystem.js";
+import {
+  emitChildProcessLibCall,
+  emitAsyncContextLibCall,
+  emitProcessLibCall,
+  emitErrorsEventsLibCall,
+} from "./lib-process.js";
 import { emitStreamLibCall } from "./lib-stream.js";
 import { emitNetworkHttpLibCall } from "./lib-network.js";
-import { emitAssertInspectLibCall, emitIoLibCall, emitGenericLibCall, emitLibCall } from "./lib-dispatch.js";
 import {
+  emitAssertInspectLibCall,
+  emitIoLibCall,
+  emitGenericLibCall,
+  emitLibCall,
+} from "./lib-dispatch.js";
+import {
+  assignCompactLayouts,
   buildClassGraph,
-  classEnvironmentIndex,
+  classFieldTypes,
+  classMembershipIntervals,
   classFieldIndex,
+  compactRefLoadLines,
+  compactRefStoreLines,
+  classPreLines,
   classStructSym,
+  programLifetimeClass,
   type LlClassMeta,
 } from "./classes.js";
-import { LlDyn, type DynHost } from "./dyn.js";
+import { LifetimeRegions, REGION_TYPES } from "./regions.js";
+import { LlDyn, recordDynKeepsIdentity, type DynHost } from "./dyn.js";
+import { VirtualBorrows } from "./virtual-borrows.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import { LlWalkers } from "./walkers.js";
+import { isObjectArm, NULLABLE_ABSENT, NULLABLE_NULL, NullableUnions } from "./nullable-unions.js";
+import { emitNullablePresent, emitUnionPeek, emitUnionTag } from "./union-repr.js";
+import {
+  emitConcatInputs,
+  emitMixedConcat,
+  numberPart,
+  stringParts,
+} from "./string-construction.js";
 import {
   arrNewCall,
   boxAccess,
-  boxNewCall,
-  computeTraced,
   elemAccess,
+  boxNewCall,
+  boxReleaseSym,
+  computeTraced,
+  emitInlineRcHelpers,
+  emitNullableRetainWrappers,
+  emitShapeUnionHelpers,
   FN_ATTRS,
+  inlineRcDecls,
+  type InlineRcMode,
   llFieldType,
+  mapFlagsOffset,
+  type MapKeyAccess,
   releaseSym,
   retainSym,
   traceArg,
-  typedRefConstructor,
   vAdapters,
 } from "./shapes.js";
 import type { ExprOf, LibCallExpr, LlStreamTypedRefAdapter, LlValue } from "./expr-context.js";
+import { INLINE_LITERAL_BYTES } from "./string-literal-equality.js";
+import {
+  inlinableNumberFunction,
+  withSpeculativeValue,
+  type InlinableFunction,
+  type SpeculationContext,
+  type SpeculativeValue,
+} from "./speculative-integers.js";
+import {
+  emitFfiCallbackDefs,
+  emitLibDefs,
+  emitModuleParts,
+  emitParts,
+  helperDefs,
+  workerMinFunctions,
+} from "./emit-module.js";
+import { forkedAnalysis } from "./forked-analysis.js";
+import {
+  emitLoopCopies,
+  emitSpeculativeWrite,
+  emitStmtBody,
+  emitStringSelfConcatAssign,
+  emitSwitch,
+  emitTryCatch,
+} from "./emit-statements.js";
+import {
+  emitArgPackAndTrampolinePrologue,
+  emitAsyncAwaitCall,
+  emitAsyncScaffolding,
+  emitFunction,
+  emitGenScaffolding,
+  emitWasiFulfill,
+  fiberlessAsyncFunctions,
+  parkingFunctions,
+} from "./emit-function.js";
+import {
+  analyzeBorrowedReturns,
+  canBorrowCallArgument,
+  canBorrowReceiver,
+  canStackReceiver,
+  emitReadReceiver,
+  fieldAliasMetadata,
+  isStackUnionSource,
+} from "./receivers.js";
 
 export { LlvmUnsupportedError } from "./unsupported.js";
 
-interface LlArgPackAndTrampolinePrologue {
+export interface LlArgPackAndTrampolinePrologue {
   definitions: string[];
   pack: string;
   lifted: boolean;
@@ -113,7 +421,7 @@ interface LlArgPackAndTrampolinePrologue {
   argPackLines: string[];
 }
 
-function ffiCallbackDummyLl(callback: IrFfiCallbackParam["callback"]): string {
+export function ffiCallbackDummyLl(callback: IrFfiCallbackParam["callback"]): string {
   switch (callback.returns) {
     case "i64":
     case "u64":
@@ -139,15 +447,46 @@ function ffiCallbackDummyLl(callback: IrFfiCallbackParam["callback"]): string {
   }
 }
 
-interface LlScopeEntry {
+export interface LlScopeEntry {
   slot: string;
   type: IrType;
   boxed?: boolean;
+  /** A lazily created box: the slot stays null on paths that build no
+   * environment, which skip the release call. */
+  lazy?: boolean;
+}
+
+/** Process primitives for forked emission workers. */
+export interface ForkPrimitives {
+  /** 0 in the worker, the worker's pid in the parent, -1 on failure. */
+  fork(): number;
+  /** Ends the worker without running exit handlers. */
+  exit(code: number): void;
+  /** The worker's exit status, 128 plus a signal number, or -1. */
+  wait(pid: number): number;
 }
 
 export interface LlvmTargetOptions {
   /** C ABI target; omitted direct emission uses the host ABI. */
   targetTriple?: string;
+  /** Linux (glibc and musl) executables: functions reached only by direct
+   * calls propagate exceptions by unwinding the native stack (unwind-abi.ts). */
+  unwindAbi?: boolean;
+  /** Functions kept on the pending-flag ABI under `unwindAbi`: the ones an
+   * earlier emission found breaking its rules (UnwindAbiViolation). */
+  unwindExcluded?: ReadonlySet<string>;
+  /** Emit the function bodies in this many contiguous ranges, each by its
+   * own emitter, and merge them in function order (emit-journal.ts, and
+   * debug-info.ts for debug metadata). The output is the same as one
+   * emitter's. */
+  functionChunks?: number;
+  /** Emit the function bodies of a large module on this many forked worker
+   * processes at a time (emit-module.ts), forked with `forkPrimitives`. The
+   * output is the same as one emitter's. */
+  functionWorkers?: number;
+  /** The host's process primitives, where it can fork (the native
+   * compiler's). */
+  forkPrimitives?: ForkPrimitives | undefined;
   /** Exact frontend sources for dev-build locations and variable metadata. */
   debugSources?: ReadonlyMap<string, string>;
   /** Pointer width of the target C ABI. Native targets are 64-bit today. */
@@ -158,33 +497,458 @@ export interface LlvmTargetOptions {
    * separate translation unit. Public/direct emission keeps them by default. */
   emitLibraryIdentity?: boolean;
   /** Program objects carry a strong reference to the matching runtime ABI
-   * marker so manual links against an incompatible runtime fail loudly. */
+   * marker so a manual link against an incompatible runtime fails. */
   runtimeAbiMarker?: boolean;
+  /** Emit live-object audit notes in emitted new/free helpers. Only the
+   * sanitized lane's SCR_RC_AUDIT runtime counts them; production plain
+   * builds pass false so release/dev objects carry no empty calls.
+   * Defaults to true for direct emission. */
+  objectAudit?: boolean;
+  /** Emit retain/release fast paths inline: `speed` for every family with a
+   * fast path, `release` for the string retain and the dyn retain and
+   * release (shapes.ts InlineRcMode). Off, every retain and release is a
+   * runtime call. */
+  inlineRc?: InlineRcMode;
+  /** Define the inline RC fast-path helpers `noinline` (sanitized builds). */
+  rcHelpersNoinline?: boolean;
+  /** Define `scr_detached_exit` so the Linux runtime hands the address-space
+   * teardown after `process.exit` to a helper process (`--detached-exit`).
+   * Executables only; the runtime's weak default keeps it off. */
+  detachedExit?: boolean;
+  /** Translated WebAssembly memories check bounds explicitly instead of
+   * relying on guard pages (wasm-modules.ts wasmBoundsChecks). */
+  wasmBoundsChecks?: boolean;
+  /** The executable can reserve its program-lifetime region below 32 GiB
+   * (lowRegionTarget): fields that refer to compact class instances then
+   * store the instance's address over 8 in 32 bits (classes.ts
+   * compactRefLoadLines). Elsewhere they keep 8-byte pointers. */
+  lowRegion?: boolean;
+  /** The x86-64 level the program's code may require (`--target-cpu`):
+   * every emitted function carries it as its `target-cpu`. Unset, code
+   * runs on any x86-64 CPU. */
+  targetCpu?: TargetCpu;
 }
 
-export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
+/** LlvmTargetOptions.lowRegion for an executable: Linux targets without
+ * sanitizers, whose address space below 32 GiB is free (ASan keeps its
+ * shadow memory there; other systems map their own images and libraries
+ * there). `platform` is a target platform (`linux`, `darwin`, `win32`,
+ * `wasi`). */
+export function lowRegionTarget(platform: string, sanitize: boolean): boolean {
+  return platform === "linux" && !sanitize;
+}
+
+/** Function versions on loop-bounding number parameters
+ * (ir/parameter-versions.ts). Library builds have no int32 entries, and a
+ * module that observes call stacks could see the version's frame. */
+function versionParameters(mod: IrModule): IrModule {
+  if (mod.lib !== undefined || observesStacks(mod)) return mod;
+  return versionLoopBoundParameters(mod, mangleFunction);
+}
+
+/** The int32 slot analysis of one module and the inputs it read: the
+ * constructor's own analyses of that module, which LlEmitter takes over
+ * instead of repeating them when it emits the same module. */
+export interface Int32SlotAnalysis {
+  readonly mod: IrModule;
+  readonly nodeIndex: IrNodeIndex;
+  readonly initializerBindings: ReturnType<typeof findInitializerBindings>;
+  readonly dynamicStores: DynamicFieldStores;
+  readonly slots: Int32Slots;
+}
+
+/** The int32 slot analysis of `mod`, with the inputs LlEmitter gives it.
+ * With `revise`, the analysis revises the functions of candidates that drop
+ * (Int32SlotInputs.revise), and `mod` is the module it started from. */
+function analyzeModuleInt32Slots(
+  mod: IrModule,
+  revise?: (fnName: string, dropped: ReadonlySet<string>) => IrFunction,
+): Int32SlotAnalysis {
+  const nodeIndex = new IrNodeIndex(mod);
+  const initializerBindings = findInitializerBindings(mod, nodeIndex);
+  const dynamicStores = dynamicFieldStores(mod, undefined, undefined, nodeIndex);
+  const slots = analyzeInt32Slots(mod, {
+    dynamicStores,
+    initializerBindings,
+    nodes: nodeIndex,
+    ...(revise === undefined ? {} : { revise }),
+  });
+  return { mod, nodeIndex, initializerBindings, dynamicStores, slots };
+}
+
+/** The candidates an analysis keeps: int32 arrays and checked ones. */
+function keptInt32Arrays(analysis: Int32SlotAnalysis): ReadonlySet<string> {
+  return new Set([...analysis.slots.int32Arrays, ...analysis.slots.checkedInt32Arrays]);
+}
+
+/** An analysis that revised functions (analyzeModuleInt32Slots' `revise`)
+ * as the analysis of `mod`, the module of the functions it ended with: the
+ * node index of `mod`, and its initializer bindings and dynamic stores,
+ * which must be the ones the analysis read. Null when they differ. */
+function revisedAnalysis(analysis: Int32SlotAnalysis, mod: IrModule): Int32SlotAnalysis | null {
+  const nodeIndex = new IrNodeIndex(mod);
+  const initializerBindings = findInitializerBindings(mod, nodeIndex);
+  const dynamicStores = dynamicFieldStores(mod, undefined, undefined, nodeIndex);
+  const read = analysis.initializerBindings;
+  if (initializerBindings.size !== read.size) return null;
+  for (const [name, globals] of initializerBindings) {
+    const other = read.get(name);
+    if (other?.length !== globals.length || globals.some((g, i) => other[i] !== g)) return null;
+  }
+  const stores = analysis.dynamicStores;
+  if (
+    dynamicStores.all !== stores.all ||
+    dynamicStores.names.size !== stores.names.size ||
+    [...dynamicStores.names].some((name) => !stores.names.has(name))
+  )
+    return null;
+  return {
+    mod,
+    nodeIndex,
+    initializerBindings,
+    dynamicStores,
+    slots: analysis.slots,
+  };
+}
+
+/** The functions whose calls the backend may emit as calls of their
+ * result-slot entries (record-results.ts). */
+function resultEntryTargets(mod: IrModule): ReadonlySet<string> {
+  const names = new Set(mod.functions.map((fn) => fn.name));
+  const targets = new Set<string>();
+  for (const name of names) if (names.has(resultEntryName(name))) targets.add(name);
+  return targets;
+}
+
+/** The emitter for `input` after the module passes every emission runs. */
+function moduleEmitter(input: IrModule, options: LlvmTargetOptions): LlEmitter {
+  // Facts are keyed by node identity: emit the same module whether it was
+  // lowered in memory or read back from its serialized form.
+  const mod = unshareNodes(input);
+  // Each proof selectInt32Arrays asks for analyzes a marked module; the
+  // emitter of the module it returns reuses the last one. A proof that
+  // revised functions analyzed the module of the functions it ended with.
+  const rounds: {
+    last: Int32SlotAnalysis | null;
+    functions: readonly IrFunction[] | null;
+    revising: boolean;
+  } = { last: null, functions: null, revising: true };
+  const proven = (marked: IrModule, revise: Int32ArrayRevision | null): Int32ArrayProof | null => {
+    rounds.functions = null;
+    if (revise === null || !rounds.revising) {
+      rounds.last = analyzeModuleInt32Slots(marked);
+      return { kept: keptInt32Arrays(rounds.last), functions: null };
+    }
+    const latest = new Map<string, IrFunction>();
+    try {
+      rounds.last = analyzeModuleInt32Slots(marked, (fnName, dropped) => {
+        const fn = revise(fnName, dropped);
+        latest.set(fnName, fn);
+        return fn;
+      });
+    } catch (error) {
+      if (!(error instanceof Int32RevisionConflict)) throw error;
+      rounds.last = null;
+      return null;
+    }
+    if (latest.size === 0) return { kept: keptInt32Arrays(rounds.last), functions: null };
+    rounds.functions = marked.functions.map((fn) => latest.get(fn.name) ?? fn);
+    return { kept: keptInt32Arrays(rounds.last), functions: rounds.functions };
+  };
   // Keep source storage intact for debugger inspection in dev builds.
-  return new LlEmitter(options.debugSources === undefined ? scalarizeNumericRecords(mod) : mod, options).emit();
+  if (options.debugSources !== undefined) return new LlEmitter(mod, options, null, null);
+  const passed = versionParameters(
+    addRecordResultEntries(
+      scalarizeLiteralResults(
+        scalarizeNumericRecords(
+          specializeCallbackCalls(
+            specializeNumericCalls(
+              pairRowSums(
+                inlineExpressionFunctions(
+                  foldConstantGlobals(
+                    copyStableCaptures(
+                      resolveSelfCaptures(
+                        hoistFinalFieldReads(
+                          freezeInitOnlyGlobals(
+                            holdCharLocalsAsUnits(
+                              dropUnwrittenPropertyBags(runPairedWhileLoopsAsFor(mod)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              mangleFunction,
+            ),
+            mangleFunction,
+          ),
+        ),
+      ),
+    ),
+  );
+  let emitted = selectInt32Arrays(passed, proven, resultEntryTargets);
+  let prepared = rounds.last;
+  // A proof that revised functions analyzed the module of the functions it
+  // ended with, which is the selected module unless selection fell back to
+  // rounds: then the selected module was proved by its own round.
+  if (prepared !== null && rounds.functions !== null && prepared.mod !== emitted) {
+    const functions = rounds.functions;
+    prepared =
+      emitted !== passed &&
+      emitted.functions.length === functions.length &&
+      emitted.functions.every((fn, i) => fn === functions[i])
+        ? revisedAnalysis(prepared, emitted)
+        : null;
+    if (prepared === null && emitted !== passed) {
+      rounds.revising = false;
+      emitted = selectInt32Arrays(passed, proven, resultEntryTargets);
+      prepared = rounds.last;
+    }
+  }
+  if (process.env["SCRIPTC_INT32_VERIFY"] === "1")
+    verifyInt32Selection(passed, emitted, prepared?.mod === emitted ? prepared : null);
+  return new LlEmitter(emitted, options, null, prepared?.mod === emitted ? prepared : null);
+}
+
+/** SCRIPTC_INT32_VERIFY=1: throws unless the selection with revisions
+ * (`emitted`, and the analysis the emitter takes over) is the one rounds
+ * without revisions give: the same module, and the same facts. */
+function verifyInt32Selection(
+  passed: IrModule,
+  emitted: IrModule,
+  analysis: Int32SlotAnalysis | null,
+): void {
+  let last: Int32SlotAnalysis | null = null;
+  const reference = selectInt32Arrays(
+    passed,
+    (marked) => {
+      last = analyzeModuleInt32Slots(marked);
+      return { kept: keptInt32Arrays(last), functions: null };
+    },
+    resultEntryTargets,
+  );
+  const text = (mod: IrModule): string => serializeModuleParts(mod).join("");
+  if (text(reference) !== text(emitted))
+    throw new InternalCompilerError("int32 selection: the revised module differs from the rounds'");
+  const facts = (mod: IrModule, prepared: Int32SlotAnalysis | null): string =>
+    (prepared?.mod === mod ? prepared : analyzeModuleInt32Slots(mod)).slots.summary(mod);
+  const expected = facts(reference, last);
+  const actual = facts(emitted, analysis);
+  if (expected !== actual) {
+    const want = expected.split("\n");
+    const got = actual.split("\n");
+    const line = want.findIndex((entry, i) => entry !== got[i]);
+    throw new InternalCompilerError(
+      `int32 selection: the revised analysis differs from the rounds': ${want[line]?.slice(0, 400)} != ${got[line]?.slice(0, 400)}`,
+    );
+  }
+}
+
+/** Emits the module's parts, emitting it again with the functions an
+ * UnwindAbiViolation names on the pending-flag ABI. */
+function emitModuleText(input: IrModule, options: LlvmTargetOptions): string[] {
+  for (let excluded = options.unwindExcluded ?? new Set<string>(); ;) {
+    const emitter = moduleEmitter(input, { ...options, unwindExcluded: excluded });
+    try {
+      return emitter.emitParts();
+    } catch (error) {
+      if (!(error instanceof UnwindAbiViolation)) throw error;
+      const names = new Set(excluded);
+      for (const name of emitter.unwindAbi)
+        for (const symbol of [mangleFunction(name), mangleBorrowedFunction(name)])
+          if (error.symbols.has(symbol) || error.symbols.has(symbol + INT32_ABI_SUFFIX))
+            names.add(name);
+      if (names.size === excluded.size) throw error;
+      excluded = names;
+    }
+  }
+}
+
+export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {}): string {
+  return emitModuleText(input, options).join("\n");
+}
+
+/** emitLlvmModule's text as parts that concatenate to it, without the copy
+ * that joining them makes: a large program's text is 150 MB. */
+export function emitLlvmModuleParts(input: IrModule, options: LlvmTargetOptions = {}): string[] {
+  return emitModuleText(input, options).flatMap((part, index) =>
+    index === 0 ? [part] : ["\n", part],
+  );
 }
 
 /** Keep large translation units below the host's single-string limit. */
-export function emitLlvmModuleSource(mod: IrModule, options: LlvmTargetOptions = {}): string | readonly string[] {
-  const parts = new LlEmitter(options.debugSources === undefined ? scalarizeNumericRecords(mod) : mod, options).emitParts();
+export function emitLlvmModuleSource(
+  input: IrModule,
+  options: LlvmTargetOptions = {},
+): string | readonly string[] {
+  // IR validation, contracts and the frontend's disposal run after lowering without checks.
+  relieveHeapPressure(true);
+  const parts = emitModuleText(input, options);
   const length = parts.reduce((total, part) => total + part.length, Math.max(0, parts.length - 1));
   if (length <= 256 * 1024 * 1024) return parts.join("\n");
-  return parts.flatMap((part, index) => index === 0 ? [part] : ["\n", part]);
+  return parts.flatMap((part, index) => (index === 0 ? [part] : ["\n", part]));
 }
 
-function llStrBytes(text: string): string {
-  return llBytes(Buffer.from(text, "utf8"));
+export function llStrBytes(text: string): string {
+  return llBytes(wtf8Bytes(text));
+}
+
+const NO_BORROWED: ReadonlySet<number> = new Set();
+
+/** The nodes that write a binding by its id (numberGlobalWriters). */
+const GLOBAL_WRITE_KINDS: readonly IrNodeKind[] = ["assign", "varDecl", "assignExpr", "incDec"];
+/** Runtime library calls (readsLoopMetrics). */
+const LIB_CALL_KINDS: readonly IrNodeKind[] = ["libCall"];
+
+/** [A-Za-z0-9_] */
+function isIdentifierByte(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code === 95
+  );
+}
+
+/** Runtime entry points (and await-call entries) that may park the running
+ * execution context, as they appear in emitted function text. */
+export const SUSPENDS =
+  /@(?:scr_(?:await_|module_await\b|promise_await_settled\b|test_sub\b|gen_yield_|async_gen_|fiber_)|sc_a[wd]_)/;
+/** The suspensions of a fiber body's own awaits, which its stackless
+ * coroutine form suspends itself at instead. */
+const AWAIT_SUSPENSIONS = /@(?:scr_await_(?:void|f64|bool|str|ref|hop)\b|sc_a[wd]_[A-Za-z0-9_]+)/g;
+/** SUSPENDS in a stackless coroutine body, whose frame bookkeeping reads its
+ * own fiber and promise. */
+const COROUTINE_SUSPENDS =
+  /@(?:scr_(?:await_|module_await\b|promise_await_settled\b|test_sub\b|gen_yield_|async_gen_|fiber_(?!self\b|promise\b))|sc_a[wd]_)/;
+/** Captured bindings (boxes a body declares or receives) from which a
+ * function compiles without LLVM optimization (see boxSlotCount). */
+export const UNOPTIMIZED_BOX_SLOTS = 512;
+/** ScrExcKind tags of a generator slot holding a number or a boolean. */
+const SCR_EXC_F64 = 1;
+const SCR_EXC_BOOL = 2;
+
+/** The capture boxes `fn` holds: its boxed bindings and the bindings its
+ * environment brings in. Each box pointer is a value from its binding (or
+ * function entry) to its last use, and every one of them crosses the calls
+ * in between. With thousands of them in one body, as in a factory whose
+ * returned methods share a large environment, LLVM's inliner, instruction
+ * selection and register allocation grow quadratically and take minutes.
+ * Past UNOPTIMIZED_BOX_SLOTS, which ordinary functions stay far below, the
+ * body is compiled `optnone` (nothing inlines into it and code generation
+ * takes its fast paths) and its box slots are accessed volatile, so no
+ * pass promotes them to values even where a pipeline runs IR passes over
+ * optnone bodies, as the native helper's does. Each use reloads its box
+ * pointer and code generation stays linear. Semantics, boxes and
+ * environments are unchanged; only that body's machine code is slower. */
+export function boxSlotCount(fn: IrFunction): number {
+  const captured = new Set<string>();
+  for (const capture of fn.captures ?? []) captured.add(capture.localId);
+  for (const capture of fn.classCaptures ?? []) captured.add(capture.localId);
+  let count = 0;
+  for (const local of fn.locals) if (local.boxed === true || captured.has(local.id)) count++;
+  return count;
+}
+
+/** Whether any node of `e` names the local (reads, writes, declarations,
+ * captures). */
+/** Typed-array loop versions nest at most this deep (each doubles a body). */
+export const MAX_BYTES_LOOP_VERSION_DEPTH = 3;
+
+function mentionsLocal(e: IrExpr, localId: string): boolean {
+  const exprNames = (node: IrExpr): boolean => {
+    if (node.kind === "varRef" || node.kind === "incDec" || node.kind === "assignExpr")
+      return node.localId === localId;
+    if (node.kind === "closure") return node.captures.includes(localId);
+    if (node.kind === "classRef") return node.captures?.includes(localId) === true;
+    return false;
+  };
+  const stmtNames = (node: IrStmt): boolean => {
+    if (
+      node.kind === "varDecl" ||
+      node.kind === "assign" ||
+      node.kind === "forOf" ||
+      node.kind === "rethrow"
+    )
+      return node.localId === localId;
+    return false;
+  };
+  let found = false;
+  const expr = (node: IrExpr): boolean => {
+    if (found || exprNames(node)) return !(found = true);
+    return everyExprChild(node, expr, stmt);
+  };
+  const stmt = (node: IrStmt): boolean => {
+    if (found || stmtNames(node)) return !(found = true);
+    return everyStmtChild(node, expr, stmt);
+  };
+  expr(e);
+  return found;
+}
+
+/** The IR nodes in `body` that name local `id`: its declaration, reads,
+ * writes and closure captures. */
+function countLocalMentions(body: readonly IrStmt[], id: string): number {
+  let count = 0;
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    if (record["localId"] === id) count++;
+    const captures = record["captures"];
+    if (Array.isArray(captures))
+      for (const c of captures)
+        if (
+          c === id ||
+          (typeof c === "object" && c !== null && (c as { localId?: unknown }).localId === id)
+        )
+          count++;
+    for (const [key, value] of Object.entries(record))
+      if (key !== "type" && key !== "loc" && key !== "captures") visit(value);
+  };
+  visit(body);
+  return count;
 }
 
 export class LlEmitter {
+  /** Per-feature state (emitter-state.ts), indexed by each key's slot. */
+  readonly moduleStates: unknown[] = [];
   localArrayReads = new Map<string, LocalArrayRead>();
-  private localStackUnions = new Map<string, IrExpr & { kind: "unionWrap" }>();
+  loopArrayBorrows: ReadonlySet<IrStmt> = new Set();
+  scalarStringSlices = new Map<string, IrExpr & { kind: "strIntrinsic" }>();
+  readonly stringSlices = new Map<string, StringSliceSnapshot>();
+  /** Slices written into stack buffers (findScratchStringSlices). */
+  scratchStringSlices: ReadonlySet<IrExpr> = new Set();
+  /** String parameters, record fields and record producers a caller may
+   * lend scratch slices to. */
+  lendingFacts: LendingFacts = { strings: new Map(), records: new Map(), producers: new Map() };
+  localStackUnions = new Map<string, IrExpr & { kind: "unionWrap" }>();
+  localStackObjects = new Map<string, StackObjectSource>();
+  reassignedStackObjects = new Set<string>();
+  /** The binding slot of each reassigned stack-object local. */
+  stackObjectSlots = new Map<string, string>();
+  /** Entry-block pointers to the reference fields of each frame object
+   * slot (stack-objects.ts stackObjectFields). */
+  stackObjectFieldPtrs = new Map<string, readonly StackObjectField[]>();
+  localUnionStorageProofs = new Map<string, LocalUnionStorageProof>();
+  localUnionStorage = new Map<string, LocalUnionStorage>();
   integerArrayBindings = new Set<string>();
-  private readonly fieldAliasTags = new Map<string, number>();
-  private readonly fieldPointerTags = new Map<string, number>();
+  readonly fieldAliasTags = new Map<string, number>();
+  readonly fieldPointerTags = new Map<string, number>();
+  /** The field pointers (classFieldPtr) of this function whose fields hold
+   * 32-bit references to compact class instances (LlClassMeta.compressed):
+   * loadField/loadRef decode them and storeField/storeRef encode them. */
+  readonly compressedFieldPtrs = new Set<string>();
+  /** Compact class instances live in the program-lifetime region below
+   * 32 GiB (LlvmTargetOptions.lowRegion, and the program has compact
+   * classes): main reserves it before compiled code runs (scr_plr_init), and
+   * fields and arrays of compactRefType hold 32-bit references. */
+  compactRegion = false;
 
   /** Native class fields with different property names cannot occupy the
    * same slot of one object. Inherited views of the same property share a
@@ -201,43 +965,344 @@ export class LlEmitter {
       tag = 2 + this.fieldAliasTags.size * 2;
       this.fieldAliasTags.set(field, tag);
     }
+    this.journal?.entry("tag", field, tag);
     this.fieldPointerTags.set(ptr, tag);
+  }
+
+  /** The alias tag of a runtime word that emitted code reads and writes
+   * outside every field (the lifetime-region count, owner and cursors). */
+  memoryAliasAttachment(category: string): string {
+    if (this.debug !== null) return "";
+    let tag = this.fieldAliasTags.get(category);
+    if (tag === undefined) {
+      tag = 2 + this.fieldAliasTags.size * 2;
+      this.fieldAliasTags.set(category, tag);
+    }
+    this.journal?.entry("tag", category, tag);
+    return `, !tbaa !${tag}`;
+  }
+
+  /** The current function's int32 array allocations: the array literals
+   * its int32 arrays are written with. They construct SCR_ELEM_I32 arrays. */
+  int32Allocations = new Set<IrExpr>();
+  /** The fill temporaries (`new Array(n).fill(v)`) of those allocations:
+   * the same arrays, so int32 too. */
+  int32ArrayTemps = new Set<string>();
+  /** The same for the current function's int32 arrays with checked stores,
+   * which are only allocated by fills (ir/int32-arrays.ts
+   * checkableInt32Allocations): their temporaries' literals, with the fill's
+   * length (a literal constructs SCR_ELEM_I32 storage when that length is at
+   * least CHECKED_INT32_MIN_LENGTH, SCR_ELEM_F64 otherwise), and their
+   * temporaries. */
+  checkedAllocations = new Map<IrExpr, IrExpr>();
+  checkedArrayTemps = new Set<string>();
+  /** The fill calls (`.fill(v)`) of those allocations: a value that is not
+   * an int32 widens the new array first. */
+  checkedFills = new Set<IrExpr>();
+
+  /** Collect the int32 allocations of `fn`, about to be emitted. */
+  findInt32Allocations(fn: IrFunction): void {
+    this.int32Allocations.clear();
+    this.int32ArrayTemps.clear();
+    this.checkedAllocations.clear();
+    this.checkedArrayTemps.clear();
+    this.checkedFills.clear();
+    const { int32Arrays, checkedInt32Arrays } = this.int32Slots;
+    if (int32Arrays.size === 0 && checkedInt32Arrays.size === 0) return;
+    everyStmtList(fn.body, {
+      stmt: (s) => {
+        if (s.kind !== "varDecl" && s.kind !== "assign") return true;
+        const key = int32ArrayKey(fn.name, s.localId);
+        const checked = checkedInt32Arrays.has(key);
+        if (!checked && !int32Arrays.has(key)) return true;
+        const value = s.kind === "varDecl" ? s.init : s.value;
+        const allocation = value && allocatedLiteral(value);
+        if (!allocation) return true;
+        const length = checked ? fillAllocationLength(value) : null;
+        if (length !== null) this.checkedAllocations.set(allocation.literal, length);
+        else if (!checked) this.int32Allocations.add(allocation.literal);
+        if (allocation.temporary !== null)
+          (checked ? this.checkedArrayTemps : this.int32ArrayTemps).add(allocation.temporary);
+        if (checked && value !== allocation.literal) this.checkedFills.add(value!);
+        return true;
+      },
+      expr: () => true,
+    });
+  }
+
+  /** Whether `arr` reads one of the int32 arrays (ir/int32-arrays.ts, kept
+   * by the int32 slot analysis): a local or parameter of the current
+   * function, or a module global. */
+  int32Array(arr: IrExpr): boolean {
+    if (arr.kind !== "varRef") return false;
+    if (this.int32KindArray(arr)) return true;
+    if (this.int32Slots.int32Arrays.size === 0) return false;
+    return (
+      this.int32ArrayTemps.has(arr.localId) ||
+      this.int32Slots.int32Arrays.has(int32ArrayKey(this.currentFunctionName, arr.localId))
+    );
+  }
+
+  /** Whether `arr` is one of the current function's int32 arrays with
+   * checked stores: int32 slots until a store widens it to doubles. Every
+   * access tests its kind (emitByElementKind), except in the fast copy of
+   * an int32 kind loop, which reads and writes it as an int32 array. */
+  checkedInt32Array(arr: IrExpr): boolean {
+    if (arr.kind !== "varRef" || this.int32KindArray(arr)) return false;
+    if (this.int32Kinds?.wide.has(`${this.currentFunctionName}\0${arr.localId}`)) return false;
+    return this.checkedInt32Local(arr.localId);
+  }
+
+  /** Whether the local `localId` holds one of the current function's int32
+   * arrays with checked stores. */
+  checkedInt32Local(localId: string): boolean {
+    if (this.int32Slots.checkedInt32Arrays.size === 0) return false;
+    return (
+      this.checkedArrayTemps.has(localId) ||
+      this.int32Slots.checkedInt32Arrays.has(`${this.currentFunctionName}\0${localId}`)
+    );
+  }
+
+  /** Whether `arr` is an int32 array with checked stores that the fast copy
+   * of the int32 kind loop being emitted holds as an int32 array. */
+  int32KindArray(arr: IrExpr): boolean {
+    return (
+      this.int32Kinds !== null &&
+      arr.kind === "varRef" &&
+      this.int32Kinds.int32.has(`${this.currentFunctionName}\0${arr.localId}`)
+    );
+  }
+
+  /** Before a store of `value` (of `expr`) into `arr`, in the fast copy of
+   * an int32 kind loop: continue when it is an int32 that is not -0, and
+   * otherwise leave for the statement's resume point, where it re-executes
+   * with kind tests. Returns the value as an i32 when it is at hand as an
+   * integer, or null when the store converts the double itself. */
+  emitInt32KindStoreCheck(arr: IrExpr, value: LlValue, expr: IrExpr): string | null {
+    if (!this.int32KindArray(arr) || withinInt32(this.integerRanges.get(expr))) return null;
+    const integer = exactInteger(this, value, expr);
+    if (integer !== null && withinInt32(integer.range)) return narrowInteger(this, integer);
+    const resume = this.int32KindResume;
+    if (resume === null)
+      throw new InternalCompilerError("llvm emitter bug: an int32 kind store without a resume");
+    const B = this.B;
+    const ok = B.tmp(),
+      int = B.tmp();
+    if (integer !== null) {
+      // An exact integer: a range test on its 64-bit form.
+      const wide = widenInteger(this, integer),
+        low = B.tmp(),
+        high = B.tmp();
+      B.line(`${low} = icmp sge i64 ${wide}, -2147483648`);
+      B.line(`${high} = icmp sle i64 ${wide}, 2147483647`);
+      B.line(`${ok} = and i1 ${low}, ${high}`);
+      const store = B.newLabel("arr.store.i32");
+      B.condBr(ok, store, resume);
+      B.startBlock(store);
+      B.line(`${int} = trunc i64 ${wide} to i32`);
+      return int;
+    }
+    this.declare("declare i32 @llvm.fptosi.sat.i32.f64(double)");
+    const back = B.tmp(),
+      exact = B.tmp(),
+      bits = B.tmp(),
+      notNegativeZero = B.tmp();
+    B.line(`${int} = call i32 @llvm.fptosi.sat.i32.f64(double ${value.name})`);
+    B.line(`${back} = sitofp i32 ${int} to double`);
+    B.line(`${exact} = fcmp oeq double ${back}, ${value.name}`);
+    B.line(`${bits} = bitcast double ${value.name} to i64`);
+    B.line(`${notNegativeZero} = icmp ne i64 ${bits}, -9223372036854775808`);
+    B.line(`${ok} = and i1 ${exact}, ${notNegativeZero}`);
+    const store = B.newLabel("arr.store.i32");
+    B.condBr(ok, store, resume);
+    B.startBlock(store);
+    return int;
+  }
+
+  /** Emit an access to the checked int32 array `array` once per element
+   * kind: `arm("i32", widened)` while it holds int32 slots and
+   * `arm("f64", widened)` after it widened, joined after both. `widened` is
+   * the label of the double arm, where an int32 arm's store of a value that
+   * is not an int32 continues after widening the array. Returns the phi of
+   * the arms' results (of LLVM type `ty`), or null when `ty` is null. */
+  emitByElementKind(
+    array: string,
+    ty: string | null,
+    arm: (acc: "i32" | "f64", widened: string) => string | null,
+  ): string | null {
+    const B = this.B;
+    const narrow = B.newLabel("arr.kind.i32"),
+      wide = B.newLabel("arr.kind.f64"),
+      join = B.newLabel("arr.kind.join");
+    const kindPtr = B.tmp(),
+      kind = B.tmp(),
+      isInt32 = B.tmp();
+    B.line(
+      `${kindPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.elem}`,
+    );
+    this.markMemoryPointer(kindPtr, "array:header");
+    B.line(`${kind} = load i8, ptr ${kindPtr}${this.fieldAliasAttachment(kindPtr)}`);
+    B.line(`${isInt32} = icmp eq i8 ${kind}, ${SCR_ELEM_I32}`);
+    B.condBr(isInt32, narrow, wide);
+    B.startBlock(narrow);
+    const narrowValue = arm("i32", wide);
+    const narrowEnd = B.isTerminated() ? null : B.currentLabel();
+    if (narrowEnd !== null) B.br(join);
+    B.startBlock(wide);
+    const wideValue = arm("f64", wide);
+    const wideEnd = B.isTerminated() ? null : B.currentLabel();
+    if (wideEnd !== null) B.br(join);
+    B.startBlock(join);
+    // Arms that end in their own branches (a read's shared join) leave this
+    // join without predecessors.
+    if (narrowEnd === null && wideEnd === null) B.terminate("unreachable");
+    if (ty === null) return null;
+    const arms: string[] = [];
+    if (narrowEnd !== null) arms.push(`[ ${narrowValue}, %${narrowEnd} ]`);
+    if (wideEnd !== null) arms.push(`[ ${wideValue}, %${wideEnd} ]`);
+    const result = B.tmp();
+    B.line(`${result} = phi ${ty} ${arms.join(", ")}`);
+    return result;
+  }
+
+  /** Before storing the double `value` (of `expr`) into an int32 arm
+   * (emitByElementKind) of the checked int32 array `array`: continue in this
+   * arm when it is an int32 that is not -0, or widen the array and continue
+   * at `widened`. A value proven an int32 needs no test. */
+  emitCheckedInt32Store(array: string, value: string, expr: IrExpr, widened: string): void {
+    if (withinInt32(this.integerRanges.get(expr))) return;
+    const B = this.B;
+    this.declare("declare i32 @llvm.fptosi.sat.i32.f64(double)");
+    this.declare("declare void @scr_arr_widen_i32(ptr)");
+    const int = B.tmp(),
+      back = B.tmp(),
+      exact = B.tmp(),
+      bits = B.tmp(),
+      notNegativeZero = B.tmp(),
+      ok = B.tmp();
+    B.line(`${int} = call i32 @llvm.fptosi.sat.i32.f64(double ${value})`);
+    B.line(`${back} = sitofp i32 ${int} to double`);
+    B.line(`${exact} = fcmp oeq double ${back}, ${value}`);
+    B.line(`${bits} = bitcast double ${value} to i64`);
+    B.line(`${notNegativeZero} = icmp ne i64 ${bits}, -9223372036854775808`);
+    B.line(`${ok} = and i1 ${exact}, ${notNegativeZero}`);
+    const store = B.newLabel("arr.store.i32"),
+      widen = B.newLabel("arr.widen");
+    B.condBr(ok, store, widen);
+    B.startBlock(widen);
+    B.line(`call void @scr_arr_widen_i32(ptr ${array})`);
+    B.br(widened);
+    B.startBlock(store);
+  }
+
+  /** The access an element operation on `arr` (of element type `elem`)
+   * takes: int32 arrays read and write their 4-byte slots. */
+  arrayAccess(arr: IrExpr, elem: IrType): ArrayAccess {
+    if (this.checkedInt32Array(arr))
+      throw new InternalCompilerError(
+        "llvm emitter bug: a checked int32 array without its kind test",
+      );
+    return this.int32Array(arr) ? "i32" : elemAccess(elem);
+  }
+
+  /** Whether an element access at `index` of `arr` lies in the hole-free
+   * prefix: a counter of a dense array loop's fast copy indexing one of the
+   * arrays its entry test covered. */
+  provenDenseIndex(arr: IrExpr, index: IrExpr): boolean {
+    const loop = LOOPS.of(this).denseLoop;
+    return (
+      loop !== null &&
+      arr.kind === "varRef" &&
+      loop.arrays.has(arr.localId) &&
+      index.kind === "varRef" &&
+      (index.localId === loop.counter || index.localId === loop.pair?.high) &&
+      this.integerLoopBindings.has(index.localId)
+    );
   }
 
   fieldAliasAttachment(ptr: string): string {
     const tag = this.fieldPointerTags.get(ptr);
     return tag === undefined ? "" : `, !tbaa !${tag}`;
   }
-
-  private fieldAliasMetadata(): string[] {
-    if (this.fieldAliasTags.size === 0) return [];
-    const lines = ['!0 = !{!"scriptc native fields"}'];
-    for (const tag of this.fieldAliasTags.values()) {
-      lines.push(`!${tag - 1} = !{!"field.${tag}", !0, i64 0}`, `!${tag} = !{!${tag - 1}, !${tag - 1}, i64 0}`);
-    }
-    return lines;
+  fieldAliasMetadata(): string[] {
+    return fieldAliasMetadata(this);
   }
-  private readonly debug: LlvmDebugInfo | null;
-  private debugScope: string | null = null;
+  readonly debug: LlvmDebugInfo | null;
+  /** Projection-only scalar objects may live in frame storage (stack-objects.ts). */
+  readonly stackObjects: boolean;
+  debugScope: string | null = null;
   readonly sizeType: "i32" | "i64";
   readonly ffiExtendNarrowIntegers: boolean;
-  readonly cycleColorOffset: number;
+  readonly cycleBufOffset: number;
+  /** Emitted ScrCycType descriptors so far (their collector statistics
+   * indices; see ShapeHost.nextCycKind). */
+  private cycKinds = 0;
   readonly wasi: boolean;
-  private readonly emitLibraryIdentity: boolean;
-  private readonly runtimeAbiMarker: boolean;
+  /** Synchronous generator bodies compile to LLVM switched coroutines (a
+   * heap frame resumed by an ordinary call) instead of running on a fiber
+   * stack. Worker programs keep fibers (context shutdown unwinds suspended
+   * generator stacks) and so do debug builds (the debugger reads locals
+   * from the native frame). */
+  private stacklessGenerators = false;
+  /** Async bodies that suspend only at their own awaits compile to the same
+   * switched coroutines on native targets (selectStacklessAsync), under the
+   * generators' conditions; library and Windows builds keep fibers. */
+  private stacklessAsyncAllowed = false;
+  /** The async functions selectStacklessAsync lowered as coroutines. */
+  readonly stacklessAsync = new Set<string>();
+  /** Some function in the module is lowered as a coroutine. */
+  usesCoroutines = false;
+  /** The target lacks a rounding instruction at its baseline CPU (x86-64
+   * before SSE4.1), so `llvm.trunc` would lower to a libm call: emit
+   * truncation inline through an integer round trip instead. */
+  readonly inlineTrunc: boolean;
+  /** ELF worker executables give thread-locals the executable TLS models. */
+  readonly executableTls: boolean;
+  /** Source loops enclosing the statement being emitted in the current
+   * function body. */
+  loopDepth = 0;
+  /** Darwin worker executables read the stack guard from a pthread
+   * thread-specific-data slot off the thread pointer (scr_runtime.h's
+   * SCR_STACK_GUARD_TSD): the architecture names the access sequence. */
+  private readonly stackGuardTsd: "aarch64" | "x86_64" | null;
+  readonly emitLibraryIdentity: boolean;
+  readonly runtimeAbiMarker: boolean;
+  readonly detachedExit: boolean;
+  readonly targetCpu: TargetCpu | undefined;
+  readonly wasmBoundsChecks: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the runtime ABI’s determinism discipline. */
-  private readonly literals = new Map<string, { sym: string; len: number }>();
+  readonly literals = new Map<string, { sym: string; len: number }>();
+  /** Literal equality helpers: literal text → helper symbol (literalEquals). */
+  readonly literalEqualities = new Map<string, string>();
+  /** Interned bigint literals: hex magnitude with sign → { symbol, value }. */
+  readonly bigintLiterals = new Map<string, { sym: string; value: bigint }>();
+  /** Symbols of interned constant data, named by content (contentSymbol). */
+  private readonly contentSymbols = new Set<string>();
   /** Interned unit-armed union instances: "unionId:tag" → symbol — one
    * immortal (rc == SIZE_MAX) static per (union, unit tag).
    * RC entry points and the collector skip immortals. */
-  private readonly unitInstances = new Map<string, string>();
+  readonly unitInstances = new Map<string, string>();
+  /** unionId → symbol of the union's immortal ABSENT field-slot instance. */
+  readonly absentInstances = new Map<string, string>();
+  /** The zeroed box an inline store reads for a NULL union dummy. */
+  needsUnionNone = false;
+  /** unionId → symbol of a flag set once a checked-dynamic cast caches one
+   * of the union's boxes. A cached box is refreshed in place, possibly with
+   * a tag that another union numbers apart, so it is never shared. */
+  readonly retypeGuards = new Map<string, string>();
+  /** The nullable-union ABSENT sentinel was referenced (absentInstanceRef). */
+  needsNullableAbsent = false;
+  private readonly immortalValues = new Set<string>();
   /** Regex literal templates: "<flags>/<pattern>" → { symbol, interned
    * source/flags literal refs } — one immortal ScrRegex template per distinct
    * (pattern, flags) pair; the bytecode slot starts null and the runtime
    * compiles it lazily on first use. The source/flags strings intern at
    * REGISTRATION (bodies emit before the literal table flushes). */
-  readonly regexInstances = new Map<string, { sym: string; src: string; fl: string }>();
+  readonly regexInstances = new Map<
+    string,
+    { sym: string; src: string; fl: string; pattern: string; flags: string }
+  >();
   /** Interned tagged-template strings objects: per-site key → { symbol,
    * interned cooked-literal refs }. One immortal ScrArr of string slots
    * per template SITE (the spec's per-occurrence identity — the C
@@ -245,7 +1310,13 @@ export class LlEmitter {
   readonly templateStringsInstances = new Map<string, { sym: string; slots: string[] }>();
   /** Interned NUL-terminated C-string constants (scr_jb_puts labels, the
    * stringify indent text): UTF-8 text → { symbol, byte length }. */
-  private readonly cstrs = new Map<string, { sym: string; len: number }>();
+  readonly cstrs = new Map<string, { sym: string; len: number }>();
+  /** Interned ScrMapOps descriptors (scr_map.h): initializer → symbol. */
+  readonly mapOpsConsts = new Map<string, string>();
+  /** Method-id slots of checked-dynamic method calls
+   * (scr_dyn_invoke_prepared_id): method name → symbol of an i32 the
+   * runtime fills with the name's id on the first call. */
+  readonly methodIdSlots = new Map<string, string>();
   /** Type-directed walker functions (JSON serializers, the indent
    * rewriter, union ToString/join) — interned per typeKey/unionId, defs
    * flushed with the shape helpers. */
@@ -256,97 +1327,277 @@ export class LlEmitter {
   /** Explicit callback boundary for standalone layout and walker stages. */
   readonly shapeHost: DynHost;
   /** External declarations, in first-use order. */
-  private readonly decls = new Set<string>();
+  readonly decls = new Set<string>();
   /** Declared functions referenced as values: each needs an env-signature
    * wrapper + an interned immortal closure (so `f === f` holds). */
   readonly fnValues = new Set<string>();
-  private needsOom = false;
+  needsOom = false;
   needsBadTag = false;
   needsBadKey = false;
-  private needsRetainBox = false;
+  needsRetainBox = false;
+  /** Inline RC fast-path helpers requested by call sites (shapes.ts); null
+   * when inline RC is off. */
+  readonly rcHelpers: Set<string> | null;
+  private readonly rcMode: InlineRcMode | undefined;
+  private readonly rcHelpersNoinline: boolean;
 
   readonly fnByName = new Map<string, IrFunction>();
-  private readonly arrayPreservingFunctions: ReadonlySet<string>;
-  private readonly optionalArrayReads: OptionalArrayReads;
+  /** Empty literals that construct with inline slots (appended-array-literals.ts). */
+  appendedArrayLiterals: ReadonlySet<IrExpr> = new Set();
+  /** Emitted LLVM text of every IR function body, by function name: the
+   * fiberless-async analysis scans it for suspension entry points. */
+  readonly fnDefText = new Map<string, string>();
+  readonly referenceEffects: ReferenceEffects;
+  /** Field-sensitive reference writes (null in debug builds). */
+  referenceWrites: ReferenceWrites | null = null;
+  readonly borrowedReturnKeyCache = new Map<string, string[]>();
+  /** The statement list being emitted and the current index, for blocks
+   * whose bindings end with the list (emitBlock and function bodies). */
+  private stmtCursor: { stmts: IrStmt[]; index: number } | null = null;
+  readonly optionalArrayReads: OptionalArrayReads;
+  /** Union sources a binding or projection can hold in a stack box. */
+  readonly unionSources: UnionSources;
+  readonly checkedNarrows: CheckedNarrows;
   callArrayReads = new Map<IrExpr, LocalArrayRead>();
   mapReadLifetimes: MapReadLifetimes = { locals: new Map(), arguments: new Map() };
+  /** Locals of the current function that hold a Map.get result as the
+   * entry's own reference (findMapReadBorrows, borrowableMapGet). */
+  borrowedMapGets: ReadonlySet<string> = new Set();
+  readNumberMapWrites: ReadonlySet<IrExpr> = new Set();
+  /** The integer views of the current function's number Map/Set keys, by
+   * the key's double operand (noteNumberMapKey, map-number-lookup.ts). */
+  numberMapKeyIntegers = new Map<string, LlInteger>();
+  /** The current function's fused string-key Map get-then-set pairs (map-entry-fusion.ts). */
+  mapEntryFusion: MapEntryFusion | null = null;
   readonly callLifetimes: CallLifetimes;
-  private borrowedParameters = new Set<string>();
+  readonly constantCallbacks: Map<string, Map<string, string>>;
+  currentConstantCallbacks: ReadonlyMap<string, string> = new Map();
+  /** The current function's running maximum and minimum updates, whose
+   * branches are weighted as rarely taken (running-extrema.ts). */
+  runningExtrema: ReadonlySet<IrStmt> = new Set();
+  /** Callback bindings whose closures an enclosing callback loop version
+   * proved to hold their known function: calls take the direct entry with
+   * no fallback (emitCallbackVersionedLoop). */
+  knownCallbacks = new Set<string>();
+  readonly callbackVersioning = new Set<IrStmt>();
+  callbackVersionsEnabled = false;
+  readonly stackCallbacks: StackCallbacks;
+  readonly receiverReaders: AmbientReceiverReaders;
+  readonly stackCaptures: StackCaptures;
+  readonly lazyCaptures: LazyCaptures;
+  /** Unchanged captured parameters of the current function: each maps to
+   * the slot caching its box, NULL until the first closure needs it. */
+  readonly lazyCaptureBoxes = new Map<string, string>();
+  readonly lazyStackBoxes = new Map<string, string>();
+  borrowedParameters = new Set<string>();
+  /** Captures of the current closure body that its environment holds
+   * unchanged for the closure's whole life (LazyCaptures.stableCaptures). */
+  stableCaptureIds: ReadonlySet<string> = new Set<string>();
+  /** Parameters proven projection-only: callers may pass stack boxes. */
+  projectedParameters = new Set<string>();
+  stableCallBindings: ReadonlySet<string> = new Set();
+  /** Locals and rebound parameters holding borrowed pointers for their
+   * whole lifetime (walk-borrows.ts), per function and for the current one. */
+  readonly walkBorrowsByFunction = new Map<string, ReadonlySet<string>>();
+  walkBorrows: ReadonlySet<string> = new Set();
+  /** Functions whose borrowing body returns its result without a reference
+   * (analyzeBorrowedReturns), and whether the current body is one. */
+  readonly borrowedReturns = new Set<string>();
+  /** Rebound parameters that keep the borrowed convention with an owner
+   * slot (rebound-parameters.ts), per function, and the current owner slots. */
+  readonly reboundByFunction = new Map<string, ReadonlySet<string>>();
+  readonly reboundOwnerSlots = new Map<string, string>();
+  currentBorrowedReturn = false;
   /** Manifest-bound native imports, used by ffiCall emission. */
   readonly ffiByName = new Map<string, IrFfiImport>();
   /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
    * distinct call-scoped TLS closure slots. */
-  private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
+  readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
   /** Module-level constant consulted per ffiCall: with a retained
    * descriptor anywhere in the manifest, every native call is a
    * pending-exception checkpoint (may-throw derives the same fact from
    * the same helper). */
   readonly ffiHasRetainedCallback: boolean;
-  private readonly ffiHasForeignCallback: boolean;
+  readonly ffiHasForeignCallback: boolean;
   private readonly globalTypes = new Map<string, IrType>();
+  /** Module constants that keep one value once initialized
+   * (immutability.ts stableGlobals). */
+  stableGlobals: ReadonlySet<string> = new Set();
+  /** Every function body's nodes in walk order (ir/node-index.ts), for the
+   * constructor's analyses. */
+  readonly nodeIndex: IrNodeIndex;
   private readonly tdzGlobals = new Map<string, string>();
   readonly constantNumericTables: ReadonlyMap<string, ConstantNumericTable>;
+  /** Constant-key reads on checked-dynamic objects, each with its own
+   * zero-initialized ScrDynReadIc (scr_runtime.h). */
+  dynReadIcSites = 0;
+  /** ThreadSlots blocks by family name (thread-slots.ts). */
+  readonly threadSlotsBlocks = new Map<string, string>();
   /** May-throw analysis (computeMayThrow): pending
    * checks are emitted only after calls that can actually raise. */
   readonly mayThrow: Set<string>;
+  /** The functions that propagate exceptions by unwinding (unwind-abi.ts). */
+  readonly unwindAbi: Set<string>;
+  /** Whether the function being emitted is one of unwindAbi. */
+  currentUnwindAbi = false;
   readonly indirectMayThrow: boolean;
+  /** Worker programs: the functions that poll for termination on entry
+   * (workerTerminationPolls); null outside worker programs. */
+  readonly workerEntryPolls: ReadonlySet<string> | null;
+  /** Functions that check the native stack guard on entry
+   * (stackCheckedFunctions); null where the runtime has no guard. */
+  readonly stackChecks: ReadonlySet<string> | null;
+  /** Static types whose values can be published (@scriptc/threads): their
+   * stores carry the frozen-object guard. Null without publish calls. */
+  readonly publishedTypes: PublishedTypes | null;
+  /** Construction-only class and record fields (immutability.ts); null
+   * where the facts are disabled. */
+  private readonly immutableFields: ImmutableFields | null;
+  /** Constructor function names: their bodies may still write their own
+   * `this`'s construction-only fields. */
+  readonly constructorFunctions: ReadonlySet<string>;
+  inConstructor = false;
   /** Method names with at least one may-throw implementation — the
    * virtualCall pending check's key. */
   readonly mayThrowMethods = new Set<string>();
+  /** Async functions awaited directly at some `await f(...)` site; each
+   * gets an await-call entry (emitAsyncAwaitCall). */
+  readonly awaitCallees = new Set<string>();
+  /** Async functions returned directly at some `return f(...)` site of an
+   * async function; each gets an adopting entry (emitAsyncAwaitCall). */
+  readonly adoptCallees = new Set<string>();
+  /** Fiberless async functions a stackless coroutine body awaits directly;
+   * each gets an inline await entry (emitCoroInlineAwait). */
+  readonly inlineAwaitCallees = new Set<string>();
+  /** Stackless async functions some coroutine body awaits directly: each
+   * gets a direct spawn entry (emitCoroDirectAwait). */
+  readonly directAwaitCallees = new Set<string>();
+  /** The async functions whose bodies never suspend and that a direct
+   * await may enter in place (selectStacklessAsync). */
+  private inlineAwaitable = new Set<string>();
+  /** Locals whose array literal emitStmts left for the `await Promise.all`
+   * that reads them (deferredPromiseAllLocal). */
+  private readonly deferredPromiseAllEntries = new Map<string, ExprOf<"arrayLit">>();
+  /** Empty array literals that a capacity hint follows directly
+   * (reservedArrayLength), with that hint. Constructing the literal with
+   * the hinted capacity consumes the hint, which then emits nothing. */
+  readonly reservedArrayLengths = new Map<IrExpr, IrStmt & { kind: "arraySetLength" }>();
+  readonly consumedReserves = new Set<IrStmt>();
+  /** The promise a `return` emitted past its finally regions already
+   * produced for its adopting await (borrowed from the return's parked
+   * slot); that await takes it instead of evaluating its operand. */
+  private adoptedOperand: LlValue | null = null;
+
+  takeAdoptedOperand(): LlValue | null {
+    const value = this.adoptedOperand;
+    this.adoptedOperand = null;
+    return value;
+  }
   /** setTimeout and friends appeared somewhere: main must run the event
    * loop even in programs with no async functions. */
   usesTimers = false;
+  /** The program calls mock.timers members (moduleUsesMockTimers): timer
+   * calls emit scr_test.c's mock-aware entry points. */
+  readonly mockTimers: boolean;
+  private runtimeFeaturesValue: RuntimeFeatures | undefined;
+  /** The module's runtime features (moduleRuntimeFeatures), found with one
+   * walk of the module the first time any of them is read. */
+  get runtimeFeatures(): RuntimeFeatures {
+    return (this.runtimeFeaturesValue ??= moduleRuntimeFeatures(this.mod, this.nodeIndex));
+  }
+  /** Whether timer and tick scheduling goes through the *_als entry
+   * points (RuntimeFeatures asyncContext). */
+  get schedulesInContext(): boolean {
+    return this.runtimeFeatures.asyncContext;
+  }
   /** Emitted ref-kind resolve thunks for new Promise, interned per inner
    * typeKey → thunk symbol. */
   readonly resolveThunks = new Map<string, string>();
   readonly resolveThunkDefs: string[] = [];
+  /** Inline array searches used by the module (array-search.ts). */
+  readonly arraySearchKinds = new Set<ArraySearchKind>();
+  /** Typed-ref recipe constants by type key (lazy receivers). */
+  readonly typedRefRecipes = new Map<string, string>();
   /** ReadableStream.from adapters keep typed arrays by reference and box
    * one current element per pull. */
   readonly streamFromArrayAdapters = new Map<string, string>();
   /** Identity-preserving static→dyn capsules for program classes and Web
    * APIs whose values remain directly observable. */
-  readonly liveDynRefAdapters = new Map<
-    string,
-    LlStreamTypedRefAdapter
-  >();
+  readonly liveDynRefAdapters = new Map<string, LlStreamTypedRefAdapter>();
+  /** See moduleUsesDynBuiltinStream. */
+  get usesDynBuiltinStream(): boolean {
+    return this.runtimeFeatures.dynBuiltinStream;
+  }
+  /** A checked-dynamic for-await may hold a native stream: the program
+   * links the stream unit (and the dyn-async one the loop needs). */
+  get dynForAwaitStreams(): boolean {
+    return this.runtimeFeatures.stream && this.runtimeFeatures.dynAsync;
+  }
   /** Runtime-arm dispatchers for live union values. */
   readonly liveDynUnionRefAdapters = new Map<string, string>();
   readonly dynPromiseAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
+  readonly nullableFields: NullableRefFields;
+  readonly inlineUnions: InlineUnionFields;
+  /** Unions whose values are nullable arm pointers (nullable-unions.ts). */
+  readonly nullableUnions: NullableUnions;
+  /** The union table without nullable unions: the stack-box analyses. */
+  readonly boxedUnionsById: Map<string, IrUnionDef>;
   readonly recordsById = new Map<string, IrRecordShape>();
   readonly recordCloneShapes = new Set<string>();
   readonly tracedShapes: Set<string>;
   readonly tracedUnions: Set<string>;
+  /** Inline-cache sites of dynamic-tier functions (js-ic.ts): one
+   * zero-initialized ScrJsIc per site (scr_js.h). */
+  jsIcSiteCount = 0;
+  private jsIcSitesMemo: JsIcSites | undefined;
+  /** The tier of the function being emitted. */
+  currentTier: IrFunction["tier"] = undefined;
   /** The class graph (buildClassGraph): preorder numbering, hierarchy
    * membership, virtual slot lists. */
   readonly classMeta: Map<string, LlClassMeta>;
+  /** Which vtable slots borrow which parameters (virtual-borrows.ts). */
+  private virtualBorrows!: VirtualBorrows;
   /** Class objects (classes as first-class values): className → the
    * interned .name literal ref — registered during body emission, the
    * statics and construct thunks assemble around the bodies. */
-  private readonly classObjs = new Map<string, { nameSym: string }>();
+  readonly classObjs = new Map<string, { nameSym: string; baseNameSym: string | null }>();
   private readonly unionFieldReadGroups = new Map<string, number[][]>();
   /** Preorder intervals of the runtime error classes under THIS module's
    * class-forest numbering (main() stamps scr_error_vts with them, exactly
    * like the runtime ABI’s errorVtStampLines). */
-  private readonly errorIntervals: { kind: number; pre: number; post: number; lib: string }[] = [];
+  readonly errorIntervals: {
+    kind: number;
+    pre: number;
+    post: number;
+    lib: string;
+  }[] = [];
   /** The runtime emitter vtable's preorder interval, when the program
    * touches node:events (the class def rides the module exactly then) —
    * main() stamps scr_emitter_vt with it (emitterVtStampLines, ported). */
-  private emitterInterval: { pre: number; post: number } | null = null;
+  emitterInterval: { pre: number; post: number } | null = null;
   /** The runtime stream vtables' preorder intervals (streamVtStampLines,
    * ported): the defs ride every emitter-touching module (the frontend
    * collects the whole emitter-rooted tree), and scr_stream.c links on
    * the same predicate, so the stamps always have their globals. */
-  private readonly streamIntervals: { vt: string; pre: number; post: number; lib: string }[] = [];
+  readonly streamIntervals: {
+    vt: string;
+    pre: number;
+    post: number;
+    lib: string;
+  }[] = [];
 
   // ── per-function state (reset in emitFunction) ─────────────────────────
   B = new BlockBuilder();
   frames: LlValue[][] = [];
-  private scopes: LlScopeEntry[][] = [];
+  scopes: LlScopeEntry[][] = [];
   /** Scope slots dominate every throw site. Share their exceptional cleanup
    * for identical live bindings and handlers; statement temporaries stay at
    * their own throw sites because their SSA values are path-dependent. */
-  private readonly unwindCleanups = new Map<string, { label: string; entries: LlScopeEntry[]; terminator: string }>();
+  readonly unwindCleanups = new Map<
+    string,
+    { label: string; entries: LlScopeEntry[]; terminator: string }
+  >();
   /** Enclosing break/continue targets. `kind` separates loops from
    * switches and labeled blocks: an unlabeled break binds to the innermost
    * NON-BLOCK entry (loop or switch — blocks only enter the stack when
@@ -354,7 +1605,7 @@ export class LlEmitter {
    * continue binds to the innermost LOOP; a labeled jump binds to the
    * entry whose `labels` contains its label. `contLabel` is null exactly
    * for blocks and switches. */
-  private jumpTargets: {
+  jumpTargets: {
     kind: "loop" | "block" | "switch";
     brkLabel: string;
     contLabel: string | null;
@@ -363,12 +1614,196 @@ export class LlEmitter {
     scopeDepth: number;
     finallyDepth: number;
   }[] = [];
-  private currentLocals = new Map<string, IrLocal>();
-  private captureIds = new Set<string>();
-  /** Active canonical byte-loop induction bindings: local id → size_t slot. */
-  integerLoopBindings = new Map<string, string>();
+  currentLocals = new Map<string, IrLocal>();
+  privateSplitLocals = new Map<string, StringSplit>();
+  readonly splitSpans = new Map<string, SplitSpan>();
+  storedSplits = new Map<string, StoredSplitSnapshot>();
+  streamingSplitsEnabled = false;
+  readonly initializerBindings: ReturnType<typeof findInitializerBindings>;
+  /** Whole-program int32 storage and parameter/result facts. */
+  get int32Slots(): Int32Slots {
+    return (this.int32SlotsValue ??= this.joinInt32Slots());
+  }
+  private int32SlotsValue: Int32Slots | undefined;
+  /** The join of the int32 slot analysis a forked process computes
+   * (startInt32Slots). */
+  private int32SlotsJoin: (() => Int32Slots) | undefined;
+  /** The program has no runtime store into a checked-dynamic value
+   * (dynamicFieldStores), so live views of classes and records never
+   * commit back into their objects. Library builds keep their commits:
+   * their values cross a native boundary. */
+  readonly liveViewsReadOnly: boolean;
+  /** The program freezes, seals or prevents extensions of untyped values
+   * (IrModule.untypedIntegrity): the commits of class views store the
+   * view's integrity state in the instance's integrity word. */
+  readonly untypedIntegrity: boolean;
+  /** Functions whose direct calls use i32 parameters or results. */
+  readonly int32Abis: ReadonlyMap<string, Int32Abi>;
+  /** Pure number functions with speculative integer clones. */
+  readonly integerClones: IntegerClones;
+  /** The IR function being emitted. */
+  currentFunctionName = "";
+
+  integerParamRange(fnName: string, localId: string): IntegerRange | null {
+    return this.int32Slots.facts(fnName).params?.get(localId) ?? null;
+  }
+  /** Immutable module constants (contract types) whose graphs become
+   * immortal once initialized: their reads need no reference counting. */
+  readonly immortalGlobals: ReadonlySet<string>;
+  /** ProgramLifetime hierarchy roots (contract types): their instances are
+   * immortal from construction (classes.ts programLifetimeClass). */
+  readonly programLifetime: ReadonlySet<string>;
+  numericLocals = new Map<string, IrLocal>();
+  captureIds = new Set<string>();
+  /** Active induction bindings retain their width independently of size_t. */
+  integerLoopBindings = new Map<
+    string,
+    {
+      slot: string;
+      type: "i32" | "i64";
+      signed?: boolean;
+      range?: { min: number; max: number };
+    }
+  >();
+  /** Constant number locals whose latest emitted declaration stored an
+   * exact integer beside the double, such as `const j = i * 4` in a
+   * typed-array loop version: an i64 slot and the integer's range. */
+  integerTemps = new Map<
+    string,
+    { slot: string; type: "i64"; signed: true; range: IntegerRange }
+  >();
+  /** Integer temps are kept only in optimized synchronous functions: an
+   * async or generator body resumes with its locals in its frame, which
+   * an entry alloca is not part of. */
+  integerTempsEnabled = false;
+  /** Speculative integer loops (speculative-integers.ts) run in this function. */
+  speculativeLoopsEnabled = false;
+  /** False inside the copy of a versioned loop that runs when its guard
+   * fails: loops there get no speculative or int32 kind copies. */
+  loopCopiesEnabled = true;
+  /** The fast copy of a speculative integer loop being emitted: its
+   * integer-computed writes and where each resumes in the ordinary copy. */
+  speculation: {
+    writes: Set<IrStmt>;
+    resume: Map<IrStmt, string>;
+    /** Globals whose double is written back only when the copy is left. */
+    deferred: Set<string>;
+    /** The loop site's count of bailing entries in a row (a global), and
+     * whether this entry completed a speculated write (a slot). A proven
+     * integer loop has neither. */
+    bails?: string;
+    ran?: string;
+    /** Writes that speculate a rewritten value (rewriteSpeculable). */
+    values?: ReadonlyMap<IrStmt, SpeculativeValue>;
+  } | null = null;
+  /** Speculative loop sites numbered so far in the module. */
+  speculativeLoopSites = 0;
+  /** The ordinary copy being emitted: resume labels still to place. */
+  speculationResume: Map<IrStmt, { label: string; placed: boolean }> | null = null;
+  /** The rewritten values of the writes `speculationResume` resumes at. */
+  speculationResumeValues: ReadonlyMap<IrStmt, SpeculativeValue> | null = null;
+  /** Hoisted speculative leaves numbered so far in the function being
+   * emitted (emitFunction resets it): a function's local names must not
+   * depend on which functions the same emitter emitted before it, since
+   * function workers each emit a share of the module. */
+  speculativeLeaves = 0;
+  private readonly inlinableFunctions = new Map<string, InlinableFunction | undefined>();
+
+  /** What speculative loop planning may assume here (SpeculationContext). */
+  speculationContext(): SpeculationContext {
+    const inlinable = (callee: string): InlinableFunction | undefined => {
+      if (!this.inlinableFunctions.has(callee)) {
+        // Unset while its body is checked: a recursive helper is not inlinable.
+        this.inlinableFunctions.set(callee, undefined);
+        const fn = this.fnByName.get(callee);
+        this.inlinableFunctions.set(
+          callee,
+          fn ? inlinableNumberFunction(fn, inlinable) : undefined,
+        );
+      }
+      return this.inlinableFunctions.get(callee);
+    };
+    return {
+      inlinable,
+      unaliased: (id) => {
+        const local = this.currentLocals.get(id);
+        return (
+          local !== undefined &&
+          !local.boxed &&
+          !this.captureIds.has(id) &&
+          !this.lazyCaptureBoxes.has(id)
+        );
+      },
+      leafId: () => `%spec.leaf.${this.speculativeLeaves++}`,
+    };
+  }
+  /** Run once at the top of the next loop copy's header
+   * (`enterLoopHeader`): records the ordinary copy's header, or sends the
+   * third copy's header there. */
+  speculationHeader: ((header: string) => void) | null = null;
+  /** A copy of an int32 kind loop (int32-kind-loops.ts) being emitted: the
+   * int32 arrays with checked stores it reads and writes as int32 arrays
+   * (the fast copy) or as double arrays (an ordinary copy entered only
+   * after they widened), as `function\0local` keys, and where each of the
+   * fast copy's writes resumes in the third copy. */
+  int32Kinds: {
+    int32: Set<string>;
+    wide: Set<string>;
+    resume: Map<IrStmt, string>;
+  } | null = null;
+  /** The resume label of the fast-copy write being emitted. */
+  int32KindResume: string | null = null;
+  /** The function being emitted, for speculative globals. */
+  speculativeFunction = "";
+  /** Every function that writes each number global (computed on demand). */
+  private globalWriters: Map<string, Set<string>> | null = null;
+  /** Whole-program final reference fields (ir/final-fields.ts). */
+  finalFields!: FinalFields;
+  /** The current function may borrow final fields of borrowable objects:
+   * not a constructor (where they change), not async or a generator. */
+  finalFieldBorrows = false;
   integerRanges: IntegerRanges = new Map();
+  /** The current function's bounded for-loop cursors (integer-ranges.ts). */
+  integerLoopRanges: ReadonlyMap<IrStmt, ReadonlyMap<string, IntegerRange>> = new Map();
+  /** Number arrays of the current function whose every present element is
+   * an int32 (Int32[] contracts), or null when the module has none. */
+  int32Elements: ((arr: IrExpr) => boolean) | null = null;
+  /** Sums whose result only feeds 32-bit conversions (wrapping-sums.ts). */
+  wrappingSums = new Set<IrExpr>();
+  /** Number locals of the current function that hold exact integers or NaN
+   * (findIntegerOrNaNLocals in wrapping-sums.ts). */
+  integerOrNaNLocals: ReadonlyMap<string, IntegerRange> = new Map();
+  bytesBounds: ReadonlySet<IrExpr | IrStmt> = new Set();
+  /** The charCodeAt reads standing for charAt reads the emitter rewrote
+   * (one-unit tests and switches, charAtUnitRead), with the charAt each
+   * stands for: a loop version's proof for the charAt covers its read. */
+  readonly charAtUnitReads = new Map<IrExpr, IrExpr>();
+  /** String reads a loop version proved in bounds of a string's UTF-16
+   * units, with the units pointer to read (string-unit-versions.ts). */
+  stringUnitReads: ReadonlyMap<IrExpr | IrStmt, string> = new Map();
+  /** `length` reads of a loop version's string, with the i64 UTF-16
+   * length its guard took (bytes-loop-versions.ts). */
+  stringLengthReads: ReadonlyMap<IrExpr, string> = new Map();
+  /** Worker programs: typed-array accesses whose views an enclosing version
+   * guard proved thread-owned. */
+  bytesOwned: ReadonlySet<IrExpr | IrStmt> = new Set();
+  /** The alias-scope attachment of each typed-array element read and write
+   * in the current loop version's fast copy (emitVersionedLoop), and the
+   * one the element access being emitted carries (bytesElementAlias). */
+  bytesAliasScopes: ReadonlyMap<IrExpr | IrStmt, string> = new Map();
+  bytesAccessScope = "";
+  /** Loop versions with alias scopes in the current function; it names
+   * their scopes. */
+  aliasScopedVersions = 0;
   integerViews = new Map<string, string>();
+  /** Module globals the current function owns outright (initializer
+   * bindings): their function-local slot, which stands in for the global. */
+  privateGlobalSlots = new Map<string, string>();
+  /** Number locals of the current function stored only as an i32
+   * (int32-locals.ts); their slots are `alloca i32`. */
+  int32Locals = new Map<string, Int32Local>();
+  /** The written values (and `++`/`--` nodes) the int32 proof covers. */
+  int32LocalWrites: ReadonlySet<IrExpr> = new Set();
   /** Enclosing try-with-FINALLY regions, innermost last: a `return`
    * inside one runs every crossed finally (innermost first) before the
    * actual ret — the runtime ABI’s pending-return path, with the finally
@@ -378,19 +1813,35 @@ export class LlEmitter {
    * (past its own catch), so the copies emit under the truncated stack.
    * break/continue use the same region snapshots through
    * emitFinallysForJump. */
-  private finallyStack: { frameDepth: number; scopeDepth: number; tryDepth: number; body: IrStmt[] }[] = [];
+  finallyStack: {
+    frameDepth: number;
+    scopeDepth: number;
+    tryDepth: number;
+    body: IrStmt[];
+  }[] = [];
   /** Enclosing try contexts, innermost last — the compile-time unwind
    * targets: a pending check or `throw` inside a try
    * releases frames/scopes down to the recorded depths and branches to
    * `label` (the catch, or the exception-path finally) instead of
    * returning out of the function. Entering a try emits no code. */
-  private tryStack: { label: string; used: boolean; frameDepth: number; scopeDepth: number }[] = [];
+  tryStack: {
+    label: string;
+    used: boolean;
+    frameDepth: number;
+    scopeDepth: number;
+  }[] = [];
   /** Return type of the function being emitted — the unwind path returns
    * a dummy of this type (never read: callers check the flag first). */
-  private currentReturnType: IrType = VOID;
-  /** Active only while emitting a wasm32 async body lowered with LLVM's
-   * switched-coroutine intrinsics. */
-  currentWasiCoro: {
+  currentReturnType: IrType = VOID;
+  /** The current body returns its number result as i32. */
+  currentInt32Result = false;
+  /** The function's i32 entry returns its scalar union result as tag and
+   * payload bits (Int32Abi.union). */
+  currentUnionResult = false;
+  /** Active only while emitting a body lowered with LLVM's
+   * switched-coroutine intrinsics (wasm32 async bodies and generators,
+   * native synchronous generators; see coroLowered). */
+  currentCoro: {
     kind: "async" | "generator";
     id: string;
     handle: string;
@@ -398,77 +1849,408 @@ export class LlEmitter {
     finalLabel: string;
     cleanupLabel: string;
     suspendLabel: string;
+    /** The generator's OUT slot (%ScrGenSlot) for a native body whose
+     * yield channel is a number or boolean, which its yields store into
+     * inline (see emitGenSlotStore); null otherwise. */
+    out: string | null;
   } | null = null;
+  /** Inline generator slot accesses need the %ScrGenHead/%ScrGenSlot
+   * mirrors in the module header. */
+  usesGenSlots = false;
   /** The generator channels of the function being emitted (null outside
    * generator bodies): yieldExpr emission reads them, and emitTryCatch's
    * catch prologue emits the GENRET sentinel re-unwind exactly here. */
   currentGenerator: { yieldT: IrType; nextT: IrType } | null = null;
+  /** The function being emitted is an async generator body. */
+  currentAsyncGenerator = false;
   /** Active optional-chain bind slots, by chain id (chainRecv reads). */
   readonly chainSlots = new Map<string, LlValue>();
   logArgSlots = 0;
-  private readonly stackTraces: boolean;
+  readonly stackTraces: boolean;
+  /** The options this emitter was built with (chunk emitters reuse them). */
+  readonly targetOptions: LlvmTargetOptions;
+  /** Records the module-level effects of emitting a range of functions,
+   * which the emitter that merges the range replays (emit-journal.ts). Null
+   * when this emitter emits the whole module itself. */
+  journal: EmitJournal | null;
+  /** The emitter's hosts forward to `journal` (journal set, or workers). */
+  private readonly journaled: boolean;
+  /** Stack-trace mode: functions no capture can include (no frame push). */
+  readonly unframedFunctions: ReadonlySet<string>;
 
-  constructor(readonly mod: IrModule, options: LlvmTargetOptions) {
-    this.stackTraces = mod.functions.some((fn) => !everyStmtList(fn.body, {
-      stmt: () => true, expr: (expr) => !(expr.kind === "libCall" && expr.fn === "error.stack"),
-    }));
-    this.debug = options.debugSources === undefined ? null : new LlvmDebugInfo(mod.sourceFile, options.debugSources, options.pointerBits, mod.unions);
+  constructor(
+    readonly mod: IrModule,
+    options: LlvmTargetOptions,
+    journal: EmitJournal | null = null,
+    int32Analysis: Int32SlotAnalysis | null = null,
+  ) {
+    this.targetOptions = options;
+    this.journal = journal;
+    this.journaled =
+      journal !== null ||
+      ((options.functionWorkers ?? 1) > 1 && options.forkPrimitives !== undefined);
+    // One walk of every body, which the analyses below read instead of
+    // walking the bodies themselves.
+    this.nodeIndex = int32Analysis?.nodeIndex ?? new IrNodeIndex(mod);
+    this.initializerBindings =
+      int32Analysis?.initializerBindings ?? findInitializerBindings(mod, this.nodeIndex);
+    // One walk finds the dynamic field stores every analysis below consults.
+    const dynamicStores =
+      int32Analysis?.dynamicStores ?? dynamicFieldStores(mod, undefined, undefined, this.nodeIndex);
+    // Started before the other analyses, which may run while a forked
+    // process computes it (startInt32Slots).
+    if (int32Analysis !== null) this.int32SlotsValue = int32Analysis.slots;
+    else this.startInt32Slots(dynamicStores);
+    this.stackTraces = observesStacks(mod, this.nodeIndex);
+    this.nullableUnions = new NullableUnions(
+      mod,
+      options.debugSources === undefined,
+      this.nodeIndex,
+    );
+    this.mockTimers = this.runtimeFeatures.mockTimers;
+    this.debug =
+      options.debugSources === undefined
+        ? null
+        : new LlvmDebugInfo(
+            mod.sourceFile,
+            options.debugSources,
+            options.pointerBits,
+            mod.unions,
+            this.nullableUnions.armTypes(),
+          );
     this.constantNumericTables = findConstantNumericTables(mod);
+    this.untypedIntegrity = mod.untypedIntegrity === true;
+    this.liveViewsReadOnly =
+      mod.lib === undefined &&
+      !this.untypedIntegrity &&
+      !dynamicStores.all &&
+      dynamicStores.names.size === 0;
+    this.int32Abis = this.debug === null ? findInt32Abis(mod, this.int32Slots) : new Map();
+    this.immortalGlobals = new Set(mod.contracts?.immortalGlobals ?? []);
+    this.programLifetime = new Set(mod.contracts?.programLifetime ?? []);
+    this.finalFields = analyzeFinalFields(mod, false, dynamicStores, this.nodeIndex);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
-    this.ffiExtendNarrowIntegers = options.wasi === true || ffiExtendsNarrowIntegers(options.targetTriple);
+    this.ffiExtendNarrowIntegers =
+      options.wasi === true || ffiExtendsNarrowIntegers(options.targetTriple);
     this.wasi = options.wasi === true;
+    this.stacklessGenerators = !this.wasi && mod.workers !== true && this.debug === null;
+    this.stackObjects = this.debug === null;
+    // An empty triple targets the host, as for executableTls below: the
+    // Node-hosted CLI passes none, the native CLI passes its toolchain's, and
+    // both must emit the same module for the same target.
+    this.inlineTrunc =
+      !this.wasi &&
+      (options.targetTriple
+        ? /^(x86_64|amd64)\b/i.test(options.targetTriple)
+        : process.arch === "x64");
+    this.executableTls =
+      mod.workers === true &&
+      mod.lib === undefined &&
+      !this.wasi &&
+      !/apple|darwin|windows|mingw|cygwin|win32/.test(options.targetTriple || process.platform);
+    const host = options.targetTriple || `${process.arch}-${process.platform}`;
+    this.stackGuardTsd =
+      mod.workers === true && mod.lib === undefined && !this.wasi && /apple|darwin/.test(host)
+        ? /^(arm64|aarch64)/.test(host)
+          ? "aarch64"
+          : /^(x86_64|amd64|x64)/.test(host)
+            ? "x86_64"
+            : null
+        : null;
     this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
-    // ScrCycHdr.color stays 12 bytes behind a wasm32 object and 16 bytes
-    // behind a 64-bit object. The wasm32 header pads before color so its
-    // payload remains double-aligned without changing this ABI offset.
-    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
+    this.detachedExit = options.detachedExit === true;
+    this.targetCpu = options.targetCpu;
+    this.wasmBoundsChecks =
+      options.wasmBoundsChecks === true ||
+      wasmBoundsChecks({
+        sanitize: false,
+        pointerBits: options.pointerBits ?? 64,
+        targetTriple: options.targetTriple ?? "",
+      });
+    this.rcHelpers = options.inlineRc !== undefined ? new Set() : null;
+    this.rcMode = options.inlineRc;
+    this.rcHelpersNoinline = options.rcHelpersNoinline === true;
+    // ScrCycHdr.buf sits 4 bytes behind every object on every target.
+    this.cycleBufOffset = CYC_HDR - CYC_BUF;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
+    this.appendedArrayLiterals = findAppendedArrayLiterals(mod, this.nodeIndex);
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
     }
-    const mt = computeMayThrow(mod);
+    // Executables on Linux and macOS install a native stack guard per thread
+    // and per async fiber; WASI, Windows and library builds have none.
+    const triple = (options.targetTriple ?? "").toLowerCase();
+    const windows = triple === "" ? process.platform === "win32" : triple.includes("windows");
+    this.publishedTypes = computePublishedTypes(mod, this.nodeIndex);
+    const mt = computeMayThrow(mod, {
+      stackChecks: !this.wasi && mod.lib === undefined && !windows,
+      published: this.publishedTypes,
+      nodes: this.nodeIndex,
+    });
     this.mayThrow = mt.fns;
-    this.indirectMayThrow = mt.indirect;
+    this.unwindAbi =
+      options.unwindAbi === true &&
+      !this.wasi &&
+      mod.lib === undefined &&
+      options.debugSources === undefined &&
+      (options.targetTriple
+        ? /-linux-(?:gnu|musl)/.test(options.targetTriple)
+        : process.platform === "linux")
+        ? unwindAbiFunctions(mod, this.mayThrow, options.unwindExcluded)
+        : new Set();
+    this.workerEntryPolls = mt.workerEntryPolls ?? null;
+    this.stackChecks = mt.stackChecks ?? null;
+    // A stackless call's eager prefix borrows its caller's stack; the
+    // runtime moves deep prefix nests to a fresh stack using the guard,
+    // which Windows lacks.
+    this.stacklessAsyncAllowed = this.stacklessGenerators && mod.lib === undefined && !windows;
+    this.unframedFunctions = this.stackTraces
+      ? captureFreeFunctions(mod, this.stackChecks, this.publishedTypes)
+      : new Set();
+    // One field-mutability answer serves immutable fields and traced shapes.
+    const cycleMutability = computeCycleMutability(mod, hierarchyUnitOfClass(mod), dynamicStores);
+    this.immutableFields = computeImmutableFields(mod, dynamicStores, cycleMutability);
+    this.constructorFunctions = new Set((mod.classes ?? []).map((c) => `%${c.name}.constructor`));
+    this.indirectMayThrow = mt.indirect || mod.workers === true;
     for (const cls of mod.classes ?? []) {
       for (const m of cls.methods ?? []) {
         if (this.mayThrow.has(`%${cls.name}.${m}`)) this.mayThrowMethods.add(m);
       }
     }
     for (const u of mod.unions ?? []) this.unionsById.set(u.id, u);
-    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById);
-    this.arrayPreservingFunctions = findArrayPreservingFunctions(this.fnByName, this.unionsById, this.optionalArrayReads);
-    this.callLifetimes = analyzeCallLifetimes(this.fnByName);
+    this.boxedUnionsById = this.nullableUnions.boxedUnions(this.unionsById);
+    this.immortalValues.add("null");
+    this.immortalValues.add(NULLABLE_NULL);
+    this.nullableFields = new NullableRefFields(mod.classes ?? [], this.boxedUnionsById);
+    this.inlineUnions = new InlineUnionFields(this.boxedUnionsById, mod.classes ?? []);
     for (const r of mod.records ?? []) this.recordsById.set(r.id, r);
-    const traced = computeTraced(mod);
+    // Optional array reads also cover nullable unions: emitLocalArrayRead
+    // then yields the (borrowed or owned) element pointer, not a stack box.
+    // Arrays of such a union are read the same way.
+    this.optionalArrayReads = new OptionalArrayReads(
+      this.fnByName,
+      this.unionsById,
+      (id) => this.nullableUnions.single(id) !== null,
+    );
+    this.unionSources = {
+      unions: this.boxedUnionsById,
+      receiverUnions: this.unionsById,
+      nullableField: (e) => this.nullableFieldGet(e) !== null,
+      inlineField: (e) => this.inlineFieldGet(e),
+      arrayRead: (e) => this.optionalArrayReads.get(e) !== null,
+      scalarCall: (e) => this.scalarResultCall(e),
+    };
+    this.checkedNarrows = new CheckedNarrows(this.fnByName);
+    this.referenceEffects = new ReferenceEffects(
+      this.fnByName,
+      (call) => this.optionalArrayReads.get(call) !== null,
+      mod.classes ?? [],
+    );
+    if (this.debug === null)
+      this.referenceWrites = new ReferenceWrites(
+        this.fnByName,
+        mod.classes ?? [],
+        (call) => this.optionalArrayReads.get(call) !== null,
+        new Set((mod.globals ?? []).map((g) => g.id)),
+        { unions: mod.unions, records: mod.records },
+        this.immutableFields,
+        this.nodeIndex,
+      );
+    const walkParameters = new Map<string, Set<number>>();
+    if (this.debug === null) {
+      const host = {
+        pointerLocal: (local: IrLocal) => this.plainReference(local.type),
+        borrowsWithoutOwning: (e: IrExpr) => this.borrowsWithoutOwning(e),
+        nodes: this.nodeIndex,
+      };
+      for (const fn of this.fnByName.values()) {
+        const preserving = this.referenceEffects.functions.has(fn.name);
+        if (!preserving && this.referenceWrites === null) continue;
+        const walks = findWalkBorrows(fn, preserving ? host : this.unwrittenWalkHost(fn, host));
+        if (walks.size === 0) continue;
+        this.walkBorrowsByFunction.set(fn.name, walks);
+        const indexes = new Set<number>();
+        fn.params.forEach((param, index) => {
+          if (walks.has(param.localId)) indexes.add(index);
+        });
+        if (indexes.size > 0) walkParameters.set(fn.name, indexes);
+      }
+    }
+    if (this.debug === null) {
+      for (const fn of this.fnByName.values()) {
+        // Strings keep the owned parameter: their in-place append
+        // (`s = s + x`) needs a uniquely owned binding.
+        const rebound = findReboundParameters(
+          fn,
+          (type) =>
+            this.plainReference(type) &&
+            type.kind !== "string" &&
+            (type.kind !== "union" ||
+              this.nullableUnions.single(type.unionId)?.arm.kind !== "string"),
+          this.walkBorrowsByFunction.get(fn.name) ?? new Set(),
+        );
+        if (rebound.size === 0) continue;
+        this.reboundByFunction.set(fn.name, rebound);
+        const indexes = walkParameters.get(fn.name) ?? new Set<number>();
+        fn.params.forEach((param, index) => {
+          if (rebound.has(param.localId)) indexes.add(index);
+        });
+        walkParameters.set(fn.name, indexes);
+      }
+    }
+    this.callLifetimes = analyzeCallLifetimes(
+      this.fnByName,
+      (className, field) => this.nullableFields.get(className, field) !== null,
+      walkParameters,
+      new Set([...this.int32Abis].filter(([, abi]) => abi.union).map(([name]) => name)),
+      {
+        record: (shapeId, field) => this.recordFieldInline(shapeId, field),
+        classField: (className, field) => this.inlineUnions.classField(className, field),
+      },
+      (shapeId) => {
+        const shape = this.recordsById.get(shapeId);
+        return shape !== undefined && !recordDynKeepsIdentity(shape);
+      },
+      (wrap) => this.borrowableNullableWrap(wrap) === "ref",
+    );
+    if (this.debug === null) {
+      const strings = findLentStringParameters(this.fnByName, this.callLifetimes);
+      this.lendingFacts = {
+        strings,
+        records: findLentRecordFields(this.fnByName, this.callLifetimes, strings),
+        producers: findRecordFieldProducers(this.fnByName),
+      };
+    }
+    this.constantCallbacks = findConstantCallbacks(mod, this.callLifetimes, this.nodeIndex);
+    // Integer clones signal a stack overflow through their result, which
+    // needs the single-threaded guard; worker programs also poll for
+    // termination, and debug builds and stack traces keep every frame.
+    // Clones read number arrays their function borrows (64-bit layouts).
+    this.integerClones =
+      this.debug === null &&
+      this.stackChecks !== null &&
+      mod.workers !== true &&
+      mod.lib === undefined &&
+      !this.stackTraces
+        ? findIntegerClones(
+            mod,
+            this.sizeType === "i64"
+              ? (fn, index) => this.callLifetimes.borrowed.get(fn)?.has(index) === true
+              : undefined,
+          )
+        : NO_INTEGER_CLONES;
+    // Integer clones and their dispatchers call each other through their
+    // own lowering, which keeps plain calls and flag tests.
+    for (const name of this.integerClones.members) this.unwindAbi.delete(name);
+    this.stackCallbacks = new StackCallbacks(this.fnByName);
+    this.receiverReaders = new AmbientReceiverReaders(this.fnByName, this.nodeIndex);
+    this.stackCaptures = new StackCaptures(this.fnByName, this.callLifetimes, this.stackCallbacks);
+    this.lazyCaptures = new LazyCaptures(this.fnByName, this.nodeIndex);
+    const traced = computeTraced(mod, dynamicStores, cycleMutability);
     this.tracedShapes = traced.shapes;
     this.tracedUnions = traced.unions;
+    // A shape union's value is whichever record it holds, and the collector
+    // visits it as that record: when one arm carries a collector header,
+    // every arm must (nullable-unions.ts). Unions that share an arm pass a
+    // header on to each other's arms, so repeat until no union adds one.
+    const shapeUnions = this.nullableUnions.allShapeUnions();
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const union of shapeUnions) {
+        if (
+          !this.tracedUnions.has(union.unionId) &&
+          !union.arms.some((arm) => this.tracedShapes.has(`record:${arm.shapeId}`))
+        )
+          continue;
+        for (const arm of union.arms) {
+          const key = `record:${arm.shapeId}`;
+          if (this.tracedShapes.has(key)) continue;
+          this.tracedShapes.add(key);
+          changed = true;
+        }
+      }
+    }
     this.shapeHost = {
+      // Journal hooks only on emitters that can emit ranges (chunk
+      // emitters, and emitters whose workers take a journal after the
+      // fork), so the host's optional calls cost nothing otherwise.
+      journalAllocated: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.allocated(name, op, args),
+      journalBuilt: !this.journaled ? undefined : () => this.journal?.built(),
+      journalOpened: !this.journaled ? undefined : (op) => this.journal?.opened(op),
+      journalUsed: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.used(name, op, args),
+      journalEntry: !this.journaled
+        ? undefined
+        : (table, key, value) => this.journal?.entry(table, key, value),
+      compactArrayElem: (elem) => this.compactArrayElem(elem),
+      compactRegion: () => this.compactRegion,
       sizeType: this.sizeType,
-      cycleColorOffset: this.cycleColorOffset,
+      cycleBufOffset: this.cycleBufOffset,
       tracedShapes: this.tracedShapes,
       tracedUnions: this.tracedUnions,
+      nullableUnions: this.nullableUnions,
+      inlineUnions: this.inlineUnions,
+      unionNoneRef: () => this.unionNoneRef(),
       recordsById: this.recordsById,
       recordCloneShapes: this.recordCloneShapes,
+      objectAudit: options.objectAudit !== false,
+      inlineAlloc: inlineAllocSupported({
+        pointerBits: options.pointerBits,
+        wasi: options.wasi,
+        targetTriple: options.targetTriple,
+        threadInstances: mod.lib?.threadInstances === true,
+      }),
+      // Worker programs keep one allocator per script thread: the inline
+      // paths address its thread-local state.
+      threadLocalAlloc: mod.workers === true,
+      rcHelpers: this.rcHelpers,
+      ...(this.rcMode !== undefined ? { rcMode: this.rcMode } : {}),
+      ...(this.rcHelpersNoinline ? { rcHelpersNoinline: true } : {}),
+      nextCycKind: () => FIRST_EMITTED_CYC_KIND + this.cycKinds++,
+      ...(youngNurseryRequested() && mod.lib === undefined ? { youngNursery: true } : {}),
       unionsById: this.unionsById,
       declare: (decl) => this.declare(decl),
       needOom: () => this.needOom(),
       needBadTag: () => this.needBadTag(),
       internLiteral: (text) => this.internLiteral(text),
       cstr: (text) => this.cstr(text),
+      mapOps: (operands) => this.mapOps(operands),
       unitInstanceRef: (unionId, tag) => this.unitInstanceRef(unionId, tag),
+      retypeGuardRef: (unionId) => this.retypeGuardRef(unionId),
+      fieldAbsentTestIn: (B, value, unionId) => this.fieldAbsentTestIn(B, value, unionId),
+      absentInstanceRef: (unionId) => this.absentInstanceRef(unionId),
       liveDynRefAdapter: (type) => this.liveDynRefAdapter(type),
+      usesDynBuiltinStream: () => this.usesDynBuiltinStream,
       liveDynUnionRefAdapter: (type) => this.liveDynUnionRefAdapter(type),
+      declBoundary: () => this.mod.declBoundary === true,
       dynPromiseAdapter: (type) => this.dynPromiseAdapter(type),
       isErrorClass: (name) => this.classMeta.get(name)?.root.def.name === "%Error",
-      classSubtypes: (name) => {
-        const target = this.classMetaOf(name);
-        return [...this.classMeta.values()].filter((meta) =>
-          target.pre <= meta.pre && meta.pre <= target.post).map((meta) => meta.def.name);
+      classRootOf: (name) => this.classMeta.get(name)?.root.def.name,
+      releasesNothing: (t) => {
+        if (t.kind !== "object" || (this.shapeHost.regions ?? null) !== null) return false;
+        const meta = this.classMeta.get(t.className);
+        return meta !== undefined && programLifetimeClass(this.shapeHost, meta);
       },
+      classSubtypes: (name) => this.classSubtypes(name),
+      classValueSubtypes: (name) => {
+        const target = this.classMetaOf(name).def;
+        return this.classSubtypes(name).filter(
+          (sub) =>
+            sub !== target.name &&
+            classValueAbiEquals(this.classMetaOf(sub).def, target, this.fnByName),
+        );
+      },
+      pendingTestLines: (dest) => this.pendingTestLines(dest),
+      virtualEntry: (implFn) => this.virtualEntry(implFn),
+      programLifetime: this.programLifetime,
+      regionAliasTag: (word) => this.memoryAliasAttachment(`region.${word}`),
     };
     this.walkers = new LlWalkers(this.shapeHost);
     this.dyn = new LlDyn(this.shapeHost);
@@ -481,20 +2263,25 @@ export class LlEmitter {
       try {
         this.llType(g.type); // refuses out-of-tier kinds
       } catch (err) {
-        if (err instanceof LlvmUnsupportedError) throw new LlvmUnsupportedError(`global:${g.type.kind}`);
+        if (err instanceof LlvmUnsupportedError)
+          throw new LlvmUnsupportedError(`global:${g.type.kind}`);
         throw err;
       }
       this.globalTypes.set(g.id, g.type);
       if (g.tdz) this.tdzGlobals.set(g.id, g.name);
     }
-    // Runtime error, EventEmitter, and stream classes have known layouts.
-    // Subclasses embed the ScrEmitter/ScrStream prefixes from classes.ts.
+    this.stableGlobals = stableGlobals(mod, this.nodeIndex);
+    // Runtime error, EventEmitter, stream, EventTarget and Event classes
+    // have known layouts. Subclasses embed the runtime prefixes from
+    // classes.ts.
     const classes = mod.classes ?? [];
     for (const cls of classes) {
       if (
         cls.runtime &&
         !RUNTIME_ERROR_CLASSES.has(cls.name) &&
         cls.name !== RUNTIME_EMITTER_CLASS &&
+        cls.name !== RUNTIME_EVENT_TARGET_CLASS &&
+        cls.name !== RUNTIME_EVENT_CLASS &&
         !RUNTIME_STREAM_CLASSES.has(cls.name)
       ) {
         throw new LlvmUnsupportedError(`classDef:${cls.name}`, cls.loc);
@@ -503,7 +2290,55 @@ export class LlEmitter {
     // The class graph: base/children links, hierarchy membership, the
     // whole-program preorder numbering for instanceof over runtime and
     // compiled error objects, and the per-hierarchy virtual slot lists.
-    this.classMeta = buildClassGraph(mod, this.fnByName);
+    this.classMeta = buildClassGraph(mod, this.fnByName, this.sizeType);
+    if (mod.lifetimeRegions === true) {
+      this.regions = new LifetimeRegions(
+        this.shapeHost,
+        mod,
+        this.classMeta,
+        (meta) => programLifetimeClass(this.shapeHost, meta),
+        this.nullableFields,
+      );
+      const regions = this.regions;
+      // Member names differ from LifetimeRegions' own, which keeps the
+      // record from reading as that class's protocol.
+      this.shapeHost.regions = {
+        rcBody: (fnName, ret, comment) => regions.countBody(fnName, ret, comment),
+        newAlloc: (className, sizeOf) => regions.allocLines(className, sizeOf),
+        classDefinitions: (cls, sizeOf) => regions.classDefs(cls, sizeOf),
+      };
+    }
+    // ProgramLifetime hierarchies count nothing: their instances get the
+    // 32-bit header and packed fields (classes.ts LlClassMeta.compact),
+    // except where regions count them or a slot word follows the header.
+    if (this.sizeType === "i64" && mod.lifetimeRegions !== true)
+      assignCompactLayouts(
+        this.classMeta,
+        (root) => programLifetimeClass(this.shapeHost, root) && !root.threadSlot,
+        (cls) => classFieldTypes(this.shapeHost, cls, this.int32Slots),
+        // Executables whose region lies below 32 GiB hold compact class
+        // instances there (scr_plr_alloc), so fields referring to one store
+        // a 32-bit reference: the field's type, the class of a
+        // `C | undefined` or `C | null` pointer, or the reference arm of a
+        // nullable pointer field, is a compact class. `C | null | undefined`
+        // keeps the pointer: its null is a sentinel outside the region.
+        mod.lib === undefined && options.lowRegion === true
+          ? (cls, i, isCompact) => {
+              const f = cls.fields[i]!;
+              if (this.inlineUnions.classField(cls.name, f.name)) return false;
+              if (this.compactRefType(f.type, isCompact)) return true;
+              const nullable =
+                f.type.kind === "union" && this.nullableUnions.single(f.type.unionId) === null
+                  ? this.nullableFields.get(cls.name, f.name)
+                  : null;
+              return nullable !== null && isCompact(nullable.arm.className);
+            }
+          : undefined,
+      );
+    this.compactRegion =
+      mod.lib === undefined &&
+      options.lowRegion === true &&
+      [...this.classMeta.values()].some((m) => m.compact);
     for (const [name, rec] of RUNTIME_ERROR_CLASSES) {
       const meta = this.classMeta.get(name);
       if (!meta) break; // hand-written IR without the builtin defs: no stamps
@@ -521,6 +2356,73 @@ export class LlEmitter {
         lib: rec.lib,
       });
     }
+    this.virtualBorrows = new VirtualBorrows(
+      mod,
+      this.classMeta,
+      this.fnByName,
+      this.callLifetimes.borrowed,
+    );
+    // After the vtable slots: borrowing slots exclude their implementations.
+    if (this.debug === null) this.analyzeBorrowedReturns();
+    this.int32SlotsValue ??= this.joinInt32Slots();
+  }
+
+  /** Computes the int32 slot analysis, or starts it on a forked process.
+   * Dev builds read its result only near the end of the constructor
+   * (int32Abis is empty with debug info), so for a large module the
+   * process computes it while the constructor runs the other analyses. */
+  private startInt32Slots(dynamicStores: DynamicFieldStores): void {
+    const mod = this.mod;
+    const nodes = this.nodeIndex;
+    const analyze = (): Int32Slots =>
+      analyzeInt32Slots(mod, {
+        dynamicStores,
+        initializerBindings: this.initializerBindings,
+        nodes,
+      });
+    const fork = this.targetOptions.forkPrimitives;
+    if (
+      fork === undefined ||
+      this.targetOptions.debugSources === undefined ||
+      (this.targetOptions.functionWorkers ?? 1) < 2 ||
+      mod.functions.length < workerMinFunctions()
+    ) {
+      this.int32SlotsValue = analyze();
+      return;
+    }
+    this.int32SlotsJoin = forkedAnalysis(
+      fork,
+      analyze,
+      (slots) => slots.encode(nodes),
+      (text) => Int32Slots.decode(text, mod, nodes),
+    );
+  }
+
+  private joinInt32Slots(): Int32Slots {
+    const join = this.int32SlotsJoin;
+    if (join === undefined)
+      throw new InternalCompilerError("llvm emitter bug: int32 slots read before analysis");
+    this.int32SlotsJoin = undefined;
+    return join();
+  }
+
+  /** The borrowed parameters of a hierarchy's vtable slot (empty: owned). */
+  virtualSlotBorrowed(rootName: string, slotIndex: number): ReadonlySet<number> {
+    return this.virtualBorrows.slot(rootName, slotIndex);
+  }
+
+  /** Optimized emission: no debug-info (dev) posture. */
+  get optimizing(): boolean {
+    return this.debug === null;
+  }
+
+  /** The vtable entry for one implementation (VirtualBorrows.entry). */
+  virtualEntry(implFn: string): string {
+    return this.virtualBorrows.entry(implFn);
+  }
+
+  implSlotBorrowed(implFn: string): ReadonlySet<number> {
+    return this.virtualBorrows.implSlotBorrowed(implFn);
   }
 
   abiOffset(native64: number, wasm32: number): number {
@@ -533,7 +2435,6 @@ export class LlEmitter {
     if (POINTER_KINDS.has(t.kind)) return "ptr";
     switch (t.kind) {
       case "f64":
-      case "date":
         return "double";
       case "bool":
         return "i1";
@@ -552,1459 +2453,75 @@ export class LlEmitter {
 
   ffiCallbackAdapter(binding: string, id: string): FfiCallbackAdapter {
     const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
-    if (!adapter) throw new InternalCompilerError(`llvm emitter bug: no callback adapter for ${binding}:${id}`);
+    if (!adapter)
+      throw new InternalCompilerError(`llvm emitter bug: no callback adapter for ${binding}:${id}`);
     return adapter;
   }
-
-  /** C-callable scalar callback trampolines. A callback with an explicit
-   * context entry receives the closure at that exact ABI position. A raw
-   * callback loads it from a call-scoped TLS slot installed around the
-   * outer native call. */
-  private emitFfiCallbackDefs(): { globals: string[]; defs: string[] } {
-    const globals: string[] = [];
-    const defs: string[] = [];
-    if (this.ffiCallbackAdapters.size === 0) return { globals, defs };
-    this.declare(`declare zeroext i1 @scr_exc_pending()`);
-    this.declare(`declare void @scr_trap(ptr)`);
-    const expired = this.cstr("scriptc: native callback invoked outside its call-scoped lifetime\n");
-    const released = this.cstr("scriptc: native callback invoked outside its retained lifetime\n");
-    for (const adapter of this.ffiCallbackAdapters.values()) {
-      const cb = adapter.callback;
-      if (adapter.tls !== null) globals.push(`@${adapter.tls} = internal thread_local global ptr null`);
-      if (adapter.global !== null) globals.push(`@${adapter.global} = internal thread_local global ptr null`);
-      if (adapter.table !== null) {
-        globals.push(`@${adapter.table} = internal global %ScrFfiTable zeroinitializer`);
-      }
-      const params = cb.params.flatMap((param, i): string[] => {
-        if (isFfiContextParam(param)) return [`ptr %ctx`];
-        if (param === "string" || param === "bytes") {
-          return [`ptr %a${i}`, `${this.sizeType} %a${i}_len`];
-        }
-        return [`${ffiNativeParamLl(param, this.ffiExtendNarrowIntegers)} %a${i}`];
-      });
-      if (cb.invoke === "foreign") {
-        if (adapter.table === null || !cb.params.some(isFfiContextParam) || cb.returns !== "void" ||
-            cb.params.some(param => param === "i64" || param === "u64" || param === "pointer")) {
-          throw new InternalCompilerError("llvm emitter bug: invalid foreign FFI callback descriptor");
-        }
-        const dispatch = `${adapter.symbol}_dispatch`;
-        const scriptArgs: string[] = [];
-        const dispatchBody: string[] = [
-          `define internal void @${dispatch}(ptr %cb, ptr %call) ${FN_ATTRS} {`,
-          `entry:`,
-          `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
-          `  %fn = load ptr, ptr %fnp`,
-        ];
-        for (let i = 0; i < cb.params.length; i++) {
-          const param = cb.params[i]!;
-          if (isFfiContextParam(param)) continue;
-          switch (param) {
-            case "f64":
-            case "f32":
-            case "i8":
-            case "u16":
-            case "i16":
-              this.declare(`declare double @scr_ffi_call_get_f64(ptr, ${this.sizeType})`);
-              dispatchBody.push(`  %s${i} = call double @scr_ffi_call_get_f64(ptr %call, ${this.sizeType} ${i})`);
-              scriptArgs.push(`double %s${i}`);
-              break;
-            case "bool":
-              this.declare(`declare zeroext i1 @scr_ffi_call_get_bool(ptr, ${this.sizeType})`);
-              dispatchBody.push(`  %s${i} = call zeroext i1 @scr_ffi_call_get_bool(ptr %call, ${this.sizeType} ${i})`);
-              scriptArgs.push(`i1 %s${i}`);
-              break;
-            case "u8":
-            case "u32":
-            case "i32":
-              this.declare(`declare double @scr_ffi_call_get_${param}(ptr, ${this.sizeType})`);
-              dispatchBody.push(`  %s${i} = call double @scr_ffi_call_get_${param}(ptr %call, ${this.sizeType} ${i})`);
-              scriptArgs.push(`double %s${i}`);
-              break;
-            case "cstring":
-            case "string":
-            case "bytes": {
-              this.declare(`declare ptr @scr_ffi_call_get_data(ptr, ${this.sizeType})`);
-              this.declare(`declare ${this.sizeType} @scr_ffi_call_get_len(ptr, ${this.sizeType})`);
-              dispatchBody.push(
-                `  %data${i} = call ptr @scr_ffi_call_get_data(ptr %call, ${this.sizeType} ${i})`,
-                `  %len${i} = call ${this.sizeType} @scr_ffi_call_get_len(ptr %call, ${this.sizeType} ${i})`,
-              );
-              if (param === "bytes") {
-                this.declare(`declare ptr @scr_bytes_from_data(ptr, ${this.sizeType})`);
-                dispatchBody.push(`  %s${i} = call ptr @scr_bytes_from_data(ptr %data${i}, ${this.sizeType} %len${i})`);
-              } else {
-                this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
-                dispatchBody.push(`  %s${i} = call ptr @scr_str_from_utf8_lossy(ptr %data${i}, ${this.sizeType} %len${i})`);
-              }
-              scriptArgs.push(`ptr %s${i}`);
-              break;
-            }
-          }
-        }
-        dispatchBody.push(
-          `  call void %fn(${[`ptr %cb`, ...scriptArgs].join(", ")})`,
-          `  ret void`,
-          `}`,
-          ``,
-        );
-        for (const line of dispatchBody) defs.push(line);
-
-        this.declare(`declare ptr @scr_ffi_call_new(ptr, ptr, ptr, ${this.sizeType})`);
-        this.declare(`declare void @scr_ffi_post(ptr)`);
-        defs.push(
-          `define internal void @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
-          `entry:`,
-          `  %cb = getelementptr inbounds i8, ptr %ctx, i64 0`,
-          `  %call = call ptr @scr_ffi_call_new(ptr @${adapter.table}, ptr %cb, ptr @${dispatch}, ${this.sizeType} ${cb.params.length})`,
-        );
-        for (let i = 0; i < cb.params.length; i++) {
-          const param = cb.params[i]!;
-          if (isFfiContextParam(param)) continue;
-          if (param === "cstring") {
-            this.declare(`declare void @scr_ffi_call_copy_cstring(ptr, ${this.sizeType}, ptr)`);
-            defs.push(`  call void @scr_ffi_call_copy_cstring(ptr %call, ${this.sizeType} ${i}, ptr %a${i})`);
-          } else if (param === "string" || param === "bytes") {
-            this.declare(`declare void @scr_ffi_call_copy_${param}(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
-            defs.push(`  call void @scr_ffi_call_copy_${param}(ptr %call, ${this.sizeType} ${i}, ptr %a${i}, ${this.sizeType} %a${i}_len)`);
-          } else if (param === "f32" || param === "i8" || param === "u16" || param === "i16") {
-            const nativeTy = ffiNativeTypeLl(param);
-            const op = param === "f32" ? "fpext" : param === "u16" ? "uitofp" : "sitofp";
-            this.declare(`declare void @scr_ffi_call_set_f64(ptr, ${this.sizeType}, double)`);
-            defs.push(
-              `  %wide${i} = ${op} ${nativeTy} %a${i} to double`,
-              `  call void @scr_ffi_call_set_f64(ptr %call, ${this.sizeType} ${i}, double %wide${i})`,
-            );
-          } else {
-            const nativeTy = ffiNativeTypeLl(param);
-            this.declare(`declare void @scr_ffi_call_set_${param}(ptr, ${this.sizeType}, ${nativeTy})`);
-            defs.push(`  call void @scr_ffi_call_set_${param}(ptr %call, ${this.sizeType} ${i}, ${nativeTy} %a${i})`);
-          }
-        }
-        defs.push(`  call void @scr_ffi_post(ptr %call)`, `  ret void`, `}`, ``);
-        continue;
-      }
-      defs.push(
-        `define internal ${ffiNativeReturnLl(cb.returns, this.ffiExtendNarrowIntegers)} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
-        `entry:`,
-        adapter.tls !== null
-          ? `  %cb = load ptr, ptr @${adapter.tls}`
-          : adapter.global !== null
-            ? `  %cb = load ptr, ptr @${adapter.global}`
-            : `  %cb = getelementptr inbounds i8, ptr %ctx, i64 0`,
-        `  %missing = icmp eq ptr %cb, null`,
-        `  br i1 %missing, label %expired, label %ready`,
-        `expired:`,
-        `  call void @scr_trap(ptr ${adapter.callback.lifetime === "call" ? expired : released})`,
-        `  unreachable`,
-        `ready:`,
-        `  %pending = call zeroext i1 @scr_exc_pending()`,
-        `  br i1 %pending, label %skip, label %invoke`,
-        `skip:`,
-        `  ret ${ffiCallbackDummyLl(cb)}`,
-        `invoke:`,
-      );
-      // Validate every native pointer before allocating any copy-in value.
-      // A later bad slot therefore cannot leak an earlier materialization.
-      for (let i = 0; i < cb.params.length; i++) {
-        const param = cb.params[i]!;
-        if (param !== "cstring" && param !== "string" && param !== "bytes") continue;
-        const invalid = `%invalid${i}`;
-        defs.push(`  %null${i} = icmp eq ptr %a${i}, null`);
-        if (param === "cstring") {
-          defs.push(`  ${invalid} = or i1 %null${i}, false`);
-        } else {
-          defs.push(
-            `  %nonempty${i} = icmp ne ${this.sizeType} %a${i}_len, 0`,
-            `  ${invalid} = and i1 %null${i}, %nonempty${i}`,
-          );
-        }
-        const message = param === "cstring"
-          ? "scriptc: native callback passed a NULL cstring\n"
-          : `scriptc: native callback passed a NULL ${param} span with nonzero length\n`;
-        defs.push(
-          `  br i1 ${invalid}, label %invalid_param${i}, label %param_ok${i}`,
-          `invalid_param${i}:`,
-          `  call void @scr_trap(ptr ${this.cstr(message)})`,
-          `  unreachable`,
-          `param_ok${i}:`,
-        );
-      }
-      defs.push(
-        `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
-        `  %fn = load ptr, ptr %fnp`,
-      );
-      const scriptArgs: string[] = [];
-      for (let i = 0; i < cb.params.length; i++) {
-        const param = cb.params[i]!;
-        if (isFfiContextParam(param)) continue;
-        switch (param) {
-          case "i64":
-          case "u64":
-          case "pointer": {
-            const ty = ffiNativeTypeLl(param);
-            this.declare(`declare ptr @scr_bigint_from_${param}(${ty})`);
-            defs.push(`  %s${i} = call ptr @scr_bigint_from_${param}(${ty} %a${i})`);
-            scriptArgs.push(`ptr %s${i}`);
-            break;
-          }
-          case "f64":
-            scriptArgs.push(`double %a${i}`);
-            break;
-          case "f32":
-          case "i8":
-          case "u16":
-          case "i16": {
-            const nativeTy = ffiNativeTypeLl(param);
-            const op = param === "f32" ? "fpext" : param === "u16" ? "uitofp" : "sitofp";
-            defs.push(`  %s${i} = ${op} ${nativeTy} %a${i} to double`);
-            scriptArgs.push(`double %s${i}`);
-            break;
-          }
-          case "bool":
-            defs.push(`  %s${i} = icmp ne i8 %a${i}, 0`);
-            scriptArgs.push(`i1 %s${i}`);
-            break;
-          case "u8":
-            defs.push(`  %s${i} = uitofp i8 %a${i} to double`);
-            scriptArgs.push(`double %s${i}`);
-            break;
-          case "u32":
-            defs.push(`  %s${i} = uitofp i32 %a${i} to double`);
-            scriptArgs.push(`double %s${i}`);
-            break;
-          case "i32":
-            defs.push(`  %s${i} = sitofp i32 %a${i} to double`);
-            scriptArgs.push(`double %s${i}`);
-            break;
-          case "cstring":
-            this.declare(`declare ${this.sizeType} @strlen(ptr)`);
-            this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
-            defs.push(
-              `  %len${i} = call ${this.sizeType} @strlen(ptr %a${i})`,
-              `  %s${i} = call ptr @scr_str_from_utf8_lossy(ptr %a${i}, ${this.sizeType} %len${i})`,
-            );
-            scriptArgs.push(`ptr %s${i}`);
-            break;
-          case "string":
-            this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
-            defs.push(
-              `  %s${i} = call ptr @scr_str_from_utf8_lossy(ptr %a${i}, ${this.sizeType} %a${i}_len)`,
-            );
-            scriptArgs.push(`ptr %s${i}`);
-            break;
-          case "bytes":
-            this.declare(`declare ptr @scr_bytes_from_data(ptr, ${this.sizeType})`);
-            defs.push(
-              `  %s${i} = call ptr @scr_bytes_from_data(ptr %a${i}, ${this.sizeType} %a${i}_len)`,
-            );
-            scriptArgs.push(`ptr %s${i}`);
-            break;
-        }
-      }
-      const ft = ffiCallbackType(cb);
-      const internalRet = this.llType(ft.ret);
-      const callArgs = [`ptr %cb`, ...scriptArgs].join(", ");
-      if (cb.lifetime === "retained") {
-        this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
-        this.declare(`declare void @scr_closure_release_v(ptr)`);
-        defs.push(`  %invoke_pin = call ptr @scr_closure_retain_v(ptr %cb)`);
-      }
-      if (cb.returns === "void") {
-        defs.push(
-          `  call void %fn(${callArgs})`,
-          ...(cb.lifetime === "retained" ? [`  call void @scr_closure_release_v(ptr %invoke_pin)`] : []),
-          `  ret void`,
-          `}`,
-          ``,
-        );
-        continue;
-      }
-      defs.push(`  %result = call ${internalRet} %fn(${callArgs})`);
-      if (cb.lifetime === "retained") {
-        defs.push(`  call void @scr_closure_release_v(ptr %invoke_pin)`);
-      }
-      switch (cb.returns) {
-        case "i64":
-        case "u64":
-        case "pointer": {
-          const ty = ffiNativeTypeLl(cb.returns);
-          this.declare(`declare ${ty} @scr_bigint_to_${cb.returns}(ptr)`);
-          this.declare(`declare void @scr_bigint_release(ptr)`);
-          defs.push(`  %out = call ${ty} @scr_bigint_to_${cb.returns}(ptr %result)`,
-            `  call void @scr_bigint_release(ptr %result)`, `  ret ${ty} %out`);
-          break;
-        }
-        case "f64":
-          defs.push(`  ret double %result`);
-          break;
-        case "f32":
-          defs.push(`  %out = fptrunc double %result to float`, `  ret float %out`);
-          break;
-        case "bool":
-          defs.push(`  %out = zext i1 %result to i8`, `  ret i8 %out`);
-          break;
-        case "u8":
-        case "i8":
-        case "u16":
-        case "i16":
-        case "u32":
-          this.declare(`declare double @scr_bit_ushr(double, double)`);
-          defs.push(
-            `  %coerced = call double @scr_bit_ushr(double %result, double ${f64Lit(0)})`,
-            `  %wide = fptoui double %coerced to i32`,
-          );
-          if (cb.returns !== "u32") {
-            const nativeTy = ffiNativeTypeLl(cb.returns);
-            defs.push(`  %out = trunc i32 %wide to ${nativeTy}`, `  ret ${nativeTy} %out`);
-          } else {
-            defs.push(`  ret i32 %wide`);
-          }
-          break;
-        case "i32":
-          this.declare(`declare double @scr_bit_or(double, double)`);
-          defs.push(
-            `  %coerced = call double @scr_bit_or(double %result, double ${f64Lit(0)})`,
-            `  %out = fptosi double %coerced to i32`,
-            `  ret i32 %out`,
-          );
-          break;
-      }
-      defs.push(`}`, ``);
-    }
-    return { globals, defs };
+  emitFfiCallbackDefs(): { globals: string[]; defs: string[] } {
+    return emitFfiCallbackDefs(this);
   }
 
   emit(): string {
     return this.emitParts().join("\n");
   }
-
   emitParts(): string[] {
-    // Function bodies first (the literal/unit/fn-value tables fill as they
-    // emit), then the file assembles around them — the runtime ABI’s order.
-    const fnDefs: string[] = [];
-    for (const fn of this.mod.functions) fnDefs.push(this.emitFunction(fn));
-    const errorViews: string[] = [];
-    for (const property of ["name", "message"]) if (this.mod.functions.some((fn) => fn.name === `%error.${property}.read`)) {
-      this.declare(`declare void @scr_error_install_${property}_reader(ptr)`);
-      errorViews.push(`  call void @scr_error_install_${property}_reader(ptr @${mangleFunction(`%error.${property}.read`)})`);
-    }
-    for (const meta of this.classMeta.values()) {
-      if (meta.def.runtime || meta.root.def.name !== "%Error") continue;
-      const type: IrType = { kind: "object", className: meta.def.name };
-      const adapter = this.liveDynRefAdapter(type);
-      const rc = vAdapters(this.shapeHost, type);
-      const key = typeKey(type);
-      const name = `sc_error_view_${errorViews.length}`;
-      this.resolveThunkDefs.push(`define internal ptr @${name}(ptr %v) ${FN_ATTRS} {`, `entry:`,
-        `  %d = call ptr ${typedRefConstructor(this.shapeHost, type)}(ptr %v, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, ${this.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
-        `  ret ptr %d`, `}`, ``);
-      this.declare(`declare void @scr_error_register_dyn(ptr, ptr)`);
-      errorViews.push(`  call void @scr_error_register_dyn(ptr @${mangleVtInstance(meta.def.name)}, ptr @${name})`);
-    }
-    const layouts = emitLlvmLayouts(this.shapeHost, this.mod, this.classMeta, this.classObjs, this.fnByName, (t) => this.llType(t));
-    const shapes = layouts.records;
-    const classShapes = layouts.classes;
-    const classObjDefs = layouts.classObjects;
-    const wrappers = this.emitFnValueDefs();
-    const asyncDefs = this.emitAsyncScaffolding();
-    const ffiCallbacks = this.emitFfiCallbackDefs();
-    const hasNoInlineRecordClone = [...this.recordCloneShapes].some(
-      (shapeId) => (this.recordsById.get(shapeId)?.fields.length ?? 0) >= 16,
-    );
-    const embedded = this.mod.embedded;
-    const usesIsland = embedded !== undefined && embedded.modules.length > 0;
-    const storeNpmText = (text: string): { bytes: Buffer; raw: number } => {
-      const plain = Buffer.from(text, "utf8");
-      if (text.length < NPM_COMPRESS_MIN) return { bytes: plain, raw: 0 };
-      const deflated = deflateRawSync(plain, { level: 9 });
-      return deflated.length < plain.length
-        ? { bytes: deflated, raw: plain.length }
-        : { bytes: plain, raw: 0 };
-    };
-    const npmStored = usesIsland
-      ? embedded.modules.map((m) => ({
-          src: storeNpmText(m.source),
-          esm: m.esm === undefined ? null : storeNpmText(m.esm),
-        }))
-      : [];
-
-    // Module globals, FIRST OCCURRENCE per id: a class-expression static
-    // instantiated through several mixin applications registers one global
-    // id several times (2041-mixin-values) — C's tentative definitions
-    // absorb the duplicates silently, LLVM rejects redefinition, so the
-    // storage AND the release emit once per id here.
-    const seenGlobalIds = new Set<string>();
-    const globals = (this.mod.globals ?? []).filter((g) => {
-      if (seenGlobalIds.has(g.id)) return false;
-      seenGlobalIds.add(g.id);
-      return true;
-    });
-    // Refcounted globals release before main returns — the runtime ABI’s
-    // sc_release_globals, keeping the RC audit's live count exact. Built
-    // before the declaration table flushes (it adds the release symbols).
-    // Two spellings with distinct temp names: the normal exit and the
-    // uncaught-exception exit are separate blocks of the same function.
-    // Interned function-value closures are IMMORTAL (rc == SIZE_MAX), so
-    // an own-property table Object.defineProperties hung on one would
-    // outlive the RC audit — release it with the globals (the runtime ABI’s
-    // sc_release_globals tail). Only when the dispatch unit is even
-    // linked (defineProps is the only writer).
-    const runtimeFeatures = moduleRuntimeFeatures(this.mod);
-    const fnValueProps = [...this.fnValues];
-    if (fnValueProps.length > 0) this.declare(`declare void @scr_box_release(ptr)`);
-    if (this.classObjs.size > 0) this.declare(`declare void @scr_classobj_clear_properties(ptr)`);
-    const globalReleaseLines = (prefix: string): string[] => {
-      const lines: string[] = [];
-      globals.forEach((g, i) => {
-        if (!isRefCounted(g.type)) return;
-        lines.push(
-          `  %${prefix}${i} = load ptr, ptr @${mangleGlobal(g.id)}`,
-          `  call void ${releaseSym(this.shapeHost, g.type)}(ptr %${prefix}${i}) ; ${g.name}`,
-        );
-      });
-      fnValueProps.forEach((name, i) => {
-        // props sits at %ScrClosure field 3; release is NULL-tolerant —
-        // cleared so a second release path stays idempotent.
-        lines.push(
-          `  %${prefix}fp${i} = load ptr, ptr getelementptr inbounds (%ScrClosure, ptr @${mangleFnClosure(name)}, i64 0, i32 3)`,
-          `  call void @scr_box_release(ptr %${prefix}fp${i}) ; ${name}.props`,
-          `  store ptr null, ptr getelementptr inbounds (%ScrClosure, ptr @${mangleFnClosure(name)}, i64 0, i32 3)`,
-        );
-      });
-      for (const name of this.classObjs.keys()) lines.push(`  call void @scr_classobj_clear_properties(ptr @${mangleClassObj(name)})`);
-      return lines;
-    };
-    // Exit listeners can read MODULE GLOBALS directly, so they must run
-    // BEFORE the global releases (the runtime ABI’s runExitListeners
-    // ordering — the atexit half becomes an idempotent no-op).
-    const usesEvents = runtimeFeatures.processEvents;
-    const usesChildProcess = runtimeFeatures.childProcess;
-    const usesFsWatch = runtimeFeatures.fsWatch;
-    // Stream-surface programs fill the loop's stream hook (the deferred
-    // next-tick emissions) and the emitter's post-registration flow kick
-    // before %main — scr_stream.c links only when the line is emitted
-    // (native-toolchain.ts gates on the same predicate).
-    const usesStream = runtimeFeatures.stream;
-    // Net-surface programs fill the loop's net hooks (and the netSocket
-    // handle-dispatch ops for the checked-dynamic boundary); http-surface
-    // programs additionally stamp the httpReq/httpRes ops — the C main's
-    // install lines, gated on the same predicates native-toolchain.ts links by.
-    const usesNet = runtimeFeatures.net;
-    const usesDgram = runtimeFeatures.dgram;
-    const usesHttp2 = runtimeFeatures.http2;
-    const usesHttp = runtimeFeatures.http;
-    // Fetch-referencing programs register the native fetch bridge before
-    // any island entry (the engine's lazy boot consults it) — native-toolchain.ts
-    // compiles scr_fetch.c on the same predicate.
-    const usesFetch = runtimeFeatures.fetch;
-    const embedsZlib = moduleEmbedsBuiltin(this.mod, "node:zlib");
-    const embedsNet =
-      moduleEmbedsBuiltin(this.mod, "node:http") ||
-      moduleEmbedsBuiltin(this.mod, "node:https") ||
-      moduleEmbedsBuiltin(this.mod, "node:net") ||
-      moduleEmbedsBuiltin(this.mod, "node:tls");
-    const snapshotsTlsCa =
-      runtimeFeatures.tls || runtimeFeatures.tlsCa ||
-      moduleEmbedsBuiltin(this.mod, "node:https") ||
-      moduleEmbedsBuiltin(this.mod, "node:tls");
-    // The process verdict has the same precedence as the C reference
-    // emitter: node:test owns the final status when present; otherwise an
-    // embedded process.exitCode owns it; ordinary programs return zero.
-    const usesNodeTest = runtimeFeatures.nodeTest;
-    const programExitUsesIsland = !usesNodeTest && usesIsland;
-    // Declared NOW — the extern block flushes before main assembles.
-    if (usesEvents) this.declare(`declare void @scr_events_install()`);
-    if (usesChildProcess) this.declare(`declare void @scr_child_dyn_install()`);
-    const childStreamBoxes = usesChildProcess && usesStream &&
-      this.classMeta.has("%Readable") && this.classMeta.has("%Writable")
-      ? [this.dyn.toDynHelper({ kind: "object", className: "%Readable" }),
-         this.dyn.toDynHelper({ kind: "object", className: "%Writable" })]
-      : null;
-    if (childStreamBoxes) {
-      this.declare(`@scr_stream_child_ops = external constant { ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr }`);
-      this.declare(`declare void @scr_child_dyn_streams_install(ptr, ptr, ptr)`);
-    }
-    if (usesFsWatch) this.declare(`declare void @scr_watch_install()`);
-    if (this.ffiHasForeignCallback) this.declare(`declare void @scr_ffi_install()`);
-    if (usesStream) this.declare(`declare void @scr_stream_install()`);
-    if (usesNet) {
-      this.declare(`declare void @scr_net_install()`);
-      this.declare(`declare void @scr_net_dyn_install()`);
-    }
-    if (usesDgram) this.declare(`declare void @scr_dgram_install()`);
-    if (usesHttp2) this.declare(`declare void @scr_http2_dyn_install()`);
-    if (usesHttp) this.declare(`declare void @scr_http_dyn_install()`);
-    if (usesFetch) this.declare(`declare void @scr_fetch_install()`);
-    if (embedsZlib) this.declare(`declare void @scr_zlib_island_install()`);
-    if (embedsNet) this.declare(`declare void @scr_net_island_install()`);
-    if (usesIsland) {
-      this.declare(`declare void @scr_island_modules(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
-      this.declare(`declare void @scr_island_entry_module(ptr)`);
-      this.declare(`declare i32 @scr_island_exit_code()`);
-      if (moduleEmbedsCompressedNpm(this.mod)) {
-        this.declare(`declare void @scr_island_set_inflate(ptr)`);
-        this.declare(`declare zeroext i1 @scr_zlib_inflate_exact(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
-      }
-    }
-    if (usesNodeTest) this.declare(`declare i32 @scr_test_exit_code()`);
-    if (snapshotsTlsCa) {
-      this.declare(`declare void @scr_tls_ca_install()`);
-    }
-    // Inline exit listeners run when something they must beat exists:
-    // the refcounted-global releases, or the retained-FFI atexit ledger
-    // sweep (a listener may legitimately release or pump a registration,
-    // and only the inline call orders ahead of every atexit handler —
-    // the runtime ABI’s runExitListeners stance). Plain event programs
-    // with neither keep the atexit path, so their listener timing is
-    // unchanged.
-    const hasRefGlobals = globals.some((g) => isRefCounted(g.type)) || fnValueProps.length > 0;
-    const inlineExitListeners = usesEvents && (hasRefGlobals || this.ffiHasRetainedCallback);
-    this.declare(`declare i32 @scr_exit_code_hint_get()`);
-    if (inlineExitListeners) {
-      this.declare(`declare void @scr_run_exit_listeners(double)`);
-      this.declare(`declare i32 @scr_exit_code_hint_get()`);
-    }
-    const exitListenerLines = (prefix: string): string[] => {
-      if (!inlineExitListeners) return [];
-      return [
-        `  %${prefix}h = call i32 @scr_exit_code_hint_get()`,
-        `  %${prefix}hd = sitofp i32 %${prefix}h to double`,
-        `  call void @scr_run_exit_listeners(double %${prefix}hd)`,
-      ];
-    };
-    const globalReleases = globalReleaseLines("g");
-    const asyncEntry = this.fnByName.get(this.mod.entry)?.async === true;
-    const entryMayThrow = this.mayThrow.has(this.mod.entry);
-    // The event loop runs when timers appeared OR any async/generator
-    // function exists (the C main's hasAsync || hasGenerators ||
-    // usesTimers gate). Generator programs run
-    // the loop too: its exit accounting notes still-suspended generator
-    // fibers as abandoned, so the RC audit downgrades exactly like the
-    // async loop-exhaustion story.
-    const runsLoop =
-      this.usesTimers ||
-      usesIsland ||
-      this.ffiHasForeignCallback ||
-      this.mod.functions.some((f) => f.async === true || f.generator !== undefined);
-    const uncaughtReleases = entryMayThrow && !asyncEntry ? globalReleaseLines("gu") : [];
-    const loopReleasesU = runsLoop ? globalReleaseLines("gl") : [];
-    const loopReleasesR = runsLoop ? globalReleaseLines("gr") : [];
-    const topRejectReleases = asyncEntry ? globalReleaseLines("gt") : [];
-    const topPendingReleases = asyncEntry ? globalReleaseLines("gp") : [];
-    const loopReportedReleases = runsLoop ? globalReleaseLines("gq") : [];
-    // main's epilogues read the flag / the loop entry points — declared
-    // HERE, before the extern block flushes (a pending check usually
-    // declared the flag already; the Set dedupes).
-    if (entryMayThrow || runsLoop) this.declare(`declare zeroext i1 @scr_exc_pending()`);
-    if (runsLoop) {
-      this.declare(`declare zeroext i1 @scr_loop_run(ptr)`);
-      this.declare(`declare zeroext i1 @scr_report_unhandled_rejections()`);
-      this.declare(`declare void @scr_discard_unhandled_rejections()`);
-    }
-    if (asyncEntry) {
-      this.declare(`declare i32 @scr_promise_finish_top_level(ptr)`);
-      this.declare(`declare void @scr_promise_rethrow_top_level(ptr)`);
-      this.declare(`declare void @scr_promise_release(ptr)`);
-      this.declare(`declare void @scr_exit_code_note(i32)`);
-      if (programExitUsesIsland && inlineExitListeners) {
-        this.declare(`declare ${this.sizeType} @scr_island_exit_code_version()`);
-      }
-    }
-    const topPendingExitLines = (): string[] => {
-      if (!asyncEntry) return [];
-      const lines: string[] = [];
-      if (usesNodeTest) {
-        lines.push(`  %tla_program_exit = call i32 @scr_test_exit_code()`);
-      } else if (usesIsland) {
-        lines.push(`  %tla_program_exit = call i32 @scr_island_exit_code()`);
-      }
-      if (usesNodeTest || usesIsland) {
-        lines.push(
-          `  %tla_program_exit_zero = icmp eq i32 %tla_program_exit, 0`,
-          `  %tla_exit_status = select i1 %tla_program_exit_zero, i32 %tla_status, i32 %tla_program_exit`,
-        );
-      }
-      const exitStatus = usesNodeTest || usesIsland ? "%tla_exit_status" : "%tla_status";
-      const tracksIslandExit = programExitUsesIsland && inlineExitListeners;
-      if (tracksIslandExit) {
-        lines.push(`  %tla_exit_version = call ${this.sizeType} @scr_island_exit_code_version()`);
-      }
-      // finish_top_level initially notes 13. Replace that hint before exit
-      // listeners run when a higher-priority verdict was already selected.
-      lines.push(`  call void @scr_exit_code_note(i32 ${exitStatus})`);
-      for (const line of exitListenerLines("xp")) lines.push(line);
-      if (tracksIslandExit) {
-        lines.push(
-          `  %tla_exit_version_after = call ${this.sizeType} @scr_island_exit_code_version()`,
-          `  %tla_exit_changed = icmp ne ${this.sizeType} %tla_exit_version_after, %tla_exit_version`,
-          `  br i1 %tla_exit_changed, label %tla_exit_updated, label %tla_exit_unchanged`,
-          `tla_exit_updated:`,
-          `  %tla_listener_exit = call i32 @scr_island_exit_code()`,
-          `  call void @scr_exit_code_note(i32 %tla_listener_exit)`,
-          `  br label %tla_exit_done`,
-          `tla_exit_unchanged:`,
-          `  br label %tla_exit_done`,
-          `tla_exit_done:`,
-          `  %tla_final_exit = phi i32 [ %tla_listener_exit, %tla_exit_updated ], [ ${exitStatus}, %tla_exit_unchanged ]`,
-        );
-      }
-      for (const line of topPendingReleases) lines.push(line);
-      lines.push(`  ret i32 ${tracksIslandExit ? "%tla_final_exit" : exitStatus}`);
-      return lines;
-    };
-    // LIBRARY mode: the runtime entry points the generated library
-    // symbols delegate to — declared before the extern block flushes.
-    if (this.mod.lib !== undefined) {
-      if (this.wasi) {
-        this.declare(`declare ptr @malloc(${this.sizeType})`);
-        this.declare(`declare void @free(ptr)`);
-      }
-      this.declare(`declare void @scr_library_entry(i1 zeroext, ptr)`);
-      this.declare(`declare void @scr_library_reset()`);
-      this.declare(`declare void @scr_library_check_exc()`);
-      this.declare(`declare void @scr_library_set_sink(ptr, ptr)`);
-      this.declare(`declare void @scr_library_callback_entry_guard(ptr)`);
-      this.declare(`declare void @scr_library_arena_reset()`);
-      this.declare(`declare void @scr_library_collect()`);
-      if ((this.mod.lib.callbacks?.length ?? 0) > 0) {
-        // Host-callback channels: the registration define's dispatch
-        // (strcmp over the declared names + the runtime slot store).
-        // The call-site fetch pair (scr_library_cb_require/_ctx) is
-        // declared at ffiCall emission like every body-driven runtime
-        // symbol.
-        this.declare(`declare void @scr_library_cb_set(${this.sizeType}, ptr, ptr)`);
-        this.declare(`declare i32 @strcmp(ptr, ptr)`);
-      }
-      if (this.mod.lib.exports.some((e) => e.params.includes("string"))) {
-        this.declare(`declare ptr @scr_library_str_in(ptr, ${this.sizeType})`);
-      }
-      if (this.mod.lib.exports.some((e) => e.params.includes("bytes"))) {
-        this.declare(`declare ptr @scr_library_bytes_in(ptr, ${this.sizeType}, ptr)`);
-      }
-      if (this.mod.lib.exports.some((e) => e.params.includes("i64"))) {
-        this.declare(`declare double @scr_library_i64_in(i64, ptr)`);
-      }
-      if (this.mod.lib.exports.some((e) => e.params.includes("u64"))) {
-        this.declare(`declare double @scr_library_u64_in(i64, ptr)`);
-      }
-      if (this.mod.lib.exports.some((e) => e.returns === "string")) {
-        this.declare(`declare void @scr_library_str_out(ptr, ptr, ptr)`);
-      }
-      if (this.mod.lib.exports.some((e) => e.returns === "bytes")) {
-        this.declare(`declare void @scr_library_bytes_out(ptr, ptr, ptr)`);
-      }
-    }
-    // Helpers assemble BEFORE the declaration table flushes (they add
-    // write/abort declarations).
-    const helpers = this.helperDefs();
-    if (this.constantNumericTables.size > 0) this.declare(`declare double @scr_arr_get_number(ptr, double)`);
-
-    const out: string[] = [
-      `; Generated by scriptc (LLVM backend) from ${this.mod.sourceFile}. Do not edit.`,
-      ``,
-      // Type shapes shared with the runtime's C ABI. ScrStr is the header
-      // prefix only (the flexible-array tail is concrete per literal);
-      // ScrLogArg is { i32 tag; 8-byte union } — i64 at offset 8 matches
-      // the C layout (4 bytes padding after the tag). ScrUnion/ScrClosure
-      // mirror scr_runtime.h field-for-field (tag reads, slot peeks, the
-      // fn pointer, and the caps[] tail all address through them).
-      `%ScrStr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType} }`,
-      `%ScrLogArg = type { i32, i64 }`,
-      `%ScrVt = type { ${this.sizeType}, ${this.sizeType}, ptr }`,
-      `%ScrUnion = type { ${this.sizeType}, i32, ptr, ptr, ptr, i64 }`,
-      `%ScrClosure = type { ${this.sizeType}, ptr, ${this.sizeType}, ptr, i32 }`,
-      `%ScrFfiTable = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, i8, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
-      `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr, double, ptr }`,
-      // ScrArr mirrors scr_runtime.h field-for-field. Live dynamic stream
-      // commits swap its mutable dense, sparse, presence, and property
-      // storage while preserving the target object's identity.
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ${this.sizeType}, ptr }`,
-      // The runtime error prefix { rc, vt, name, message, code, cause } and the
-      // class-object shape { rc, pre, post, ctor, name } — field reads on
-      // builtin errors and classval loads GEP through these.
-      `%ScrError = type { ${this.sizeType}, ptr, ptr, ptr, ptr, ptr, i8, i8, i8, i8, i8, ptr, ptr }`,
-      `%ScrClassObj = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
-      // The runtime emitter prefix { rc, vt, reg, cls } — user subclasses
-      // embed it (classes.ts), and bare-emitter GEPs address through it.
-      `%ScrEmitter = type { ${this.sizeType}, ptr, ptr, ptr }`,
-      // The runtime stream layout { rc, vt, reg, cls, st } — one struct
-      // for all five stream classes; stream subclasses embed it.
-      `%ScrStream = type { ${this.sizeType}, ptr, ptr, ptr, ptr }`,
-      // The catch-binding snapshot box { rc, kind, f64, b, payload,
-      // retain_fn, release_fn, trace_fn } — caughtTest kind reads and
-      // caughtNarrow payload extraction GEP through it (offsets match
-      // scr_runtime.h's natural alignment: kind at 8, f64 at 16, b at 24,
-      // payload at 32).
-      `%ScrCaught = type { ${this.sizeType}, i32, double, i8, ptr, ptr, ptr, ptr }`,
-      // ScrBytes { rc, len, elem(i32+pad), data, backing }. Indexed
-      // typed-array access GEPs through this directly: the IR type already
-      // fixes elem, so the hot path needs neither a runtime kind load nor
-      // the generic scr_bytes_get/set call.
-      `%ScrBytes = type { ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, i8 }`,
-      // The capture box { rc, kind, obj_retain, obj_release, obj_trace,
-      // slot } — TDZ reads peek the payload slot (offset 40) directly.
-      `%ScrBox = type { ${this.sizeType}, i32, ptr, ptr, ptr, i64 }`,
-      // The stack buffer of the emitted JSON serializers { data, len, cap }.
-      `%ScrJsonBuf = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ${this.sizeType} }`,
-      // The dynCheck error-path spine { parent, key, index } — the emitted
-      // builders stack-allocate one per recursion level (dyn.ts).
-      `%ScrDynPath = type { ptr, ptr, ${this.sizeType} }`,
-      `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
-      `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
-    ];
-    for (const line of shapes.typeDefs) out.push(line);
-    for (const line of classShapes.typeDefs) out.push(line);
-    // Thread-instanced library state (abi.instance_per_thread): the
-    // program TU's mutable globals — module globals, run-once guards, the
-    // lazily-compiled regex literal caches — and the runtime globals its
-    // init stamps live in thread-local storage, matching the runtime
-    // objects compiled with -DSCR_THREAD_INSTANCES. Immutable interned
-    // data (string literals, unit arms, template arrays, vtables) stays
-    // shared.
-    const tl = this.mod.lib?.threadInstances === true ? "thread_local " : "";
-    out.push(
-      ``,
-      `@scr_error_vts = external ${tl}global [${RUNTIME_ERROR_CLASSES.size} x %ScrVt]`,
-      `declare void @scr_init()`,
-      `declare void @scr_lib_init(i32, ptr)`,
-      ...(this.runtimeAbiMarker && this.mod.lib === undefined
-        ? [`declare void @${RUNTIME_ABI_MARKER}()`]
-        : []),
-    );
-    for (const d of this.decls) out.push(d);
-    out.push(``);
-    for (const table of this.constantNumericTables.values()) {
-      const n = table.values.length;
-      out.push(
-        `@${table.symbol} = private constant [${n} x double] [${table.values.map((v) => `double ${f64Lit(v)}`).join(", ")}]`,
-        `define internal double @${table.symbol}_get(ptr %a, double %i) alwaysinline #0 {`,
-        `entry:`,
-        `  %initialized = icmp ne ptr %a, null`,
-        `  %nonnegative = fcmp oge double %i, ${f64Lit(0)}`,
-        `  %below = fcmp olt double %i, ${f64Lit(n)}`,
-        `  %range = and i1 %nonnegative, %below`,
-        `  %safe = and i1 %initialized, %range`,
-        `  br i1 %safe, label %convert, label %fallback`,
-        `convert:`,
-        // The branch must dominate fptoui: NaN/out-of-range conversion
-        // would produce poison. Fractional indices also need a fallback.
-        `  %index = fptoui double %i to ${this.sizeType}`,
-        `  %roundtrip = uitofp ${this.sizeType} %index to double`,
-        `  %integer = fcmp oeq double %roundtrip, %i`,
-        `  br i1 %integer, label %read, label %fallback`,
-        `read:`,
-        `  %slot = getelementptr inbounds [${n} x double], ptr @${table.symbol}, ${this.sizeType} 0, ${this.sizeType} %index`,
-        `  %value = load double, ptr %slot`,
-        `  ret double %value`,
-        `fallback:`,
-        `  %generic = call double @scr_arr_get_number(ptr %a, double %i)`,
-        `  ret double %generic`,
-        `}`, ``,
-      );
-    }
-    for (const [text, lit] of this.literals) {
-      // Immortal interned ScrStr: { rc = SIZE_MAX, len, cap = len, bytes\0 } —
-      // the runtime ABI’s static table, retain/release skip rc == SIZE_MAX.
-      out.push(
-        `@${lit.sym} = internal global { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, [${lit.len + 1} x i8] } ` +
-          `{ ${this.sizeType} -1, ${this.sizeType} ${lit.len}, ${this.sizeType} ${lit.len}, [${lit.len + 1} x i8] c"${llStrBytes(text)}" }`,
-      );
-    }
-    if (this.literals.size > 0) out.push(``);
-    for (const [key, sym] of this.unitInstances) {
-      // One immortal instance per unit-armed (union, tag): tag set, payload
-      // slot and RC entry points zero — retain/release/collector all skip
-      // rc == SIZE_MAX, so these never join the RC audit or a trace walk.
-      const [unionId, tag] = key.split(":");
-      out.push(
-        `@${sym} = internal global %ScrUnion { ${this.sizeType} -1, i32 ${tag}, ptr null, ptr null, ptr null, i64 0 } ; ${unionId} unit arm`,
-      );
-    }
-    if (this.unitInstances.size > 0) out.push(``);
-    for (const [key, re] of this.regexInstances) {
-      // One immortal ScrRegex per (pattern, flags) literal, pointing at
-      // the interned source/flags strings. The bc slot starts null (lazy
-      // compile, cached by the runtime) — a mutable global, not constant.
-      out.push(
-        `@${re.sym} = internal ${tl}global %ScrRegex { ${this.sizeType} -1, ptr ${re.src}, ptr ${re.fl}, ptr null, double 0.0, ptr null } ; ${key.replace(/\n/g, "\\n")}`,
-      );
-    }
-    if (this.regexInstances.size > 0) out.push(``);
-    for (const [, inst] of this.templateStringsInstances) {
-      // One immortal ScrArr per tagged-template site: a [N x ptr] data
-      // global of interned cooked-string literals, and the ScrArr header
-      // over it (rc == SIZE_MAX, len == cap, SCR_ELEM_STR = 2, no REF
-      // entry points). Every dense slot is present; reads retain immortal
-      // strings — a no-op.
-      const n = inst.slots.length;
-      const present = n === 0
-        ? "zeroinitializer"
-        : `[ ${inst.slots.map(() => "i8 1").join(", ")} ]`;
-      out.push(
-        `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-        `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null }`,
-      );
-    }
-    if (this.templateStringsInstances.size > 0) out.push(``);
-    const islandEntryPath = usesIsland ? this.cstr(this.mod.sourceFile) : null;
-    for (const [text, c] of this.cstrs) {
-      // NUL-terminated byte-array constants for scr_jb_puts and indentation.
-      out.push(
-        `@${c.sym} = internal constant [${c.len + 1} x i8] c"${llStrBytes(text)}"`,
-      );
-    }
-    if (this.cstrs.size > 0) out.push(``);
-    if (usesIsland) {
-      const fmt = { esm: 0, cjs: 1, json: 2 } as const;
-      const edgeKind = { any: 0, import: 1, require: 2 } as const;
-      embedded.modules.forEach((m, i) => {
-        const stored = npmStored[i]!;
-        const key = Buffer.from(m.key, "utf8");
-        out.push(
-          `@sc_npm_key_${i} = internal constant [${key.length + 1} x i8] c"${llBytes(key)}"`,
-          `@sc_npm_src_${i} = internal constant [${stored.src.bytes.length + 1} x i8] c"${llBytes(stored.src.bytes)}"`,
-        );
-        if (stored.esm !== null) {
-          out.push(
-            `@sc_npm_esm_${i} = internal constant [${stored.esm.bytes.length + 1} x i8] c"${llBytes(stored.esm.bytes)}"`,
-          );
-        }
-      });
-      const moduleRows = embedded.modules.map((m, i) => {
-        const stored = npmStored[i]!;
-        const esm = stored.esm === null
-          ? `ptr null, ${this.sizeType} 0, ${this.sizeType} 0`
-          : `ptr @sc_npm_esm_${i}, ${this.sizeType} ${stored.esm.bytes.length}, ${this.sizeType} ${stored.esm.raw}`;
-        return `%ScrIslandModule { ptr @sc_npm_key_${i}, ptr @sc_npm_src_${i}, ` +
-          `${this.sizeType} ${stored.src.bytes.length}, ${this.sizeType} ${stored.src.raw}, ` +
-          `i32 ${fmt[m.format]}, ${esm} }`;
-      });
-      out.push(
-        `@sc_npm_modules = internal constant [${moduleRows.length} x %ScrIslandModule] [ ${moduleRows.join(", ")} ]`,
-      );
-      embedded.edges.forEach((edge, i) => {
-        const parts: [string, string][] = [["from", edge.from], ["spec", edge.specifier], ["to", edge.to]];
-        for (const [part, text] of parts) {
-          const bytes = Buffer.from(text, "utf8");
-          out.push(`@sc_npm_edge_${i}_${part} = internal constant [${bytes.length + 1} x i8] c"${llBytes(bytes)}"`);
-        }
-      });
-      if (embedded.edges.length > 0) {
-        const edgeRows = embedded.edges.map((edge, i) =>
-          `%ScrIslandEdge { ptr @sc_npm_edge_${i}_from, ptr @sc_npm_edge_${i}_spec, ` +
-          `ptr @sc_npm_edge_${i}_to, i32 ${edgeKind[edge.kind]} }`,
-        );
-        out.push(`@sc_npm_edges = internal constant [${edgeRows.length} x %ScrIslandEdge] [ ${edgeRows.join(", ")} ]`);
-      }
-      out.push(``);
-    }
-    for (const line of ffiCallbacks.globals) out.push(line);
-    if (ffiCallbacks.globals.length > 0) out.push(``);
-    for (const g of globals) {
-      const ty = this.llType(g.type);
-      const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
-      const debug = this.debug?.global(g);
-      out.push(`@${mangleGlobal(g.id)} = internal ${tl}global ${ty} ${zero}${debug ? `, !dbg ${debug}` : ""} ; ${g.name}`);
-    }
-    if (globals.length > 0) out.push(``);
-    for (const line of helpers) out.push(line);
-    for (const line of ffiCallbacks.defs) out.push(line);
-    for (const line of shapes.defs) out.push(line);
-    for (const line of classShapes.defs) out.push(line);
-    for (const line of classObjDefs) out.push(line);
-    for (const line of this.walkers.defs) out.push(line);
-    for (const line of this.dyn.defs) out.push(line);
-    for (const line of wrappers) out.push(line);
-    for (const line of asyncDefs) out.push(line);
-    for (const line of this.resolveThunkDefs) out.push(line);
-    out.push(fnDefs[0] ?? "");
-    for (let i = 1; i < fnDefs.length; i++) out.push("", fnDefs[i]!);
-    out.push("");
-
-    // main(): scr_init, the program-dependent error-vt interval stamps,
-    // scr_lib_init(argc, argv), then the entry function. An uncaught
-    // exception escaping top-level code prints and exits 1 (Node).
-    // The exception epilogue is emitted when the entry may throw.
-    const stamps: string[] = [...errorViews];
-    for (const iv of this.errorIntervals) {
-      const fields: [number, number][] = [[0, iv.pre], [1, iv.post]];
-      for (const [field, value] of fields) {
-        stamps.push(
-          `  store ${this.sizeType} ${value}, ptr getelementptr inbounds ([${RUNTIME_ERROR_CLASSES.size} x %ScrVt], ptr @scr_error_vts, i64 0, i64 ${iv.kind}, i32 ${field})${field === 1 ? ` ; ${iv.lib}` : ""}`,
-        );
-      }
-    }
-    if (this.emitterInterval !== null) {
-      // The runtime emitter vtable's interval (emitterVtStampLines): bare
-      // EventEmitter instances answer instanceof and dispatch dynamic
-      // teardown under THIS module's preorder numbering.
-      out.push(`@scr_emitter_vt = external ${tl}global %ScrVt`, ``);
-      stamps.push(
-        `  store ${this.sizeType} ${this.emitterInterval.pre}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 0)`,
-        `  store ${this.sizeType} ${this.emitterInterval.post}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 1) ; EventEmitter`,
-      );
-    }
-    for (const iv of this.streamIntervals) {
-      // The runtime stream vtables' intervals (streamVtStampLines) — the
-      // emitter story: instanceof and dynamic teardown dispatch through
-      // them.
-      out.push(`@${iv.vt} = external global %ScrVt`);
-      stamps.push(
-        `  store ${this.sizeType} ${iv.pre}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 0)`,
-        `  store ${this.sizeType} ${iv.post}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 1) ; ${iv.lib}`,
-      );
-    }
-    if (this.streamIntervals.length > 0) out.push(``);
-    if (this.errorIntervals.length > 0 && this.tracedShapes.has("object:%Error")) {
-      // The cycle fixpoint marked the Error hierarchy (a user subclass
-      // holds cycle-capable fields — capability is hierarchy-uniform), so
-      // the runtime's own error allocations need collector headers too.
-      // Declared inline: the extern block already flushed (LLVM is
-      // order-free, the helper-defs precedent).
-      out.push(`declare void @scr_error_set_traced()`, ``);
-      stamps.push(`  call void @scr_error_set_traced()`);
-    }
-    if ((entryMayThrow || runsLoop) && this.mod.lib === undefined) {
-      // Declared inline: the extern block already flushed (LLVM is
-      // order-free — the scr_error_set_traced precedent). Only the
-      // printer emits here (nothing else declares it); scr_exc_pending
-      // and the loop entry points rode the Set before the flush.
-      out.push(`declare void @scr_exc_print_uncaught()`, `declare zeroext i1 @scr_exc_handle_uncaught(i1 zeroext)`, ``);
-    }
-    if (this.mod.lib !== undefined) {
-      // LIBRARY mode: no @main — the profile-declared external
-      // symbols specified by the library IR instead.
-      for (const line of this.emitLibDefs(globals, globalReleaseLines, stamps)) out.push(line);
-      out.push(`attributes #0 = { sanitize_address }`);
-      if (this.wasi) out.push(`attributes #1 = { sanitize_address presplitcoroutine }`);
-      if (hasNoInlineRecordClone) out.push(`attributes #2 = { noinline sanitize_address }`);
-      out.push(``);
-      out.push(...this.fieldAliasMetadata());
-      if (this.debug !== null) out.push(this.debug.render());
-      return out;
-    }
-    out.push(
-      `define i32 @${this.wasi ? "__main_argc_argv" : "main"}(i32 %argc, ptr %argv) ${FN_ATTRS} {`,
-      `entry:`,
-      ...(this.runtimeAbiMarker ? [`  call void @${RUNTIME_ABI_MARKER}()`] : []),
-      `  call void @scr_init()`,
-      ...stamps,
-      // Event-surface programs (signal/exit listeners) fill the loop's
-      // nullable event hooks before %main — scr_events.c links only when
-      // this line is emitted (native-toolchain.ts gates on the same predicate).
-      ...(usesEvents ? [`  call void @scr_events_install()`] : []),
-      ...(usesChildProcess ? [`  call void @scr_child_dyn_install()`] : []),
-      ...(childStreamBoxes ? [`  call void @scr_child_dyn_streams_install(ptr @scr_stream_child_ops, ptr @${childStreamBoxes[0]}, ptr @${childStreamBoxes[1]})`] : []),
-      // fs.watch programs fill the loop's watch hooks the same way —
-      // scr_watch.c links only when this line is emitted.
-      ...(usesFsWatch ? [`  call void @scr_watch_install()`] : []),
-      ...(this.ffiHasForeignCallback ? [`  call void @scr_ffi_install()`] : []),
-      ...(snapshotsTlsCa ? [`  call void @scr_tls_ca_install()`] : []),
-      ...(usesFetch ? [`  call void @scr_fetch_install()`] : []),
-      ...(embedsZlib ? [`  call void @scr_zlib_island_install()`] : []),
-      ...(embedsNet ? [`  call void @scr_net_island_install()`] : []),
-      ...(usesNet ? [`  call void @scr_net_install()`, `  call void @scr_net_dyn_install()`] : []),
-      ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
-      ...(usesDgram ? [`  call void @scr_dgram_install()`] : []),
-      ...(usesHttp2 ? [`  call void @scr_http2_dyn_install()`] : []),
-      ...(usesStream ? [`  call void @scr_stream_install()`] : []),
-      `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
-      ...(usesIsland
-        ? [
-            `  call void @scr_island_entry_module(ptr ${islandEntryPath})`,
-            ...(moduleEmbedsCompressedNpm(this.mod)
-              ? [`  call void @scr_island_set_inflate(ptr @scr_zlib_inflate_exact)`]
-              : []),
-            `  call void @scr_island_modules(ptr @sc_npm_modules, ${this.sizeType} ${embedded.modules.length}, ` +
-              `ptr ${embedded.edges.length > 0 ? "@sc_npm_edges" : "null"}, ${this.sizeType} ${embedded.edges.length})`,
-          ]
-        : []),
-      ...(asyncEntry
-        ? [`  %top = call ptr @${mangleAsyncSpawn(this.mod.entry)}()`]
-        : [`  call void @${mangleFunction(this.mod.entry)}()`]),
-      // Uncaught exception from top-level code: Node exits 1.
-      ...(entryMayThrow && !asyncEntry
-        ? [
-            `  %exc = call zeroext i1 @scr_exc_pending()`,
-            `  br i1 %exc, label %uncaught, label %ok`,
-            `uncaught:`,
-            `  %handled = call zeroext i1 @scr_exc_handle_uncaught(i1 false)`,
-            `  br i1 %handled, label %ok, label %fatal`,
-            `fatal:`,
-            `  call void @scr_exc_print_uncaught()`,
-            ...exitListenerLines("xu"),
-            ...uncaughtReleases,
-            `  %failure_code_0 = call i32 @scr_exit_code_hint_get()`,
-            `  ret i32 %failure_code_0`,
-            `ok:`,
-          ]
-        : []),
-      // The event loop runs to exhaustion (microtasks before timers). A
-      // throw escaping a timer callback and unhandled promise rejections
-      // both exit 1, like Node — the C main's loop block exactly.
-      ...(runsLoop
-        ? [
-            `  %loop_rejection = call zeroext i1 @scr_loop_run(ptr ${asyncEntry ? "%top" : "null"})`,
-            `  %lexc = call zeroext i1 @scr_exc_pending()`,
-            `  br i1 %lexc, label %luncaught, label %lok`,
-            `luncaught:`,
-            `  call void @scr_exc_print_uncaught()`,
-            ...(asyncEntry ? [`  call void @scr_promise_release(ptr %top)`] : []),
-            ...exitListenerLines("xl"),
-            ...loopReleasesU,
-            `  %failure_code_1 = call i32 @scr_exit_code_hint_get()`,
-            `  ret i32 %failure_code_1`,
-            `lok:`,
-            `  br i1 %loop_rejection, label %lreported, label %lclean`,
-            `lreported:`,
-            `  call void @scr_discard_unhandled_rejections()`,
-            ...(asyncEntry ? [`  call void @scr_promise_release(ptr %top)`] : []),
-            ...exitListenerLines("xq"),
-            ...loopReportedReleases,
-            `  %failure_code_2 = call i32 @scr_exit_code_hint_get()`,
-            `  ret i32 %failure_code_2`,
-            `lclean:`,
-            ...(asyncEntry
-              ? [
-                  `  %tla_status = call i32 @scr_promise_finish_top_level(ptr %top)`,
-                  `  %tla_rejected = icmp eq i32 %tla_status, 1`,
-                  `  br i1 %tla_rejected, label %tla_fail, label %tla_not_rejected`,
-                  `tla_fail:`,
-                  // The loop already delivered every earlier-checkpoint
-                  // rejection. Drop same-checkpoint competitors before
-                  // surfacing the fatal module verdict.
-                  `  call void @scr_discard_unhandled_rejections()`,
-                  `  call void @scr_promise_rethrow_top_level(ptr %top)`,
-                  `  call void @scr_promise_release(ptr %top)`,
-                  `  call void @scr_exc_print_uncaught()`,
-                  ...exitListenerLines("xt"),
-                  ...topRejectReleases,
-                  `  %failure_code_3 = call i32 @scr_exit_code_hint_get()`,
-                  `  ret i32 %failure_code_3`,
-                  `tla_not_rejected:`,
-                  `  call void @scr_promise_release(ptr %top)`,
-                ]
-              : []),
-            `  %rej = call zeroext i1 @scr_report_unhandled_rejections()`,
-            `  br i1 %rej, label %lrej, label %lrok`,
-            `lrej:`,
-            ...exitListenerLines("xr"),
-            ...loopReleasesR,
-            `  %failure_code_4 = call i32 @scr_exit_code_hint_get()`,
-            `  ret i32 %failure_code_4`,
-            `lrok:`,
-            ...(asyncEntry
-              ? [
-                  `  %tla_pending = icmp eq i32 %tla_status, 13`,
-                  `  br i1 %tla_pending, label %tla_stuck, label %tla_ok`,
-                  `tla_stuck:`,
-                  ...topPendingExitLines(),
-                  `tla_ok:`,
-                ]
-              : []),
-          ]
-        : []),
-      ...exitListenerLines("xn"),
-      ...globalReleases,
-      ...(usesNodeTest
-        ? [`  %test_exit = call i32 @scr_test_exit_code()`, `  ret i32 %test_exit`]
-        : usesIsland
-        ? [`  %island_exit = call i32 @scr_island_exit_code()`, `  ret i32 %island_exit`]
-        : [`  %native_exit = call i32 @scr_exit_code_hint_get()`, `  ret i32 %native_exit`]),
-      `}`,
-      ``,
-      // sanitize_address is inert under the plain pipeline; the sanitized
-      // lane's -fsanitize=address link activates instrumentation over the
-      // emitted functions too (the runtime TUs get theirs from clang).
-      `attributes #0 = { sanitize_address }`,
-      ...(this.wasi ? [`attributes #1 = { sanitize_address presplitcoroutine }`] : []),
-      ...(hasNoInlineRecordClone ? [`attributes #2 = { noinline sanitize_address }`] : []),
-      ``,
-    );
-    out.push(...this.fieldAliasMetadata());
-    if (this.debug !== null) out.push(this.debug.render());
-    return out;
+    const parts = emitParts(this);
+    return this.unwindAbi.size > 0 ? bridgePlainUnwindCalls(parts) : parts;
   }
 
-  /** LIBRARY mode: the profile-declared external definitions — the
-   * export-map wrappers plus init / sink-registration / reset / collect.
-   * Plain `define` (not `define internal`) — the exact linkage distinction
-   * that separates the executable lane's @main from everything else. The
-   * bodies delegate every runtime half to scr_library.c, mirroring the C
-   * emission line for line, so the two lanes are identical by
-   * construction. */
-  private emitLibDefs(
+  /** The dispose-observer gates the emitted frees and record writers test
+   * (alloc.ts): defined after every helper is emitted, because dynCheck
+   * builders, JSON schemas and weak collection constructors are requested
+   * lazily. */
+  disposeObserverGates(): string[] {
+    const weak = [...this.decls].some(
+      (d) => d.includes("@scr_weak_map_new(") || d.includes("@scr_weak_set_new("),
+    );
+    return [
+      `${WEAK_KEYS_GATE} = internal constant i1 ${weak}`,
+      `${RECORD_SOURCES_GATE} = internal constant i1 ${this.dyn.keepsRecordSources}`,
+      ``,
+    ];
+  }
+  emitModuleParts(): string[] {
+    return emitModuleParts(this);
+  }
+  emitLibDefs(
     globals: IrGlobal[],
     globalReleaseLines: (prefix: string) => string[],
     stamps: string[],
   ): string[] {
-    const lib = this.mod.lib!;
-    const autoReset = lib.resultResetSymbol === null;
-    const out: string[] = [``, `; ── library-mode entries (profile: ${lib.profileName}) ──`, ``];
-    // Every entry's prologue records its external symbol in the funnel's
-    // current-entry slot (structured trap-teaching field 2); the symbols
-    // live as internal constants, one per entry.
-    const symConst = (sym: string): string => `@sc_lib_sym_${sym}`;
-    const emitSymConst = (sym: string): void => {
-      out.push(`${symConst(sym)} = internal constant [${Buffer.byteLength(sym, "utf8") + 1} x i8] c"${llStrBytes(sym)}"`);
-    };
-    emitSymConst(lib.initSymbol);
-    emitSymConst(lib.sinkRegisterSymbol);
-    if (lib.callbackRegisterSymbol !== null && lib.callbackRegisterSymbol !== undefined) emitSymConst(lib.callbackRegisterSymbol);
-    if (lib.resultResetSymbol !== null) emitSymConst(lib.resultResetSymbol);
-    if (lib.collectSymbol !== null) emitSymConst(lib.collectSymbol);
-    for (const e of lib.exports) emitSymConst(e.symbol);
-    out.push(``);
-    if (this.wasi) {
-      for (const symbol of ["scriptc_alloc", "scriptc_free"]) emitSymConst(symbol);
-      out.push(
-        `define ptr @scriptc_alloc(i32 %size) ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst("scriptc_alloc")})`,
-        `  %p = call ptr @malloc(i32 %size)`,
-        `  ret ptr %p`,
-        `}`, ``,
-        `define void @scriptc_free(ptr %p) ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst("scriptc_free")})`,
-        `  call void @free(ptr %p)`,
-        `  ret void`,
-        `}`, ``,
-      );
-    }
-    // The runtime detected-trap overlay table (scr_runtime.h declares it,
-    // the library trap funnel consults it): flat code/teaching/remediation
-    // triples, one per runtime trap code (SC4013–SC4019) the profile
-    // declares text for. The funnel assembles the structured sink message.
-    // The empty table still defines the symbols the funnel links against.
-    const ovlCells: string[] = [];
-    lib.trapOverlays.forEach((o, i) => {
-      const cell = (name: string, text: string | undefined): void => {
-        if (text === undefined) {
-          ovlCells.push("ptr null");
-          return;
-        }
-        const sym = `@sc_lib_ovl_${i}_${name}`;
-        out.push(`${sym} = internal constant [${Buffer.byteLength(text, "utf8") + 1} x i8] c"${llStrBytes(text)}"`);
-        ovlCells.push(`ptr ${sym}`);
-      };
-      cell("code", o.code);
-      cell("teach", o.teaching);
-      cell("rem", o.remediation);
-    });
-    out.push(
-      ovlCells.length === 0
-        ? `@scr_library_trap_overlays = constant [1 x ptr] zeroinitializer`
-        : `@scr_library_trap_overlays = constant [${ovlCells.length} x ptr] [${ovlCells.join(", ")}]`,
-      `@scr_library_trap_overlays_len = constant ${this.sizeType} ${lib.trapOverlays.length}`,
-      ``,
-    );
-    // The init entry: full deterministic reset-and-reevaluate. Program
-    // globals release and zero first (run-once guards included), then the
-    // runtime session reset, the error-vt interval stamps verbatim from
-    // the executable main, %main itself, and the escaped-exception check.
-    const zeroStores = globals.map((g) => {
-      const ty = this.llType(g.type);
-      const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
-      return `  store ${ty} ${zero}, ptr @${mangleGlobal(g.id)} ; ${g.name}`;
-    });
-    out.push(
-      `define void @${lib.initSymbol}() ${FN_ATTRS} {`,
-      `entry:`,
-      `  call void @scr_library_entry(i1 zeroext true, ptr ${symConst(lib.initSymbol)}) ; init always resets the result arena`,
-      ...globalReleaseLines("ci"),
-      ...zeroStores,
-      `  call void @scr_library_reset()`,
-      ...stamps,
-      `  call void @${mangleFunction(this.mod.entry)}()`,
-      `  call void @scr_library_check_exc()`,
-      `  ret void`,
-      `}`,
-      ``,
-      `define void @${lib.sinkRegisterSymbol}(ptr %fn, ptr %ctx) ${FN_ATTRS} {`,
-      `entry:`,
-      `  call void @scr_library_callback_entry_guard(ptr ${symConst(lib.sinkRegisterSymbol)})`,
-      `  call void @scr_library_set_sink(ptr %fn, ptr %ctx)`,
-      `  ret void`,
-      `}`,
-      ``,
-    );
-    if (lib.callbacks !== undefined && lib.callbacks.length > 0) {
-      // Host-callback channels: the per-channel name constants (the
-      // registration dispatch's strcmp operands), the per-channel
-      // unregistered-call trap constants (the ffiCall sites'
-      // scr_library_cb_require operands), and the registration function:
-      // a pure store dispatch
-      // (the sink registration's rule — no entry prologue, no poison
-      // guard) whose first operation rejects callback-time re-entry
-      // (SC4026). An unknown or NULL name is a defined -1, never a store.
-      for (const cb of lib.callbacks) {
-        out.push(
-          `@sc_lib_cb_name_${cb.slot} = internal constant [${Buffer.byteLength(cb.name, "utf8") + 1} x i8] c"${llStrBytes(cb.name)}"`,
-          `@sc_lib_cb_trap_${cb.slot} = internal constant [${Buffer.byteLength(cb.unregisteredTrap, "utf8") + 1} x i8] c"${llStrBytes(cb.unregisteredTrap)}"`,
-        );
-      }
-      out.push(
-        ``,
-        `define i32 @${lib.callbackRegisterSymbol}(ptr %name, ptr %fn, ptr %ctx) ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_library_callback_entry_guard(ptr ${symConst(lib.callbackRegisterSymbol!)})`,
-        `  %isnull = icmp eq ptr %name, null`,
-        `  br i1 %isnull, label %miss, label %try0`,
-      );
-      lib.callbacks.forEach((cb, i) => {
-        const next = i + 1 < lib.callbacks!.length ? `try${i + 1}` : "miss";
-        out.push(
-          `try${i}: ; channel '${cb.name}'`,
-          `  %cmp${i} = call i32 @strcmp(ptr %name, ptr @sc_lib_cb_name_${cb.slot})`,
-          `  %eq${i} = icmp eq i32 %cmp${i}, 0`,
-          `  br i1 %eq${i}, label %set${i}, label %${next}`,
-          `set${i}:`,
-          `  call void @scr_library_cb_set(${this.sizeType} ${cb.slot}, ptr %fn, ptr %ctx)`,
-          `  ret i32 0`,
-        );
-      });
-      out.push(`miss:`, `  ret i32 -1`, `}`, ``);
-    }
-    if (lib.identity !== undefined && this.emitLibraryIdentity) {
-      // Profile-declared identity getters (the ask-2 sidecar's boot-time
-      // pairing fence): pure data returns with NO entry prologue — exempt
-      // from the poisoned guard and every runtime touch (ratified), so a
-      // host can read them before init and after a trap. The u64 rides
-      // i64 two's-complement (LLVM integer constants are signed).
-      for (const line of emitLibraryIdentityLines(lib.identity, FN_ATTRS)) out.push(line);
-    }
-    if (lib.resultResetSymbol !== null) {
-      out.push(
-        `define void @${lib.resultResetSymbol}() ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst(lib.resultResetSymbol)})`,
-        `  call void @scr_library_arena_reset()`,
-        `  ret void`,
-        `}`,
-        ``,
-      );
-    }
-    if (lib.collectSymbol !== null) {
-      out.push(
-        `define void @${lib.collectSymbol}() ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst(lib.collectSymbol)})`,
-        `  call void @scr_library_collect() ; arena reset + a full cycle collection`,
-        `  ret void`,
-        `}`,
-        ``,
-      );
-    }
-    for (const e of lib.exports) {
-      const params: string[] = [];
-      const body: string[] = [`  call void @scr_library_entry(i1 zeroext ${autoReset ? "true" : "false"}, ptr ${symConst(e.symbol)})`];
-      const args: string[] = [];
-      if (e.inboundBytesTrap !== undefined) {
-        // The bytes-in helper's trap message: the compiler-assembled
-        // structured trap-teaching form (0x01 text 0x1F SC4012 0x1F symbol
-        // [0x1F remediation]) consumed by the runtime sink.
-        const trapBytes = Buffer.byteLength(e.inboundBytesTrap, "utf8");
-        out.push(`@sc_lib_bytes_trap_${e.symbol} = internal constant [${trapBytes + 1} x i8] c"${llStrBytes(e.inboundBytesTrap)}"`, ``);
-      }
-      if (e.inboundIntTrap !== undefined) {
-        // The i64/u64-in helpers' host-contract trap message (ask 4): an
-        // inbound integer past ±(2^53−1) cannot ride f64 exactly. Same
-        // assembled structured form, same SC4012 code, same
-        // emission-invariance argument as the bytes trap.
-        const trapBytes = Buffer.byteLength(e.inboundIntTrap, "utf8");
-        out.push(`@sc_lib_int_trap_${e.symbol} = internal constant [${trapBytes + 1} x i8] c"${llStrBytes(e.inboundIntTrap)}"`, ``);
-      }
-      e.params.forEach((cls, i) => {
-        switch (cls) {
-          case "f64":
-            params.push(`double %a${i}`);
-            args.push(`double %a${i}`);
-            break;
-          case "bool":
-            params.push(`i8 %a${i}`);
-            body.push(`  %c${i} = icmp ne i8 %a${i}, 0`);
-            args.push(`i1 %c${i}`);
-            break;
-          case "u8":
-            params.push(`i8 %a${i}`);
-            body.push(`  %c${i} = uitofp i8 %a${i} to double`);
-            args.push(`double %c${i}`);
-            break;
-          case "u32":
-            params.push(`i32 %a${i}`);
-            body.push(`  %c${i} = uitofp i32 %a${i} to double`);
-            args.push(`double %c${i}`);
-            break;
-          case "i32":
-            params.push(`i32 %a${i}`);
-            body.push(`  %c${i} = sitofp i32 %a${i} to double`);
-            args.push(`double %c${i}`);
-            break;
-          case "i64":
-            // Inbound declared-integer edge (ask 4): the helper converts
-            // exactly or delivers the host-contract trap (past ±(2^53−1)
-            // the value cannot ride f64 without silent rounding).
-            params.push(`i64 %a${i}`);
-            body.push(`  %c${i} = call double @scr_library_i64_in(i64 %a${i}, ptr @sc_lib_int_trap_${e.symbol})`);
-            args.push(`double %c${i}`);
-            break;
-          case "u64":
-            params.push(`i64 %a${i}`);
-            body.push(`  %c${i} = call double @scr_library_u64_in(i64 %a${i}, ptr @sc_lib_int_trap_${e.symbol})`);
-            args.push(`double %c${i}`);
-            break;
-          case "string":
-            params.push(`ptr %a${i}_ptr`, `${this.sizeType} %a${i}_len`);
-            body.push(`  %c${i} = call ptr @scr_library_str_in(ptr %a${i}_ptr, ${this.sizeType} %a${i}_len)`);
-            args.push(`ptr %c${i}`);
-            break;
-          case "bytes":
-            params.push(`ptr %a${i}_ptr`, `${this.sizeType} %a${i}_len`);
-            body.push(`  %c${i} = call ptr @scr_library_bytes_in(ptr %a${i}_ptr, ${this.sizeType} %a${i}_len, ptr @sc_lib_bytes_trap_${e.symbol})`);
-            args.push(`ptr %c${i}`);
-            break;
-        }
-      });
-      if (e.returns === "string" || e.returns === "bytes") {
-        params.push(`ptr %out`, `ptr %out_len`);
-      }
-      const target = `@${mangleFunction(e.fnName)}`;
-      const callArgs = args.join(", ");
-      let retType = "void";
-      switch (e.returns) {
-        case "void":
-          body.push(`  call void ${target}(${callArgs})`, `  call void @scr_library_check_exc()`, `  ret void`);
-          break;
-        case "f64":
-          retType = "double";
-          body.push(
-            `  %r = call double ${target}(${callArgs})`,
-            `  call void @scr_library_check_exc()`,
-            `  ret double %r`,
-          );
-          break;
-        case "i64":
-        case "u64":
-          // The outbound declared-integer edge (ask 4): every value
-          // reaching this return was PROVEN whole and inside the class's
-          // range at compile time, so the fp-to-int conversion is exact
-          // by construction — the crossing carries the mathematically
-          // exact integer the f64 held.
-          retType = "i64";
-          body.push(
-            `  %r = call double ${target}(${callArgs})`,
-            `  call void @scr_library_check_exc()`,
-            `  %z = ${e.returns === "i64" ? "fptosi" : "fptoui"} double %r to i64`,
-            `  ret i64 %z`,
-          );
-          break;
-        case "bool":
-          retType = "i8";
-          body.push(
-            `  %r = call i1 ${target}(${callArgs})`,
-            `  call void @scr_library_check_exc()`,
-            `  %z = zext i1 %r to i8`,
-            `  ret i8 %z`,
-          );
-          break;
-        case "string":
-          body.push(
-            `  %r = call ptr ${target}(${callArgs})`,
-            `  call void @scr_library_check_exc()`,
-            `  call void @scr_library_str_out(ptr %r, ptr %out, ptr %out_len)`,
-            `  ret void`,
-          );
-          break;
-        case "bytes":
-          body.push(
-            `  %r = call ptr ${target}(${callArgs})`,
-            `  call void @scr_library_check_exc()`,
-            `  call void @scr_library_bytes_out(ptr %r, ptr %out, ptr %out_len)`,
-            `  ret void`,
-          );
-          break;
-      }
-      out.push(
-        `define ${retType} @${e.symbol}(${params.join(", ")}) ${FN_ATTRS} { ; library export ${e.fnName}`,
-        `entry:`,
-        ...body,
-        `}`,
-        ``,
-      );
-    }
-    return out;
+    return emitLibDefs(this, globals, globalReleaseLines, stamps);
+  }
+  helperDefs(): string[] {
+    return helperDefs(this);
   }
 
-  /** The shared abort helpers (emitted only when referenced): the OOM
-   * abort of untraced shape allocation and the invalid-union-tag abort —
-   * both print the runtime ABI’s exact message on fd 2 and abort. */
-  private helperDefs(): string[] {
-    const defs: string[] = [];
-    const msgHelper = (fnName: string, msgSym: string, msg: string): void => {
-      // The message routes through the runtime's trap funnel: executable
-      // builds expand to the historical bytes-on-stderr + abort; library
-      // builds route to the registered panic sink (scr_runtime.h).
-      const bytes = Buffer.byteLength(msg, "utf8");
-      this.declare(`declare void @scr_trap(ptr)`);
-      defs.push(
-        `@${msgSym} = internal constant [${bytes + 1} x i8] c"${llStrBytes(msg)}"`,
-        `define internal void @${fnName}() ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @scr_trap(ptr @${msgSym})`,
-        `  unreachable`,
-        `}`,
-        ``,
-      );
-    };
-    if (this.needsOom) msgHelper("sc_oom", "sc_oom_msg", "scriptc: out of memory\n");
-    if (this.needsBadTag) {
-      msgHelper("sc_bad_tag", "sc_bad_tag_msg", "scriptc: internal error: invalid union tag\n");
+  /** The inline RC helpers every call site requested, emitted last so
+   * requests from main/library epilogues are included. Slow-path
+   * declarations a late request added after the extern block flushed land
+   * here too. */
+  inlineRcTail(flushedDecls: ReadonlySet<string>): string[] {
+    const late = inlineRcDecls(this.shapeHost).filter((d) => !flushedDecls.has(d));
+    // NULL-skipping retain wrappers of nullable unions; a runtime inner
+    // retain requested after the extern block flushed is declared here.
+    for (const inner of this.nullableUnions.retainWrappers.values()) {
+      const decl = `declare ptr ${inner}(ptr)`;
+      if (inner.startsWith("@scr_") && !flushedDecls.has(decl) && !late.includes(decl))
+        late.push(decl);
     }
-    if (this.needsBadKey) {
-      // The keyed-read miss on a result type that cannot say `undefined`:
-      // trap like an array OOB read instead of corrupting a typed slot
-      // (SEMANTICS.md; the C helper's message additionally interpolates
-      // the runtime key — a trap-path debugging nicety, never reachable
-      // by a program whose behavior matches Node).
-      msgHelper(
-        "sc_bad_key",
-        "sc_bad_key_msg",
-        "scriptc: TypeError: record has no key (typed slot — no undefined is representable)\n",
-      );
-    }
-    if (this.needsRetainBox) {
-      // scr_box_retain is a static inline (increment-unless-immortal, then
-      // mark the cycle header live — every box is collector-headered);
-      // emitted once with internal linkage, like the record retains.
-      defs.push(
-        `define internal ptr @sc_retain_box(ptr %b) ${FN_ATTRS} {`,
-        `entry:`,
-        `  %rc = load ${this.sizeType}, ptr %b`,
-        `  %imm = icmp eq ${this.sizeType} %rc, -1`,
-        `  br i1 %imm, label %done, label %inc`,
-        `inc:`,
-        `  %n = add ${this.sizeType} %rc, 1`,
-        `  store ${this.sizeType} %n, ptr %b`,
-        `  %colorp = getelementptr i8, ptr %b, ${this.sizeType} -${this.cycleColorOffset}`,
-        `  store i32 0, ptr %colorp ; mark live`,
-        `  br label %done`,
-        `done:`,
-        `  ret ptr %b`,
-        `}`,
-        ``,
-      );
-    }
-    // The declarations these helpers added must land in the extern block,
-    // which already flushed — append here instead (LLVM is order-free).
-    return defs.length > 0 ? [...defs] : defs;
+    return [
+      ...late,
+      ...emitNullableRetainWrappers(this.shapeHost),
+      ...emitShapeUnionHelpers(this.shapeHost),
+      ...emitInlineRcHelpers(this.shapeHost),
+    ];
   }
 
   /** Env-signature wrappers + interned immortal closures for declared
    * functions used as values (the runtime ABI’s sc_w_/sc_fc_ pair): every
    * mention of `f` yields the same pointer, so `f === f` holds. */
-  private emitFnValueDefs(): string[] {
+  emitFnValueDefs(): string[] {
     const out: string[] = [];
     for (const name of this.fnValues) {
       const fn = this.fnByName.get(name)!;
@@ -2013,407 +2530,637 @@ export class LlEmitter {
       // Async/generator functions as values enter through their spawn
       // wrapper: the call answers the promise / generator object (+1),
       // never the inner return type.
-      const ret = fn.async === true || fn.generator !== undefined ? "ptr" : this.llType(fn.returnType);
+      const ret =
+        fn.async === true || fn.generator !== undefined ? "ptr" : this.llType(fn.returnType);
       const call = `call ${ret} @${this.callTarget(name)}(${args})`;
+      const lending = this.lendsEveryArgument(name);
       out.push(
         `define internal ${ret} @${mangleWrapper(name)}(ptr %env${params.length ? ", " + params.join(", ") : ""}) ${FN_ATTRS} { ; ${name} as a value`,
         `entry:`,
         ret === "void" ? `  ${call}` : `  %r = ${call}`,
         ret === "void" ? `  ret void` : `  ret ${ret} %r`,
         `}`,
-        `@${mangleFnClosure(name)} = internal global %ScrClosure { ${this.sizeType} -1, ptr @${mangleWrapper(name)}, ${this.sizeType} 0, ptr null, i32 ${(fn.generator ? 1 : 0) + (fn.async ? 2 : 0) + (fn.ownsPrototype ? 4 : 0)} }`,
+        `@${mangleFnClosure(name)} = internal ${this.mod.workers === true || this.mod.lib?.threadInstances === true ? "thread_local " : ""}global %ScrClosure { ${this.sizeType} -1, ptr @${mangleWrapper(name)}, ${this.sizeType} 0, ptr null, i32 ${(fn.generator ? 1 : 0) + (fn.async ? 2 : 0) + (fn.ownsPrototype ? 4 : 0)}, i32 0, ptr null, ptr ${lending ? `@${mangleBorrowingWrapper(name)}` : "null"} }`,
         ``,
       );
+      if (lending)
+        out.push(
+          `define internal ${ret} @${mangleBorrowingWrapper(name)}(ptr %env${params.length ? ", " + params.join(", ") : ""}) ${FN_ATTRS} { ; ${name} as a value, lending its arguments`,
+          `entry:`,
+          ret === "void"
+            ? `  call void @${mangleBorrowedFunction(name)}(${args})`
+            : `  %r = call ${ret} @${mangleBorrowedFunction(name)}(${args})`,
+          ret === "void" ? `  ret void` : `  ret ${ret} %r`,
+          `}`,
+          ``,
+        );
     }
     return out;
   }
-
-  /** The argument-pack ABI and trampoline prefix shared by async functions
-   * and generators. Their promise/generator completion and spawn tails stay
-   * with the callers below. */
-  private emitArgPackAndTrampolinePrologue(fn: IrFunction): LlArgPackAndTrampolinePrologue {
-    const pack = mangleArgPack(fn.name);
-    const lifted = fn.captures !== undefined;
-    const fieldTys = [...(lifted ? ["ptr"] : []), ...fn.params.map((p) => this.llType(p.type))];
-    const definitions = [`%${pack} = type { ${fieldTys.join(", ") || "i8"} } ; ${fn.name} args`];
-    const sizeOf = `ptrtoint (ptr getelementptr (%${pack}, ptr null, i32 1) to ${this.sizeType})`;
-
-    this.declare(`declare void @free(ptr)`);
-    this.declare(`declare ptr @malloc(${this.sizeType})`);
-    this.declare(`declare zeroext i1 @scr_exc_pending()`);
-
-    const tr: string[] = [
-      `define internal void @${mangleTrampoline(fn.name)}(ptr %self, ptr %ap) ${FN_ATTRS} {`,
-      `entry:`,
-    ];
-    const loads: string[] = [];
-    fieldTys.forEach((ty, i) => {
-      tr.push(
-        `  %fp${i} = getelementptr inbounds %${pack}, ptr %ap, i64 0, i32 ${i}`,
-        `  %a${i} = load ${ty}, ptr %fp${i}`,
-      );
-      loads.push(`${ty} %a${i}`);
-    });
-    tr.push(`  call void @free(ptr %ap)`);
-    const ret = fn.returnType;
-    const retTy = this.llType(ret);
-    const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${loads.join(", ")})`;
-    tr.push(retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`);
-    if (lifted && !this.wasi) {
-      tr.push(`  call void @scr_closure_release(ptr %a0)`);
-    }
-
-    const spawnParams = fieldTys.map((ty, i) => `${ty} %a${i}`);
-    const argPackLines = [
-      `  %ap = call ptr @malloc(${this.sizeType} ${sizeOf})`,
-      `  %isnull = icmp eq ptr %ap, null`,
-      `  br i1 %isnull, label %oom, label %ok`,
-      `oom:`,
-      `  call void @sc_oom()`,
-      `  unreachable`,
-      `ok:`,
-    ];
-    if (lifted) {
-      // scr_closure_retain is a header static inline — the `_v` twin is
-      // the exported symbol.
-      argPackLines.push(`  %env = call ptr @scr_closure_retain_v(ptr %a0)`);
-    }
-    fieldTys.forEach((ty, i) => {
-      const src = lifted && i === 0 ? "%env" : `%a${i}`;
-      argPackLines.push(
-        `  %sp${i} = getelementptr inbounds %${pack}, ptr %ap, i64 0, i32 ${i}`,
-        `  store ${ty} ${src}, ptr %sp${i}`,
-      );
-    });
-    return { definitions, pack, lifted, fieldTys, ret, tr, spawnParams, argPackLines };
+  emitArgPackAndTrampolinePrologue(fn: IrFunction): LlArgPackAndTrampolinePrologue {
+    return emitArgPackAndTrampolinePrologue(this, fn);
   }
 
-  /** Per-async-function machinery — async.ts's scaffolding, .ll
-   * flavored: an argument-pack struct type, a fiber trampoline (unpacks,
-   * frees the pack, runs the ordinary compiled body, settles the
-   * promise — fulfilling on clean return, leaving a pending exception
-   * for the runtime to reject with), and a spawn wrapper call sites and
-   * closures enter through (packs the args +1, scr_async_spawn runs the
-   * fiber eagerly to its first suspension and returns the promise). */
-  private emitAsyncScaffolding(): string[] {
-    const out: string[] = [];
-    if (this.wasi) {
-      this.declare(`declare void @llvm.coro.resume(ptr)`);
-      this.declare(`declare void @llvm.coro.destroy(ptr)`);
-      out.push(
-        `define void @scr_wasi_coro_resume(ptr %handle) ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @llvm.coro.resume(ptr %handle)`,
-        `  ret void`,
-        `}`,
-        `define void @scr_wasi_coro_destroy(ptr %handle) ${FN_ATTRS} {`,
-        `entry:`,
-        `  call void @llvm.coro.destroy(ptr %handle)`,
-        `  ret void`,
-        `}`,
-        ``,
-      );
+  /** Settles `promise` from a clean async body result `%r` (moved in). */
+  asyncFulfillLines(ret: IrType, promise: string): string[] {
+    switch (ret.kind) {
+      case "void":
+        this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+        return [`  call void @scr_promise_fulfill_void(ptr ${promise})`];
+      case "f64":
+        this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+        return [`  call void @scr_promise_fulfill_f64(ptr ${promise}, double %r)`];
+      case "bool":
+        this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+        return [`  call void @scr_promise_fulfill_bool(ptr ${promise}, i1 %r)`];
+      case "string":
+        this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+        return [`  call void @scr_promise_fulfill_str(ptr ${promise}, ptr %r) ; moves in`];
+      case "dyn":
+        this.declare(`declare void @scr_promise_resolve_dyn(ptr, ptr)`);
+        return [`  call void @scr_promise_resolve_dyn(ptr ${promise}, ptr %r) ; moves in`];
+      default: {
+        const v = vAdapters(this.shapeHost, ret);
+        this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+        return [
+          `  call void @scr_promise_fulfill_ref(ptr ${promise}, ptr %r, ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(this.shapeHost, ret)})`,
+        ];
+      }
     }
+  }
+  fiberlessAsyncFunctions(): Set<string> {
+    return fiberlessAsyncFunctions(this);
+  }
+
+  /** The async functions `parks` leaves fiberless (fiberlessAsyncFunctions). */
+  neverParkingAsync(parks: ReadonlySet<string>): Set<string> {
+    const eligible = new Set<string>();
     for (const fn of this.mod.functions) {
       if (fn.async !== true || fn.generator !== undefined) continue;
-      const { definitions, ret, tr, spawnParams, argPackLines } =
-        this.emitArgPackAndTrampolinePrologue(fn);
-      for (const line of definitions) out.push(line);
-      this.declare(`declare ptr @scr_fiber_promise(ptr)`);
-      this.declare(`declare ptr @scr_async_spawn(ptr, ptr)`);
-      this.needOom();
-      if (this.wasi) {
-        // The coroutine body settles its own promise and owns the retained
-        // lifted environment until final suspension. Its initial call
-        // returns here at the first suspend (or final suspend).
-        tr.push(`  ret void`, `}`, ``);
-      } else {
-        if (fn.captures !== undefined) {
-          this.declare(`declare void @scr_closure_release(ptr)`);
-        }
-        tr.push(
-          `  %pend = call zeroext i1 @scr_exc_pending()`,
-          `  br i1 %pend, label %thrown, label %clean`,
-          `clean:`,
-          `  %pr = call ptr @scr_fiber_promise(ptr %self)`,
-        );
-        switch (ret.kind) {
-          case "void":
-            this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
-            tr.push(`  call void @scr_promise_fulfill_void(ptr %pr)`);
-            break;
-          case "f64":
-          case "date":
-            this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
-            tr.push(`  call void @scr_promise_fulfill_f64(ptr %pr, double %r)`);
-            break;
-          case "bool":
-            this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
-            tr.push(`  call void @scr_promise_fulfill_bool(ptr %pr, i1 %r)`);
-            break;
-          case "string":
-            this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
-            tr.push(`  call void @scr_promise_fulfill_str(ptr %pr, ptr %r) ; moves in`);
-            break;
-          case "dyn":
-            this.declare(`declare void @scr_promise_resolve_dyn(ptr, ptr)`);
-            tr.push(`  call void @scr_promise_resolve_dyn(ptr %pr, ptr %r) ; moves in`);
-            break;
-          default: {
-            const v = vAdapters(this.shapeHost, ret);
-            this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
-            tr.push(
-              `  call void @scr_promise_fulfill_ref(ptr %pr, ptr %r, ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(this.shapeHost, ret)})`,
-            );
-          }
-        }
-        tr.push(`  ret void`, `thrown:`);
-        if (ret.kind !== "void" && isRefCounted(ret)) {
-          // An escaping throw means %r is the never-read dummy (NULL).
-          tr.push(`  call void ${releaseSym(this.shapeHost, ret)}(ptr %r)`);
-        }
-        tr.push(`  ret void`, `}`, ``);
-      }
-      for (const line of tr) out.push(line);
-
-      // Spawn wrapper: pack the args (+1 moves in), spawn the fiber.
-      const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
-      const cycleCache =
-        fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
-      if (cache !== null || cycleCache !== null) {
-        this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
-        this.declare(`declare void @scr_promise_release(ptr)`);
-      }
-      if (cache !== null) {
-        this.declare(`declare void @scr_promise_mark_handled(ptr)`);
-      }
-      if (fn.captures !== undefined) {
-        this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
-      }
-      const sp: string[] = [
-        `define internal ptr @${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ")}) ${FN_ATTRS} { ; spawn ${fn.name}`,
-        `entry:`,
-        ...(cache !== null
-          ? [
-              `  %cached = load ptr, ptr @${cache}`,
-              `  %cache_hit = icmp ne ptr %cached, null`,
-              `  br i1 %cache_hit, label %cached_return, label %cache_miss`,
-              `cached_return:`,
-              `  %cached_owned = call ptr @scr_promise_retain_v(ptr %cached)`,
-              `  ret ptr %cached_owned`,
-              `cache_miss:`,
-            ]
-          : []),
-        ...argPackLines,
-      ];
-      sp.push(
-        `  %p = call ptr @scr_async_spawn(ptr @${mangleTrampoline(fn.name)}, ptr %ap)`,
-        ...(cache !== null
-          ? [
-              // The module loader owns this evaluation promise
-              // immediately. A later sibling can throw before the
-              // aggregate dependency wait is built, but this rejection
-              // must never become an unrelated unhandled rejection.
-              `  call void @scr_promise_mark_handled(ptr %p)`,
-            ]
-          : []),
-        ...(cache !== null
-          ? [
-              `  %cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
-              // The eager spawn may have re-entered this guarded module
-              // through an admitted async cycle and installed a temporary
-              // cache entry. Drop that owned slot before replacing it
-              // with the outer evaluation promise.
-              `  %replaced_cache = load ptr, ptr @${cache}`,
-              `  call void @scr_promise_release(ptr %replaced_cache)`,
-              `  store ptr %cache_owned, ptr @${cache}`,
-            ]
-          : []),
-        ...(cycleCache !== null
-          ? [
-              // Eager recursive spawns publish from the inside out. The
-              // runtime-requested outermost member writes last and is the
-              // SCC's actual evaluation root.
-              `  %cycle_cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
-              `  %replaced_cycle_cache = load ptr, ptr @${cycleCache}`,
-              `  call void @scr_promise_release(ptr %replaced_cycle_cache)`,
-              `  store ptr %cycle_cache_owned, ptr @${cycleCache}`,
-            ]
-          : []),
-        `  ret ptr %p`,
-        `}`,
-        ``,
-      );
-      for (const line of sp) out.push(line);
+      if (fn.asyncCacheGlobal !== undefined || fn.asyncCycleCacheGlobal !== undefined) continue;
+      if (fn.returnType.kind === "dyn" || parks.has(fn.name)) continue;
+      if (!this.fnDefText.has(fn.name) || this.stacklessAsync.has(fn.name)) continue;
+      eligible.add(fn.name);
     }
-    for (const line of this.emitGenScaffolding()) out.push(line);
+    return eligible;
+  }
+  parkingFunctions(): Set<string> | null {
+    return parkingFunctions(this);
+  }
+
+  private mangledFunctions: Map<string, string> | null = null;
+
+  /** The module functions whose ordinary or borrowed body `text` mentions. */
+  *mentionedFunctions(text: string): Generator<string> {
+    if (this.mangledFunctions === null) {
+      this.mangledFunctions = new Map();
+      for (const fn of this.mod.functions) {
+        this.mangledFunctions.set(mangleFunction(fn.name), fn.name);
+        this.mangledFunctions.set(mangleBorrowedFunction(fn.name), fn.name);
+      }
+    }
+    // The names `@(sc_b?f_[A-Za-z0-9_]+)` matches, found with indexOf.
+    for (let at = text.indexOf("@sc_"); at >= 0;) {
+      let start = at + 4;
+      if (text.charCodeAt(start) === 98 /* b */) start++;
+      if (text.charCodeAt(start) !== 102 /* f */ || text.charCodeAt(start + 1) !== 95 /* _ */) {
+        at = text.indexOf("@sc_", at + 1);
+        continue;
+      }
+      let end = start + 2;
+      while (end < text.length && isIdentifierByte(text.charCodeAt(end))) end++;
+      if (end === start + 2) {
+        at = text.indexOf("@sc_", at + 1);
+        continue;
+      }
+      const callee = this.mangledFunctions.get(text.slice(at + 1, end));
+      if (callee !== undefined) yield callee;
+      at = text.indexOf("@sc_", end);
+    }
+  }
+
+  /** Chooses the native async functions whose bodies compile to switched
+   * coroutines instead of running on a fiber: a suspended call then keeps a
+   * heap frame of the values live across its awaits rather than a fiber and
+   * its stack. A body qualifies when its only suspension points are its own
+   * awaits, which the coroutine form suspends itself at (emitCoroAwait), so
+   * nothing it runs can park the stack it borrows. It is first emitted as
+   * usual: that text may suspend only through await runtime calls and
+   * await-call entries, which the coroutine form replaces, and may call no
+   * function that parks. The coroutine form is then emitted and must pass
+   * the same test with no exceptions (its frame bookkeeping excepted);
+   * otherwise the fiber form stays. Bodies that never suspend stay
+   * fiberless, and module evaluation bodies and `dyn` results keep fibers
+   * as they do there. The runtime traps if a stackless body ever parks. */
+  selectStacklessAsync(fnDefs: string[]): void {
+    if (!this.stacklessAsyncAllowed) return;
+    const parks = this.parkingFunctions();
+    if (parks === null) return;
+    // Coroutine bodies emitted below are the only inline-await callers, and
+    // replacing their text changes no other function's parking.
+    this.inlineAwaitable = this.neverParkingAsync(parks);
+    const qualifies = (fn: IrFunction, text: string, suspends: RegExp): boolean => {
+      if (suspends.test(text)) return false;
+      for (const callee of this.mentionedFunctions(text))
+        if (callee !== fn.name && parks.has(callee)) return false;
+      return true;
+    };
+    this.mod.functions.forEach((fn, index) => {
+      if (fn.async !== true || fn.generator !== undefined) return;
+      if (fn.asyncCacheGlobal !== undefined || fn.asyncCycleCacheGlobal !== undefined) return;
+      if (fn.returnType.kind === "dyn" || !parks.has(fn.name)) return;
+      const fiberText = fnDefs[index]!;
+      if (!qualifies(fn, fiberText.replace(AWAIT_SUSPENSIONS, ""), SUSPENDS)) return;
+      this.stacklessAsync.add(fn.name);
+      const coroText = this.emitFunction(fn);
+      if (!qualifies(fn, coroText, COROUTINE_SUSPENDS)) {
+        this.stacklessAsync.delete(fn.name);
+        return;
+      }
+      fnDefs[index] = coroText;
+      this.fnDefText.set(fn.name, coroText);
+    });
+  }
+
+  /** Whether a fiberless body running on its caller's stack needs the
+   * frame scr_async_inline_enter/exit keep: it isolates the Error.stack
+   * frame chain, which only stack-observing programs push, as a fresh fiber
+   * would. Other programs run the body with a plain call. The body runs in
+   * its caller's AsyncLocalStorage context either way, as Node runs an async
+   * body up to its first await. The frame also counts the bodies running on
+   * a fiber's stack for the runtime's trap on a fiberless body that
+   * suspends. */
+  get fiberlessFrames(): boolean {
+    return this.stackTraces;
+  }
+
+  /** The spawn wrapper of a fiberless async function: runs the body on the
+   * caller's stack (between scr_async_inline_enter/leave when
+   * fiberlessFrames) and settles a fresh promise from its outcome — the
+   * fiber trampoline's epilogue, without the fiber. */
+  emitFiberlessAsyncSpawn(fn: IrFunction, spawnParams: string[]): string[] {
+    const ret = fn.returnType;
+    const retTy = this.llType(ret);
+    const lifted = fn.captures !== undefined;
+    const framed = this.fiberlessFrames;
+    if (framed) {
+      this.declare(`declare void @scr_async_inline_enter(ptr)`);
+      this.declare(`declare ptr @scr_async_inline_leave(ptr)`);
+    } else {
+      this.declare(`declare ptr @scr_promise_new()`);
+    }
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    if (lifted) {
+      this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
+      this.declare(`declare void @scr_closure_release(ptr)`);
+    }
+    const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${spawnParams.join(", ")})`;
+    const out = [
+      `define internal ptr @${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ")}) ${FN_ATTRS} { ; fiberless ${fn.name}`,
+      `entry:`,
+      ...(framed ? [`  %frame = alloca { ptr, ptr }`] : []),
+      // The fiber path holds +1 on a lifted environment for the body's
+      // duration (packed, released by the trampoline); keep that lifetime.
+      ...(lifted ? [`  %env = call ptr @scr_closure_retain_v(ptr %a0)`] : []),
+      ...(framed ? [`  call void @scr_async_inline_enter(ptr %frame)`] : []),
+      retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`,
+      ...(lifted ? [`  call void @scr_closure_release(ptr %a0)`] : []),
+      ...this.pendingTestLines("%pend"),
+      framed
+        ? `  %p = call ptr @scr_async_inline_leave(ptr %frame)`
+        : `  %p = call ptr @scr_promise_new()`,
+      `  br i1 %pend, label %thrown, label %clean`,
+      `clean:`,
+      ...this.asyncFulfillLines(ret, "%p"),
+      `  ret ptr %p`,
+      `thrown:`,
+    ];
+    if (ret.kind !== "void" && isRefCounted(ret)) {
+      // An escaping throw means %r is the never-read dummy (NULL).
+      out.push(`  call void ${releaseSym(this.shapeHost, ret)}(ptr %r)`);
+    }
+    out.push(`  call void @scr_promise_reject_pending(ptr %p)`, `  ret ptr %p`, `}`, ``);
     return out;
   }
 
-  /** Per-generator-function machinery — the async scaffolding's lazy
-   * sibling (async.ts's emitGenScaffolding): the same argument pack,
-   * a fiber trampoline whose epilogue stores the COMPLETION value (or
-   * consumes the GENRET sentinel, promoting the parked .return value), a
-   * spawn wrapper that only ALLOCATES the suspended fiber, and the
-   * never-started teardown that drops the packed (+1) arguments. */
-  private emitGenScaffolding(): string[] {
-    const out: string[] = [];
-    for (const fn of this.mod.functions) {
-      if (fn.generator === undefined) continue;
-      const {
-        definitions,
-        pack,
-        lifted,
-        fieldTys,
-        ret,
-        tr,
-        spawnParams,
-        argPackLines,
-      } = this.emitArgPackAndTrampolinePrologue(fn);
-      for (const line of definitions) out.push(line);
-      this.declare(`declare zeroext i1 @scr_exc_genret_pending()`);
-      this.declare(`declare void @scr_exc_clear()`);
-      this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
-      this.declare(`declare void @scr_gen_ret_to_out(ptr)`);
-      this.declare(`declare ptr @scr_gen_new(ptr, ptr, ptr)`);
-      this.needOom();
-      if (lifted && !this.wasi) {
-        this.declare(`declare void @scr_closure_release(ptr)`);
-      }
-      // Normal completion stores the (typed) return value; void completes
-      // with the NONE slot — JS's undefined done-value. A GENRET unwind
-      // consumes the sentinel and promotes the parked .return value; a
-      // real exception stays pending (the consumer-side resume moves it).
-      if (this.wasi) {
-        tr.push(`  ret void`, `}`, ``);
-      } else {
-      tr.push(
-        `  %g = call ptr @scr_gen_of_fiber(ptr %self)`,
-        `  %pend = call zeroext i1 @scr_exc_pending()`,
-        `  br i1 %pend, label %thrown, label %clean`,
-        `clean:`,
-      );
-      switch (ret.kind) {
-        case "void":
-          tr.push(`  br label %done ; void body: the done value is undefined (NONE)`);
-          break;
-        case "f64":
-        case "date":
-          this.declare(`declare void @scr_gen_out_f64(ptr, double)`);
-          tr.push(`  call void @scr_gen_out_f64(ptr %g, double %r)`, `  br label %done`);
-          break;
-        case "bool":
-          this.declare(`declare void @scr_gen_out_bool(ptr, i1 zeroext)`);
-          tr.push(`  call void @scr_gen_out_bool(ptr %g, i1 %r)`, `  br label %done`);
-          break;
-        default: {
-          const v = vAdapters(this.shapeHost, ret);
-          this.declare(`declare void @scr_gen_out_ref(ptr, ptr, ptr)`);
-          tr.push(`  call void @scr_gen_out_ref(ptr %g, ptr %r, ptr ${v.release})`, `  br label %done`);
-        }
-      }
-      tr.push(
-        `thrown:`,
-        `  %genret = call zeroext i1 @scr_exc_genret_pending()`,
-        `  br i1 %genret, label %promote, label %dropdummy`,
-        `promote:`,
-        `  call void @scr_exc_clear()`,
-        `  call void @scr_gen_ret_to_out(ptr %g)`,
-        `  br label %dropdummy`,
-        `dropdummy:`,
-      );
-      if (ret.kind !== "void" && isRefCounted(ret)) {
-        tr.push(`  call void ${releaseSym(this.shapeHost, ret)}(ptr %r) ; unwound: the never-read dummy`);
-      }
-      tr.push(`  br label %done`, `done:`, `  ret void`, `}`, ``);
-      }
-      for (const line of tr) out.push(line);
+  /** Whether `await f(...)` may enter f through its await-call entry. The
+   * entry's result is the awaited value of f's own body type; direct calls
+   * never carry a lifted environment. */
+  awaitCallEligible(fnName: string): boolean {
+    // A coroutine body suspends itself at the await; the entry would park
+    // the stack it runs on.
+    if (this.wasi || this.mod.workers === true || this.currentCoro !== null) return false;
+    const fn = this.fnByName.get(fnName);
+    if (fn === undefined || fn.async !== true || fn.generator !== undefined) return false;
+    if (fn.captures !== undefined || fn.returnType.kind === "dyn") return false;
+    return fn.asyncCacheGlobal === undefined && fn.asyncCycleCacheGlobal === undefined;
+  }
 
-      let settleAsync: string | null = null;
-      if (fn.async) {
-        this.declare(`declare ptr @scr_async_gen_new(ptr, ptr, ptr, ptr)`);
-        const genT: IrType & { kind: "generator" } = {
-          kind: "generator",
-          async: true,
-          yieldT: fn.generator.yieldT,
-          retT: ret,
-          nextT: fn.generator.nextT,
-        };
-        const resultT = fn.generator.resultType;
-        const build = this.genResultThunkFor(genT, resultT);
-        settleAsync = `${build}_async`;
-        const settleKey = `ags:${typeKey(genT)}`;
-        if (!this.resolveThunks.has(settleKey)) {
-          this.resolveThunks.set(settleKey, settleAsync);
-          const adapters = vAdapters(this.shapeHost, resultT);
-          this.resolveThunkDefs.push(
-            `define internal void @${settleAsync}(ptr %g, ptr %p) ${FN_ATTRS} {`,
-            `entry:`,
-            `  %r = call ptr @${build}(ptr %g)`,
-            `  call void @scr_promise_fulfill_ref(ptr %p, ptr %r, ptr ${adapters.retain}, ptr ${adapters.release}, ptr ${traceArg(this.shapeHost, resultT)})`,
-            `  ret void`,
-            `}`,
-            ``,
-          );
-        }
-        this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
-      }
+  /** Whether a stackless coroutine body's `await f(...)` may run f's body in
+   * place (emitCoroInlineAwait): f never suspends, and its direct call is
+   * one an await-call entry could take. */
+  inlineAwaitEligible(fnName: string): boolean {
+    if (this.wasi || this.currentCoro?.kind !== "async") return false;
+    const fn = this.fnByName.get(fnName);
+    if (fn === undefined || !this.inlineAwaitable.has(fnName)) return false;
+    return fn.captures === undefined;
+  }
 
-      // The never-started teardown: drop the packed (+1) arguments.
-      const dr: string[] = [
-        `define internal void @${mangleGenDrop(fn.name)}(ptr %ap) ${FN_ATTRS} {`,
-        `entry:`,
-      ];
-      fieldTys.forEach((ty, i) => {
-        const pType = lifted && i === 0 ? null : fn.params[lifted ? i - 1 : i]!.type;
-        const refcounted = pType === null || isRefCounted(pType);
-        if (!refcounted) return;
-        dr.push(
-          `  %dp${i} = getelementptr inbounds %${pack}, ptr %ap, i64 0, i32 ${i}`,
-          `  %dv${i} = load ptr, ptr %dp${i}`,
-        );
-        if (pType === null) {
-          this.declare(`declare void @scr_closure_release(ptr)`);
-          dr.push(`  call void @scr_closure_release(ptr %dv${i})`);
-        } else {
-          dr.push(`  call void ${releaseSym(this.shapeHost, pType)}(ptr %dv${i})`);
-        }
-      });
-      dr.push(`  call void @free(ptr %ap)`, `  ret void`, `}`, ``);
-      for (const line of dr) out.push(line);
+  /** Whether a stackless coroutine body's `await f(...)` may await f's
+   * fiber record instead of its promise (emitCoroDirectAwait): f is a
+   * stackless async function whose direct call an await-call entry could
+   * take. The await consumes the promise, so nothing else can observe it.
+   * Worker programs keep the promise for their stop checkpoint. */
+  directAwaitEligible(fnName: string): boolean {
+    if (this.wasi || this.mod.workers === true || this.currentCoro?.kind !== "async") return false;
+    const fn = this.fnByName.get(fnName);
+    if (fn === undefined || fn.async !== true || fn.generator !== undefined) return false;
+    if (!this.stacklessAsync.has(fnName) || fn.captures !== undefined) return false;
+    if (fn.returnType.kind === "dyn") return false;
+    return fn.asyncCacheGlobal === undefined && fn.asyncCycleCacheGlobal === undefined;
+  }
 
-      // Spawn wrapper: pack the args (+1 moves in), allocate the
-      // SUSPENDED fiber — nothing runs until the first .next().
-      if (lifted) {
-        this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
-      }
-      const sp: string[] = [
-        `define internal ptr @${mangleGenSpawn(fn.name)}(${spawnParams.join(", ")}) ${FN_ATTRS} { ; gen spawn ${fn.name}`,
-        `entry:`,
-        ...argPackLines,
-      ];
-      sp.push(
-        settleAsync === null
-          ? `  %gg = call ptr @scr_gen_new(ptr @${mangleTrampoline(fn.name)}, ptr %ap, ptr @${mangleGenDrop(fn.name)})`
-          : `  %gg = call ptr @scr_async_gen_new(ptr @${mangleTrampoline(fn.name)}, ptr %ap, ptr @${mangleGenDrop(fn.name)}, ptr @${settleAsync})`,
-        `  ret ptr %gg`,
-        `}`,
-        ``,
-      );
-      for (const line of sp) out.push(line);
+  /** A stackless coroutine body's `await f(...)` of a stackless f, without
+   * f's promise object: f's prefix runs as the spawn of a fiber record that
+   * keeps the promise inside. A body still running wakes this coroutine
+   * when it finishes, where its promise's settlement would wake its one
+   * waiter; a finished one takes the settled await's turn. The result (or
+   * the rejection, re-thrown) comes out of the record, which goes. */
+  emitCoroDirectAwait(call: ExprOf<"call">, type: IrType): LlValue {
+    const coro = this.currentCoro;
+    if (coro === null)
+      throw new InternalCompilerError("llvm emitter bug: direct await outside a coroutine");
+    const B = this.B;
+    const record = emitCallExpr(this, call, "direct").name;
+    this.declare(`declare zeroext i1 @scr_coro_direct_prepare(ptr, ptr)`);
+    const suspend = B.tmp();
+    B.line(
+      `${suspend} = call zeroext i1 @scr_coro_direct_prepare(ptr ${coro.self}, ptr ${record})`,
+    );
+    const park = B.newLabel("await.suspend");
+    const ready = B.newLabel("await.ready");
+    B.condBr(suspend, park, ready);
+    B.startBlock(park);
+    this.emitCoroSuspendPrepared();
+    B.br(ready);
+    B.startBlock(ready);
+    if (type.kind === "void") {
+      this.declare(`declare void @scr_coro_direct_void(ptr)`);
+      B.line(`call void @scr_coro_direct_void(ptr ${record})`);
+      this.emitPendingCheck();
+      return { name: "", type };
     }
+    const t = B.tmp();
+    if (type.kind === "f64") {
+      this.declare(`declare double @scr_coro_direct_f64(ptr)`);
+      B.line(`${t} = call double @scr_coro_direct_f64(ptr ${record})`);
+    } else if (type.kind === "bool") {
+      this.declare(`declare zeroext i1 @scr_coro_direct_bool(ptr)`);
+      B.line(`${t} = call zeroext i1 @scr_coro_direct_bool(ptr ${record})`);
+    } else if (type.kind === "string") {
+      this.declare(`declare ptr @scr_coro_direct_str(ptr)`);
+      B.line(`${t} = call ptr @scr_coro_direct_str(ptr ${record})`);
+    } else {
+      this.declare(`declare ptr @scr_coro_direct_ref(ptr)`);
+      B.line(`${t} = call ptr @scr_coro_direct_ref(ptr ${record})`);
+    }
+    const out = this.own({ name: this.adoptHeap(t, type), type });
+    this.emitPendingCheck();
     return out;
+  }
+
+  /** The inline await entry of a fiberless async function (`sc_ai_*`): its
+   * body on the caller's stack (between scr_async_inline_enter/exit when
+   * fiberlessFrames), as in its spawn wrapper, returning the result and
+   * leaving a throw pending for the awaiting coroutine (emitCoroInlineAwait). */
+  emitAsyncInlineAwaitCall(fn: IrFunction): string[] {
+    const retTy = this.llType(fn.returnType);
+    const params = fn.params.map((p, i) => `${this.llType(p.type)} %a${i}`);
+    const args = params.join(", ");
+    const framed = this.fiberlessFrames;
+    if (framed) {
+      this.declare(`declare void @scr_async_inline_enter(ptr)`);
+      this.declare(`declare void @scr_async_inline_exit(ptr)`);
+    }
+    const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${args})`;
+    return [
+      `define internal ${retTy} @${mangleAsyncInlineAwaitCall(fn.name)}(${args}) ${FN_ATTRS} { ; inline await ${fn.name}`,
+      `entry:`,
+      ...(framed
+        ? [`  %frame = alloca { ptr, ptr }`, `  call void @scr_async_inline_enter(ptr %frame)`]
+        : []),
+      retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`,
+      ...(framed ? [`  call void @scr_async_inline_exit(ptr %frame)`] : []),
+      retTy === "void" ? `  ret void` : `  ret ${retTy} %r`,
+      `}`,
+      ``,
+    ];
+  }
+
+  /** A stackless coroutine body's `await f(...)` of a fiberless f, the
+   * await-call entry's turns without its promise: the body runs in place,
+   * then a clean result takes the await's turn, and a throw becomes the
+   * rejected promise the await takes its turn on and re-throws, exactly as
+   * the spawn wrapper's promise would. An adopting await (`return f(...)`)
+   * first takes the adoption's then-job turn either way. */
+  emitCoroInlineAwait(call: ExprOf<"call">, adopt: boolean): LlValue {
+    const B = this.B;
+    const value = emitCallExpr(this, call, "inline");
+    const thrown = B.tmp();
+    for (const line of this.pendingTestLines(thrown)) B.line(line.trim());
+    if (adopt) this.emitCoroAwait(null);
+    const clean = B.newLabel("ai.clean");
+    const rejected = B.newLabel("ai.rejected");
+    const join = B.newLabel("ai.join");
+    B.condBr(thrown, rejected, clean);
+    B.startBlock(clean);
+    this.emitCoroAwait(null);
+    B.br(join);
+    B.startBlock(rejected);
+    this.declare(`declare ptr @scr_promise_new()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    this.declare(`declare void @scr_coro_await_void(ptr)`);
+    this.declare(`declare void @scr_promise_release(ptr)`);
+    const promise = B.tmp();
+    B.line(`${promise} = call ptr @scr_promise_new()`);
+    B.line(`call void @scr_promise_reject_pending(ptr ${promise})`);
+    this.emitCoroAwait(promise);
+    B.line(`call void @scr_coro_await_void(ptr ${promise})`);
+    B.line(`call void @scr_promise_release(ptr ${promise})`);
+    B.br(join);
+    B.startBlock(join);
+    this.emitPendingCheck();
+    return value;
+  }
+  /** The entries of `Promise.all(arg)` that a stackless coroutine body's
+   * await may run in place (emitCoroInlinePromiseAll): `arg` is a non-empty
+   * array literal, or the local whose declaration emitStmts deferred to this
+   * await (deferredPromiseAllEntries), whose every entry is a call to a
+   * never-suspending async function, and the result is an array. Null
+   * otherwise. Consumes a deferred local's entries. */
+  inlinePromiseAllEntries(all: ExprOf<"intrinsic">): ExprOf<"arrayLit"> | null {
+    if (all.name !== "promise.all" || all.type.kind !== "promise") return null;
+    if (all.type.inner.kind !== "array") return null;
+    const arg = all.args[0];
+    if (arg?.kind === "varRef") {
+      const deferred = this.deferredPromiseAllEntries.get(arg.localId);
+      if (deferred === undefined) return null;
+      this.deferredPromiseAllEntries.delete(arg.localId);
+      return deferred;
+    }
+    return arg?.kind === "arrayLit" && this.promiseAllInlineable(arg) ? arg : null;
+  }
+
+  /** Whether every entry of `entries` is a call an await could run in place
+   * (inlineAwaitEligible) that yields its promise's inner type. */
+  private promiseAllInlineable(entries: ExprOf<"arrayLit">): boolean {
+    if (entries.elems.length === 0 || (entries.spreads?.length ?? 0) > 0) return false;
+    if (entries.type.kind !== "array" || entries.type.elem.kind !== "promise") return false;
+    const inner = entries.type.elem.inner;
+    return entries.elems.every((el) => {
+      if (el.kind !== "call" || !this.inlineAwaitEligible(el.callee)) return false;
+      const callee = this.fnByName.get(el.callee)!;
+      return typeEquals(callee.returnType, inner) && !this.callLifetimes.borrowed.has(el.callee);
+    });
+  }
+
+  /** Whether `stmts[i]` declares a local holding an array literal that only
+   * `stmts[i + 1]` reads, as the operand of `await Promise.all(local)` that
+   * runs first in that statement and may run its entries in place. Nothing
+   * runs between the literal and the await, so the await evaluates the
+   * literal itself (inlinePromiseAllEntries). Debug builds keep the local. */
+  deferredPromiseAllLocal(stmts: readonly IrStmt[], i: number): ExprOf<"arrayLit"> | null {
+    const decl = stmts[i];
+    const next = stmts[i + 1];
+    if (this.debug !== null || decl?.kind !== "varDecl" || decl.init?.kind !== "arrayLit")
+      return null;
+    if (this.currentCoro?.kind !== "async" || next === undefined) return null;
+    const operand =
+      next.kind === "varDecl"
+        ? next.init
+        : next.kind === "exprStmt"
+          ? next.expr
+          : next.kind === "assign"
+            ? next.value
+            : null;
+    if (operand?.kind !== "awaitExpr" || operand.adopt === true) return null;
+    const all = operand.value;
+    if (all.kind !== "intrinsic" || all.name !== "promise.all" || all.type.kind !== "promise")
+      return null;
+    if (all.type.inner.kind !== "array") return null;
+    const arg = all.args[0];
+    if (arg?.kind !== "varRef" || arg.localId !== decl.localId) return null;
+    if (!this.promiseAllInlineable(decl.init)) return null;
+    if (this.currentLocals.get(decl.localId)?.boxed) return null;
+    // The declaration and this read are the local's only mentions.
+    return countLocalMentions(this.currentFunctionBody, decl.localId) === 2 ? decl.init : null;
+  }
+
+  /** A stackless coroutine body's `await Promise.all([f(...), ...])` of
+   * never-suspending calls, with Promise.all's turns and without its
+   * promises: the entries run in place in order and their values fill the
+   * result array. Promise.all queues one reaction job per entry, back to
+   * back, and the last of them settles the result, whose await then takes a
+   * turn: here one turn stands for the entries' jobs and a second for the
+   * await. A throwing entry becomes the rejection the await re-throws from
+   * its turn; the remaining entries still run, and later throws are handled
+   * rejections, as Promise.all's subscriptions make them. */
+  emitCoroInlinePromiseAll(entries: ExprOf<"arrayLit">, type: IrType): LlValue {
+    if (type.kind !== "array")
+      throw new InternalCompilerError("llvm emitter bug: inline Promise.all result");
+    const B = this.B;
+    const elem = type.elem;
+    const acc = elemAccess(elem);
+    const values = B.tmp();
+    // Up to three values fit in the array's own block (scr_arr_new_*_small).
+    const small = entries.elems.length <= 3;
+    B.line(
+      `${values} = ${arrNewCall(this.shapeHost, elem, small ? "0" : String(entries.elems.length), small)}`,
+    );
+    const out = this.own({ name: values, type });
+    this.declare(`declare ptr @scr_promise_new()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    this.declare(`declare void @scr_promise_mark_handled(ptr)`);
+    const promiseType = entries.type.kind === "array" ? entries.type.elem : type;
+    // Each entry's rejection, owned by the frame: unobserved until the
+    // entries have all run, as Promise.all subscribes only then, so an
+    // entry argument's synchronous throw leaves them unhandled.
+    const rejections: string[] = [];
+    for (const entry of entries.elems) {
+      if (entry.kind !== "call")
+        throw new InternalCompilerError("llvm emitter bug: inline Promise.all entry");
+      const slot = B.tmp();
+      B.entryAllocas.push(`${slot} = alloca ptr`);
+      B.line(`store ptr null, ptr ${slot}`);
+      this.ownSlot(slot, promiseType);
+      rejections.push(slot);
+      const value = emitCallExpr(this, entry, "inline");
+      const thrown = B.tmp();
+      for (const line of this.pendingTestLines(thrown)) B.line(line.trim());
+      const clean = B.newLabel("pa.clean");
+      const rejected = B.newLabel("pa.rejected");
+      const next = B.newLabel("pa.next");
+      B.condBr(thrown, rejected, clean);
+      B.startBlock(clean);
+      if (acc === "ref") this.toHeap(value);
+      this.arrPush(values, acc, value.name, elem);
+      B.br(next);
+      B.startBlock(rejected);
+      const promise = B.tmp();
+      B.line(`${promise} = call ptr @scr_promise_new()`);
+      B.line(`call void @scr_promise_reject_pending(ptr ${promise})`);
+      B.line(`store ptr ${promise}, ptr ${slot}`);
+      B.br(next);
+      B.startBlock(next);
+    }
+    // Promise.all's subscriptions handle every rejection, and the first
+    // (in entry order) rejects the result.
+    let first = "null";
+    for (let k = rejections.length - 1; k >= 0; k--) {
+      const slot = rejections[k]!;
+      const rejection = B.tmp();
+      const present = B.tmp();
+      B.line(`${rejection} = load ptr, ptr ${slot}`);
+      B.line(`${present} = icmp ne ptr ${rejection}, null`);
+      const mark = B.newLabel("pa.handled");
+      const after = B.newLabel("pa.unrejected");
+      B.condBr(present, mark, after);
+      B.startBlock(mark);
+      B.line(`call void @scr_promise_mark_handled(ptr ${rejection})`);
+      B.br(after);
+      B.startBlock(after);
+      const chosen = B.tmp();
+      B.line(`${chosen} = select i1 ${present}, ptr ${rejection}, ptr ${first}`);
+      first = chosen;
+    }
+    // The entries' reaction jobs.
+    this.emitCoroAwait(null);
+    const failed = B.tmp();
+    B.line(`${failed} = icmp ne ptr ${first}, null`);
+    const fulfilled = B.newLabel("pa.fulfilled");
+    const rejected = B.newLabel("pa.reject");
+    const join = B.newLabel("pa.join");
+    B.condBr(failed, rejected, fulfilled);
+    B.startBlock(fulfilled);
+    this.emitCoroAwait(null);
+    B.br(join);
+    B.startBlock(rejected);
+    this.declare(`declare void @scr_coro_await_void(ptr)`);
+    this.emitCoroAwait(first);
+    B.line(`call void @scr_coro_await_void(ptr ${first})`);
+    B.br(join);
+    B.startBlock(join);
+    // The rejections are released here, only where an entry threw, rather
+    // than by the frame, which releases each slot whether or not it holds a
+    // promise.
+    this.declare(`declare void @scr_promise_release(ptr)`);
+    for (const slot of rejections) {
+      const rejection = B.tmp();
+      const present = B.tmp();
+      B.line(`${rejection} = load ptr, ptr ${slot}`);
+      B.line(`${present} = icmp ne ptr ${rejection}, null`);
+      const release = B.newLabel("pa.release");
+      const after = B.newLabel("pa.released");
+      B.condBr(present, release, after);
+      B.startBlock(release);
+      B.line(`call void @scr_promise_release(ptr ${rejection})`);
+      B.br(after);
+      B.startBlock(after);
+    }
+    this.disownSlots(rejections.map((ptr) => ({ ptr })));
+    this.emitPendingCheck();
+    return out;
+  }
+  emitAsyncAwaitCall(fn: IrFunction, argPackLines: string[] | null, adopt = false): string[] {
+    return emitAsyncAwaitCall(this, fn, argPackLines, adopt);
+  }
+  emitAsyncScaffolding(): string[] {
+    return emitAsyncScaffolding(this);
+  }
+
+  /** Whether `fn`'s body is emitted as an LLVM switched coroutine: every
+   * wasm32 async or generator body, native synchronous generators, and the
+   * native async bodies selectStacklessAsync chose. */
+  coroLowered(fn: IrFunction): boolean {
+    if (this.wasi) return fn.async === true || fn.generator !== undefined;
+    if (fn.async === true) return fn.generator === undefined && this.stacklessAsync.has(fn.name);
+    return this.stacklessGenerators && fn.generator !== undefined;
+  }
+  emitGenScaffolding(): string[] {
+    return emitGenScaffolding(this);
   }
 
   // ── plumbing (frame and scope ownership) ──────
 
+  /** A symbol derived from the constant's text rather than its first-use
+   * index, so an edit that interns one more string leaves every other
+   * constant's symbol, and the code referencing it, unchanged. This lets
+   * native builds reuse the compiled partitions an edit does not touch. A
+   * collision retries with a counter, still in first-use order. */
+  private contentSymbol(prefix: string, text: string): string {
+    for (let attempt = 0; ; attempt++) {
+      const digest = createHash("sha256")
+        .update(attempt === 0 ? text : `${attempt}\0${text}`)
+        .digest("hex");
+      const symbol = `${prefix}${parseInt(digest.slice(0, 13), 16)}`;
+      if (!this.contentSymbols.has(symbol)) {
+        this.contentSymbols.add(symbol);
+        return symbol;
+      }
+    }
+  }
+
   internLiteral(text: string): string {
     let lit = this.literals.get(text);
     if (!lit) {
-      lit = { sym: `sc_lit_${this.literals.size}`, len: Buffer.byteLength(text, "utf8") };
+      lit = {
+        sym: this.contentSymbol("sc_lit_", text),
+        len: Buffer.byteLength(text, "utf8"),
+      };
       this.literals.set(text, lit);
     }
-    return `@${lit.sym}`;
+    this.journal?.entry("literal", text, lit);
+    const name = `@${lit.sym}`;
+    this.immortalValues.add(name);
+    return name;
+  }
+
+  /** The inline equality test against one string literal (an
+   * `i1 (ptr)` helper LLVM inlines at each site), by literal symbol. */
+  literalEquals(text: string): string {
+    const literal = this.internLiteral(text);
+    const name = `@sc_streq_${literal.slice("@sc_lit_".length)}`;
+    this.journal?.entry("literalEquality", text, name);
+    if (!this.literalEqualities.has(text)) {
+      this.literalEqualities.set(text, name);
+      if (Buffer.byteLength(text, "utf8") > INLINE_LITERAL_BYTES) {
+        this.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
+      }
+    }
+    return name;
+  }
+
+  /** `@`-ref of an immortal ScrBigInt holding `value`, or null when the
+   * text is not a valid StringToBigInt input (the runtime parse then
+   * throws as usual). BigInt here is the same StringToBigInt as the
+   * program's, so every accepted spelling folds to the value Node gives. */
+  internBigIntLiteral(text: string): string | null {
+    let value: bigint;
+    try {
+      value = BigInt(text);
+    } catch {
+      return null;
+    }
+    const key = value.toString(16);
+    let lit = this.bigintLiterals.get(key);
+    if (!lit) {
+      lit = { sym: this.contentSymbol("sc_bigint_", key), value };
+      this.bigintLiterals.set(key, lit);
+    }
+    this.journal?.entry("bigint", key, { sym: lit.sym, value: lit.value.toString() });
+    const name = `@${lit.sym}`;
+    this.immortalValues.add(name);
+    return name;
   }
 
   /** Interned NUL-terminated C-string constant (the scr_jb_puts /
@@ -2421,14 +3168,39 @@ export class LlEmitter {
   cstr(text: string): string {
     let c = this.cstrs.get(text);
     if (!c) {
-      c = { sym: `sc_cs_${this.cstrs.size}`, len: Buffer.byteLength(text, "utf8") };
+      c = { sym: this.contentSymbol("sc_cs_", text), len: Buffer.byteLength(text, "utf8") };
       this.cstrs.set(text, c);
     }
+    this.journal?.entry("cstr", text, c);
     return `@${c.sym}`;
+  }
+
+  /** The method-id slot for a constant method name (methodIdSlots). */
+  methodIdSlot(name: string): string {
+    let sym = this.methodIdSlots.get(name);
+    if (!sym) {
+      sym = this.contentSymbol("sc_mid_", name);
+      this.methodIdSlots.set(name, sym);
+    }
+    this.journal?.entry("methodIdSlot", name, sym);
+    return `@${sym}`;
   }
 
   needBadTag(): void {
     this.needsBadTag = true;
+  }
+
+  /** The ScrMapOps descriptor holding these operands (ShapeHost.mapOps). */
+  mapOps(operands: readonly string[]): string {
+    if (operands.every((op) => op === "null")) return "null";
+    const body = operands.map((op) => `ptr ${op}`).join(", ");
+    let sym = this.mapOpsConsts.get(body);
+    if (!sym) {
+      sym = this.contentSymbol("sc_map_ops_", body);
+      this.mapOpsConsts.set(body, sym);
+    }
+    this.journal?.entry("mapOps", body, sym);
+    return `@${sym}`;
   }
 
   /** The interned immortal instance for a UNIT arm of a union — asserts
@@ -2438,7 +3210,15 @@ export class LlEmitter {
   unitInstanceRef(unionId: string, tag: number): string {
     const arm = this.unionsById.get(unionId)?.arms[tag];
     if (!arm || !isUnitType(arm)) {
-      throw new InternalCompilerError(`llvm emitter bug: unit instance for non-unit arm ${tag} of ${unionId}`);
+      throw new InternalCompilerError(
+        `llvm emitter bug: unit instance for non-unit arm ${tag} of ${unionId}`,
+      );
+    }
+    const nullable = this.nullableUnions.get(unionId);
+    if (nullable) {
+      // NULL is the unit arm of a nullable union (`undefined` when it has
+      // both); the `null` sentinel is immortal. Neither owns anything.
+      return tag === nullable.nullTag ? NULLABLE_NULL : "null";
     }
     const key = `${unionId}:${tag}`;
     let sym = this.unitInstances.get(key);
@@ -2446,10 +3226,91 @@ export class LlEmitter {
       sym = `sc_unit_${this.unitInstances.size}`;
       this.unitInstances.set(key, sym);
     }
+    this.journal?.entry("unit", key, sym);
+    const name = `@${sym}`;
+    this.immortalValues.add(name);
+    return name;
+  }
+
+  /** The i8 flag that a checked-dynamic cast sets before caching one of
+   * this tagged union's boxes (unionRetype rebuilds once it is set). */
+  retypeGuardRef(unionId: string): string {
+    let sym = this.retypeGuards.get(unionId);
+    if (!sym) {
+      sym = `sc_retype_guard_${this.retypeGuards.size}`;
+      this.retypeGuards.set(unionId, sym);
+    }
+    this.journal?.entry("retype", unionId, sym);
     return `@${sym}`;
   }
 
+  /** The immortal ABSENT state of an undefined-armed record field slot
+   * (IR fieldAbsent). */
+  absentInstanceRef(unionId: string): string {
+    if (undefinedArmTag({ kind: "union", unionId }, this.unionsById) < 0) {
+      throw new InternalCompilerError(
+        `llvm emitter bug: absent state of ${unionId} without undefined`,
+      );
+    }
+    if (this.nullableUnions.has(unionId)) {
+      this.needsNullableAbsent = true;
+      this.immortalValues.add(NULLABLE_ABSENT);
+      return NULLABLE_ABSENT;
+    }
+    let sym = this.absentInstances.get(unionId);
+    if (!sym) {
+      sym = `sc_absent_${this.absentInstances.size}`;
+      this.absentInstances.set(unionId, sym);
+    }
+    this.journal?.entry("absent", unionId, sym);
+    const name = `@${sym}`;
+    this.immortalValues.add(name);
+    return name;
+  }
+
+  /** i1: a union value loaded from a field slot is the ABSENT state — the
+   * undefined arm's tag with the absent payload marker. */
+  fieldAbsentTest(value: string, unionId: string): string {
+    return this.fieldAbsentTestIn(this.B, value, unionId);
+  }
+
+  /** fieldAbsentTest in another block builder (helper generators). A
+   * nullable union's ABSENT state is the module's immortal sentinel. */
+  fieldAbsentTestIn(B: BlockBuilder, value: string, unionId: string): string {
+    if (this.nullableUnions.has(unionId)) {
+      this.needsNullableAbsent = true;
+      const t = B.tmp();
+      B.line(`${t} = icmp eq ptr ${value}, ${NULLABLE_ABSENT}`);
+      return t;
+    }
+    return emitFieldAbsentTest(
+      B,
+      value,
+      undefinedArmTag({ kind: "union", unionId }, this.unionsById),
+    );
+  }
+
+  /** Loads a record field slot as a VALUE: an undefined-armed union slot
+   * holding the ABSENT state surfaces as the ordinary undefined arm, so
+   * absence never travels beyond its slot (a later `{ f: r.f }` is an
+   * explicit, present property). */
+  loadRecordField(ptr: string, t: IrType, inline: boolean): string {
+    if (inline) {
+      const { tag, bits } = loadInlineUnion(this.B, ptr);
+      const present = presentBits(this.B, tag, bits, undefinedArmTag(t, this.unionsById));
+      return stackUnionBox(this.B, this.sizeType, tag, present);
+    }
+    const v = this.loadField(ptr, t, false);
+    if (t.kind !== "union" || undefinedArmTag(t, this.unionsById) < 0) return v;
+    const absent = this.fieldAbsentTest(v, t.unionId);
+    const unit = this.unitInstanceRef(t.unionId, undefinedArmTag(t, this.unionsById));
+    const out = this.B.tmp();
+    this.B.line(`${out} = select i1 ${absent}, ptr ${unit}, ptr ${v}`);
+    return out;
+  }
+
   declare(decl: string): void {
+    this.journal?.entry("decl", decl, null);
     this.decls.add(decl);
   }
 
@@ -2463,9 +3324,22 @@ export class LlEmitter {
     return frame;
   }
 
+  /** Whether a value is immortal: an interned constant, or a temp marked by
+   * markImmortal. */
+  private isImmortal(name: string): boolean {
+    return this.immortalValues.has(name) || this.B.immortalTemps.has(name);
+  }
+
+  /** Record that a temp holds an immortal value (a choice between interned
+   * literals): nothing owns it, and retains, releases and moves skip it. */
+  markImmortal(v: LlValue): LlValue {
+    this.B.immortalTemps.add(v.name);
+    return v;
+  }
+
   /** Registers an owned refcounted value on the current statement frame. */
   own(v: LlValue): LlValue {
-    if (isRefCounted(v.type)) this.currentFrame().push(v);
+    if (isRefCounted(v.type) && !this.isImmortal(v.name)) this.currentFrame().push(v);
     return v;
   }
 
@@ -2475,9 +3349,33 @@ export class LlEmitter {
     if (isRefCounted(type)) this.currentFrame().push({ name: slot, type, slot: true });
   }
 
-  /** Strike a refcounted temp from its frame: ownership is being moved. */
-  moveTemp(v: LlValue): void {
-    if (!isRefCounted(v.type)) return;
+  /** The innermost lexical scope releases a frame object's reference
+   * fields when it exits, as it releases its bindings. */
+  ownScopeFields(fields: readonly StackObjectField[]): void {
+    const scope = this.scopes[this.scopes.length - 1]!;
+    for (const field of fields) scope.push({ slot: field.ptr, type: field.type });
+  }
+
+  /** Strike frame-owned slots (ownSlot) from their statement frames: their
+   * contents are moving to another owner. */
+  disownSlots(slots: readonly { ptr: string }[]): void {
+    for (const { ptr } of slots) {
+      let found = false;
+      for (let i = this.frames.length - 1; i >= 0 && !found; i--) {
+        const idx = this.frames[i]!.findIndex((e) => e.slot === true && e.name === ptr);
+        if (idx >= 0) {
+          this.frames[i]!.splice(idx, 1);
+          found = true;
+        }
+      }
+      if (!found)
+        throw new InternalCompilerError(`llvm emitter bug: disowned slot ${ptr} not in a frame`);
+    }
+  }
+
+  /** Strike a refcounted temp from its frame. */
+  private disownTemp(v: LlValue): void {
+    if (!isRefCounted(v.type) || this.isImmortal(v.name)) return;
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const idx = this.frames[i]!.findIndex((e) => e.name === v.name);
       if (idx >= 0) {
@@ -2485,49 +3383,110 @@ export class LlEmitter {
         return;
       }
     }
-    throw new InternalCompilerError(`llvm emitter bug: moved temp ${v.name} not found in any frame`);
+    throw new InternalCompilerError(
+      `llvm emitter bug: moved temp ${v.name} not found in any frame`,
+    );
+  }
+
+  /* Ownership transfers name their destination. A heap reference is one
+   * that heap memory holds: a field, an array or map element, a capture
+   * box, a union box, a module global, a promise or generator slot, the
+   * exception cell, or any other runtime structure. A frame reference is
+   * one that a local, a parameter, a return value, a stack object or a
+   * temporary holds. Both forms of each operation emit the same code. */
+
+  /** Ends a temp's frame ownership: its reference moves into heap memory. */
+  toHeap(v: LlValue): void {
+    this.disownTemp(v);
+  }
+
+  /** Ends a temp's frame ownership: its reference moves to another frame
+   * owner (a local or parameter slot, a callee's parameter, a return
+   * value, a stack object, another temp). */
+  toFrame(v: LlValue): void {
+    this.disownTemp(v);
   }
 
   /** The retained (+1) read of a refcounted value — type-directed through
    * the `_v` table (immortals skip, exactly the C retain calls). */
-  retainValue(name: string, type: IrType): string {
+  private retainCall(name: string, type: IrType): string {
+    if (this.isImmortal(name)) return name;
     const t = this.B.tmp();
     this.B.line(`${t} = call ptr ${retainSym(this.shapeHost, type)}(ptr ${name})`);
     return t;
   }
 
+  /** A +1 of `name` that heap memory keeps. */
+  retainHeap(name: string, type: IrType): string {
+    return this.retainCall(name, type);
+  }
+
+  /** A +1 of `name` that a frame owns. */
+  retainFrame(name: string, type: IrType): string {
+    return this.retainCall(name, type);
+  }
+
   /** The release call for one owned refcounted value — type-directed like
    * releaseCallC (all runtime releases are NULL-tolerant). */
-  releaseValue(name: string, type: IrType): void {
+  private releaseCall(name: string, type: IrType): void {
+    if (this.isImmortal(name)) return;
     this.B.line(`call void ${releaseSym(this.shapeHost, type)}(ptr ${name})`);
   }
 
-  releaseFrame(frame: LlValue[]): void {
+  /** Releases a reference that heap memory held. */
+  releaseHeap(name: string, type: IrType): void {
+    this.releaseCall(name, type);
+  }
+
+  /** Releases a reference that a frame owned. */
+  releaseFrame(name: string, type: IrType): void {
+    this.releaseCall(name, type);
+  }
+
+  /** A +1 that the runtime made with the heap retain (a box, generator or
+   * await read) becomes a frame value. Emits nothing; answers `name`. */
+  adoptHeap(name: string, _type: IrType): string {
+    return name;
+  }
+
+  /** Releases a statement frame's temps and owned slots. */
+  releaseTemps(frame: LlValue[]): void {
     for (const v of frame) {
       if (v.slot) {
         const t = this.B.tmp();
         this.B.line(`${t} = load ptr, ptr ${v.name}`);
         if (v.boxed) {
-          this.declare(`declare void @scr_box_release(ptr)`);
-          this.B.line(`call void @scr_box_release(ptr ${t})`);
+          this.B.line(`call void ${boxReleaseSym(this.shapeHost)}(ptr ${t})`);
         } else {
-          this.releaseValue(t, v.type);
+          this.releaseFrame(t, v.type);
         }
       } else {
-        this.releaseValue(v.name, v.type);
+        this.releaseFrame(v.name, v.type);
       }
     }
   }
 
-  private releaseScope(scope: LlScopeEntry[]): void {
+  releaseScope(scope: LlScopeEntry[]): void {
     for (const e of scope) {
       const t = this.B.tmp();
       this.B.line(`${t} = load ptr, ptr ${e.slot}`);
-      if (e.boxed) {
-        this.declare(`declare void @scr_box_release(ptr)`);
-        this.B.line(`call void @scr_box_release(ptr ${t})`);
+      if (e.boxed && e.lazy) {
+        // Unreachable code after a terminator emits nothing; a new block
+        // here would revive it.
+        if (this.B.isTerminated()) continue;
+        const created = this.B.tmp();
+        this.B.line(`${created} = icmp ne ptr ${t}, null`);
+        const release = this.B.newLabel("lazy.release"),
+          join = this.B.newLabel("lazy.release.j");
+        this.B.condBr(created, release, join);
+        this.B.startBlock(release);
+        this.B.line(`call void ${boxReleaseSym(this.shapeHost)}(ptr ${t})`);
+        this.B.br(join);
+        this.B.startBlock(join);
+      } else if (e.boxed) {
+        this.B.line(`call void ${boxReleaseSym(this.shapeHost)}(ptr ${t})`);
       } else {
-        this.releaseValue(t, e.type); // runtime releases are NULL-tolerant
+        this.releaseFrame(t, e.type); // runtime releases are NULL-tolerant
       }
     }
   }
@@ -2536,15 +3495,15 @@ export class LlEmitter {
    * frames and entered scopes down to the given depths, innermost first —
    * everything whose normal fall-through releases the jump bypasses.
    * Release every scope crossed by the control-flow edge. */
-  private releaseForJump(frameDepth: number, scopeDepth: number): void {
-    for (let i = this.frames.length - 1; i >= frameDepth; i--) this.releaseFrame(this.frames[i]!);
+  releaseForJump(frameDepth: number, scopeDepth: number): void {
+    for (let i = this.frames.length - 1; i >= frameDepth; i--) this.releaseTemps(this.frames[i]!);
     for (let i = this.scopes.length - 1; i >= scopeDepth; i--) this.releaseScope(this.scopes[i]!);
   }
 
   /** Run the finally regions an abrupt loop/block jump crosses, then
    * release to the already-resolved target. This is the return path's
    * completion walk without a parked result value. */
-  private emitFinallysForJump(finallyDepth: number, frameDepth: number, scopeDepth: number): void {
+  emitFinallysForJump(finallyDepth: number, frameDepth: number, scopeDepth: number): void {
     if (this.finallyStack.length <= finallyDepth) {
       this.releaseForJump(frameDepth, scopeDepth);
       return;
@@ -2574,23 +3533,70 @@ export class LlEmitter {
    * function — and branch to the handler / return a dummy value (never
    * read: callers of a may-throw function test the pending flag before
    * using the result). Callers own the surrounding pending branch; a
-   * `throw` unwinds unconditionally. */
-  private emitUnwind(): void {
+   * `throw` unwinds unconditionally. `passThrough` names a scalar call
+   * result of the function's own return type: with nothing to release, the
+   * unwind returns it as the dummy, so a call in tail position keeps a single
+   * return and stays eligible for tail-call and recursion elimination. */
+  emitUnwind(passThrough?: string): void {
+    if (this.mod.workers && this.tryStack.length > 0) {
+      const stop = this.B.newLabel("context.stop");
+      const ordinary = this.B.newLabel("context.throw");
+      if (this.executableTls) {
+        // A set stop bit unwinds while the active cell may still be clear:
+        // install the termination sentinel before skipping the handlers.
+        const word = this.loadExcFlag();
+        const bit = this.B.tmp();
+        const stopped = this.B.tmp();
+        this.B.line(`${bit} = and i32 ${word}, 2`);
+        this.B.line(`${stopped} = icmp ne i32 ${bit}, 0`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+        this.declare(`declare zeroext i1 @scr_context_checkpoint()`);
+        this.B.line(`call zeroext i1 @scr_context_checkpoint()`);
+      } else {
+        this.declare(`declare zeroext i1 @scr_context_stopping()`);
+        const stopped = this.B.tmp();
+        this.B.line(`${stopped} = call zeroext i1 @scr_context_stopping()`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+      }
+      const handlers = this.tryStack;
+      this.tryStack = [];
+      this.emitUnwind();
+      this.tryStack = handlers;
+      this.B.startBlock(ordinary);
+    }
     const target = this.tryStack[this.tryStack.length - 1];
     const frameDepth = target?.frameDepth ?? 0;
     const scopeDepth = target?.scopeDepth ?? 0;
-    for (let i = this.frames.length - 1; i >= frameDepth; i--) this.releaseFrame(this.frames[i]!);
+    for (let i = this.frames.length - 1; i >= frameDepth; i--) this.releaseTemps(this.frames[i]!);
     let terminator: string;
     if (target) {
       target.used = true;
       terminator = `br label %${target.label}`;
-    } else if (this.currentWasiCoro !== null) {
-      terminator = `br label %${this.currentWasiCoro.finalLabel}`;
+    } else if (this.currentCoro !== null) {
+      terminator = `br label %${this.currentCoro.finalLabel}`;
+    } else if (this.currentUnwindAbi && this.inLandingPad) {
+      // The unwind that entered the landing pad goes on to the caller's.
+      terminator = UNWIND_RESUME;
+    } else if (this.currentUnwindAbi) {
+      // The caller's invoke takes the exception at its landing pad.
+      this.declare(UNWIND_RAISE_DECLARATION);
+      terminator = UNWIND_RAISE;
     } else {
-      const t = this.currentReturnType;
-      terminator = t.kind === "void" ? "ret void"
-        : t.kind === "f64" || t.kind === "date" ? `ret double ${f64Lit(0)}`
-        : t.kind === "bool" ? "ret i1 false" : "ret ptr null";
+      const t = this.llType(this.currentReturnType);
+      terminator =
+        t === "void"
+          ? "ret void"
+          : this.currentInt32Result
+            ? "ret i32 0"
+            : this.currentUnionResult
+              ? `ret ${SCALAR_UNION_DUMMY}`
+              : t === "double"
+                ? `ret double ${f64Lit(0)}`
+                : t === "i1"
+                  ? "ret i1 false"
+                  : "ret ptr null";
     }
     // Copy the entries now: later declarations extend these lexical scopes.
     // Release order and the handler are part of the shared block's identity.
@@ -2603,6 +3609,16 @@ export class LlEmitter {
       }
     }
     if (entries.length === 0) {
+      if (
+        passThrough !== undefined &&
+        !target &&
+        this.currentCoro === null &&
+        !this.currentUnwindAbi &&
+        !this.currentInt32Result
+      ) {
+        const t = this.llType(this.currentReturnType);
+        if (t === "double" || t === "i1") terminator = `ret ${t} ${passThrough}`;
+      }
       this.B.terminate(terminator);
       return;
     }
@@ -2614,22 +3630,435 @@ export class LlEmitter {
     this.B.br(cleanup.label);
   }
 
+  /** Loads the running thread's exact pending word (ELF worker
+   * executables, scr_exception.c): bit 0 mirrors the active cell, bit 1
+   * requests the context's stop. It lives in the executable's static TLS
+   * block, so the access is one thread-pointer-relative load. Monotonic by
+   * default: a loop must not hoist the load out and miss a cross-thread
+   * stop (see emitPendingCheck for the unordered tests). */
+  private loadExcFlag(unordered = false): string {
+    this.declare(`@scr_exc_flag = external thread_local(localexec) global i32, align 4`);
+    const word = this.B.tmp();
+    this.B.line(
+      `${word} = load atomic i32, ptr @scr_exc_flag ${unordered ? "unordered" : "monotonic"}, align 4`,
+    );
+    return word;
+  }
+
+  /** Instructions (two-space indented) that set the i1 `dest` to "an
+   * exception is pending in the active context" — scr_exc_pending()'s
+   * meaning — for the helper and adapter bodies that test it outside
+   * emitPendingCheck. Executables read the runtime's exported active-cell
+   * pointer and compare its i32 kind (offset 0) against SCR_EXC_NONE inline,
+   * as emitPendingCheck does; the out-of-line call would be opaque to LLVM
+   * because the runtime links as prebuilt objects. Libraries and worker
+   * programs keep the runtime call, which is emitPendingCheck's path there
+   * too (workers also observe cross-thread termination in it). */
+  pendingTestLines(dest: string): string[] {
+    if (this.mod.lib !== undefined || this.mod.workers === true) {
+      this.declare(`declare zeroext i1 @scr_exc_pending()`);
+      return [`  ${dest} = call zeroext i1 @scr_exc_pending()`];
+    }
+    this.declare(`@scr_exc_active = external global ptr`);
+    return [
+      `  ${dest}.cell = load ptr, ptr @scr_exc_active`,
+      `  ${dest}.kind = load i32, ptr ${dest}.cell`,
+      `  ${dest} = icmp ne i32 ${dest}.kind, 0`,
+    ];
+  }
+
   /** The emitter contract for exceptions: after EVERY call that can throw
    * (per the may-throw analysis), test the pending flag and unwind. The
    * call's result temp must join its frame BEFORE this runs so the unwind
-   * releases the dummy (NULL for refcounted kinds) harmlessly. */
-  emitPendingCheck(): void {
+   * releases the dummy (NULL for refcounted kinds) harmlessly. A scalar
+   * call result of the function's return type may be passed as the unwind's
+   * dummy value (see emitUnwind). `poll` marks a worker termination poll
+   * (function entry or loop budget), whose test must stay ordered. A
+   * `guard` (an i1) limits the test to the paths where it is true: false
+   * where the joined call could not have left anything pending. */
+  emitPendingCheck(
+    passThrough?: { name: string; type: IrType },
+    poll = false,
+    guard?: string,
+  ): void {
+    const through =
+      passThrough !== undefined &&
+      this.llType(passThrough.type) === this.llType(this.currentReturnType) &&
+      (passThrough.type.kind === "f64" || passThrough.type.kind === "bool")
+        ? passThrough.name
+        : undefined;
     const B = this.B;
     if (B.isTerminated()) return;
-    this.declare(`declare zeroext i1 @scr_exc_pending()`);
-    const p = B.tmp();
-    B.line(`${p} = call zeroext i1 @scr_exc_pending()`);
+    let skip: string | undefined;
+    if (guard !== undefined) {
+      const test = B.newLabel("exc.t");
+      skip = B.newLabel("exc.n");
+      B.condBr(guard, test, skip);
+      B.startBlock(test);
+    }
+    if (this.mod.lib !== undefined) {
+      this.declare(`declare zeroext i1 @scr_exc_pending()`);
+      const p = B.tmp();
+      B.line(`${p} = call zeroext i1 @scr_exc_pending()`);
+      const lu = B.newLabel("exc.u");
+      const lk = B.newLabel("exc.k");
+      B.condBr(p, lu, lk);
+      B.startBlock(lu);
+      this.emitUnwind(through);
+      B.startBlock(lk);
+      if (skip !== undefined) {
+        B.br(skip);
+        B.startBlock(skip);
+      }
+      return;
+    }
+    // Executables test the active exception cell's kind inline (its first
+    // field). ELF worker executables test the thread's exact pending word,
+    // which is also nonzero once the context must stop, and unwind directly:
+    // no site carries an out-of-line call, so LLVM's inliner sees the check
+    // as two instructions. Other worker programs test the process-wide
+    // alert word: it is nonzero while any script thread may have an
+    // exception pending in its active cell or has been asked to stop, so
+    // the common case is one ordinary global load (a thread-local access is
+    // a call on Darwin) and the out-of-line scr_exc_pending answers for this
+    // thread, observing cancellation and reinstalling the termination
+    // sentinel.
+    this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
+    let word: string;
+    const exact = this.mod.workers !== true || this.executableTls;
+    if (this.executableTls) {
+      // Termination stays observable where the polls were dropped for it:
+      // polls, tests inside source loops (exc's loop-poll rule relies on
+      // them every iteration) and tail-position tests (a dead ordered load
+      // keeps recursion from becoming a loop without stack growth) use an
+      // ordered load, which LLVM never deletes, hoists or merges. Every
+      // other test is an unordered load: it reads the same word, but LLVM's
+      // memory analyses no longer treat it as a write, so loads around it
+      // stay forwardable after inlining. Same-thread changes only happen in
+      // runtime calls, which clobber memory.
+      word = this.loadExcFlag(!poll && through === undefined && this.loopDepth === 0);
+    } else if (this.mod.workers === true) {
+      // dso_local: executables link the runtime statically, so the word is
+      // addressed directly instead of through the GOT.
+      this.declare(`@scr_exc_alert = external dso_local global i32, align 64`);
+      word = B.tmp();
+      B.line(`${word} = load atomic i32, ptr @scr_exc_alert monotonic, align 64`);
+    } else {
+      this.declare(`@scr_exc_active = external global ptr`);
+      let cell: string;
+      if (B.excCellInvariant) {
+        // Fiber switches restore the active cell before control returns to a
+        // synchronous frame, so its pointer is one value for the whole call:
+        // load it once in the entry block and test only the kind here.
+        if (B.excCell === null) {
+          B.excCell = "%exc.cell";
+          B.entryAllocas.push(`${B.excCell} = load ptr, ptr @scr_exc_active`);
+        }
+        cell = B.excCell;
+      } else {
+        cell = B.tmp();
+        B.line(`${cell} = load ptr, ptr @scr_exc_active`);
+      }
+      word = B.tmp();
+      B.line(`${word} = load i32, ptr ${cell}`);
+    }
+    const hit = B.tmp();
+    const cold = B.tmp();
+    B.line(`${hit} = icmp ne i32 ${word}, 0`);
+    B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${hit}, i1 false)`);
     const lu = B.newLabel("exc.u");
     const lk = B.newLabel("exc.k");
-    B.condBr(p, lu, lk);
+    if (!exact) {
+      this.declare(`declare zeroext i1 @scr_exc_pending()`);
+      const slow = B.newLabel("exc.s");
+      B.condBr(cold, slow, lk);
+      B.startBlock(slow);
+      const p = B.tmp();
+      B.line(`${p} = call zeroext i1 @scr_exc_pending()`);
+      B.condBr(p, lu, lk);
+    } else {
+      B.condBr(cold, lu, lk);
+    }
     B.startBlock(lu);
-    this.emitUnwind();
+    this.emitUnwind(through);
     B.startBlock(lk);
+    if (skip !== undefined) {
+      B.br(skip);
+      B.startBlock(skip);
+    }
+  }
+
+  /** After a runtime call that ALWAYS leaves an exception pending (the
+   * compiler-resolved Node throws): the pending test would always answer
+   * true, so unwind unconditionally. Emission continues in a block with no
+   * predecessors so the caller's remaining instructions stay well-formed;
+   * LLVM deletes it. */
+  emitAlwaysPendingUnwind(): void {
+    const B = this.B;
+    if (B.isTerminated()) return;
+    this.emitUnwind();
+    B.startBlock(B.newLabel("exc.dead"));
+  }
+
+  /** Emits `line`, a `call` of `callee`, and reports whether the call
+   * needs no pending check after it: a call of an unwinding-ABI function
+   * becomes an `invoke` whose landing pad runs this frame's unwind (the
+   * same releases and handler as emitPendingCheck's unwind path), and the
+   * normal path continues in a fresh block. Coroutine bodies keep plain
+   * calls (unwindAbiFunctions excludes their callees). */
+  emitDirectCall(line: string, callee: string): boolean {
+    const B = this.B;
+    if (!this.unwindAbi.has(callee) || this.currentCoro !== null || B.isTerminated()) {
+      B.line(line);
+      return false;
+    }
+    const ok = B.newLabel("inv.ok");
+    const pad = B.newLabel("inv.lp");
+    this.usesLandingPads = true;
+    // A trailing comment goes after the invoke's labels.
+    const comment = line.indexOf(" ; ");
+    const text = comment < 0 ? line : line.slice(0, comment);
+    B.terminate(
+      `${text.replace(/^((?:%[\w.]+ = )?)call /, "$1invoke ")} to label %${ok} unwind label %${pad}`,
+    );
+    B.startBlock(pad);
+    const exception = B.tmp();
+    B.line(`${exception} = landingpad { ptr, i32 } cleanup`);
+    if (this.currentUnwindAbi) B.line(`store { ptr, i32 } ${exception}, ptr ${UNWIND_SLOT}`);
+    this.inLandingPad = true;
+    this.emitUnwind();
+    this.inLandingPad = false;
+    B.startBlock(ok);
+    return true;
+  }
+
+  /** Whether emitUnwind runs for a landing pad, whose unwind goes on with
+   * `resume` instead of raising again. */
+  private inLandingPad = false;
+
+  /** Whether the function being emitted has a landing pad (its definition
+   * needs the personality). */
+  usesLandingPads = false;
+
+  /** A recursive function's entry check: below the running stack's guard,
+   * throw Node's RangeError and unwind like any other pending exception. */
+  emitStackCheck(): void {
+    const B = this.B;
+    this.declare(`declare ptr @llvm.stacksave.p0()`);
+    this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
+    this.declare(`declare void @scr_stack_overflow()`);
+    const over = B.newLabel("stack.over");
+    const ok = B.newLabel("stack.ok");
+    const sp = B.tmp();
+    B.line(`${sp} = call ptr @llvm.stacksave.p0()`);
+    const test = (guard: string): void => {
+      const low = B.tmp();
+      const cold = B.tmp();
+      B.line(`${low} = icmp ult ptr ${sp}, ${guard}`);
+      B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${low}, i1 false)`);
+      B.condBr(cold, over, ok);
+    };
+    if (this.stackGuardTsd !== null) {
+      // A Darwin thread-local access is a call to its TLV thunk: read the
+      // guard from its thread-specific-data slot at the runtime-validated
+      // offset instead, and call out only when the runtime found no slot.
+      this.declare(`@scr_stack_guard_tsd = external dso_local global i64`);
+      this.declare(`declare i64 @scr_stack_guard_get()`);
+      const offset = B.tmp();
+      const direct = B.tmp();
+      const likely = B.tmp();
+      B.line(`${offset} = load i64, ptr @scr_stack_guard_tsd`);
+      B.line(`${direct} = icmp ne i64 ${offset}, 0`);
+      B.line(`${likely} = call i1 @llvm.expect.i1(i1 ${direct}, i1 true)`);
+      const fast = B.newLabel("stack.tsd");
+      const slow = B.newLabel("stack.tlv");
+      B.condBr(likely, fast, slow);
+      B.startBlock(fast);
+      const guard = B.tmp();
+      if (this.stackGuardTsd === "aarch64") {
+        this.declare(`declare i64 @llvm.read_register.i64(metadata)`);
+        const thread = B.tmp();
+        const base = B.tmp();
+        const slot = B.tmp();
+        const address = B.tmp();
+        B.line(`${thread} = call i64 @llvm.read_register.i64(metadata !{!"tpidrro_el0"})`);
+        B.line(`${base} = and i64 ${thread}, -8`);
+        B.line(`${slot} = add i64 ${base}, ${offset}`);
+        B.line(`${address} = inttoptr i64 ${slot} to ptr`);
+        B.line(`${guard} = load ptr, ptr ${address}`);
+      } else {
+        const address = B.tmp();
+        B.line(`${address} = inttoptr i64 ${offset} to ptr addrspace(256)`);
+        B.line(`${guard} = load ptr, ptr addrspace(256) ${address}`);
+      }
+      test(guard);
+      B.startBlock(slow);
+      // uintptr_t scr_stack_guard_get(void): an i64 in the C ABI.
+      const raw = B.tmp();
+      const fallback = B.tmp();
+      B.line(`${raw} = call i64 @scr_stack_guard_get()`);
+      B.line(`${fallback} = inttoptr i64 ${raw} to ptr`);
+      test(fallback);
+    } else {
+      const tl = this.mod.workers === true ? "thread_local " : "";
+      this.declare(`@scr_stack_guard = external ${tl}global ptr`);
+      const guard = B.tmp();
+      B.line(`${guard} = load ptr, ptr @scr_stack_guard`);
+      test(guard);
+    }
+    B.startBlock(over);
+    B.line(`call void @scr_stack_overflow()`);
+    this.emitUnwind();
+    B.startBlock(ok);
+  }
+
+  /** Whether the emitter follows this call with a pending test (the
+   * conditions in expr-calls.ts). */
+  private callTestsPending(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "call":
+        return this.mayThrow.has(e.callee);
+      case "new":
+        return this.mayThrow.has(`%${e.className}.constructor`);
+      case "virtualCall":
+        return this.mayThrowMethods.has(e.method);
+      case "callValue":
+        return this.indirectMayThrow;
+      default:
+        return false;
+    }
+  }
+
+  workerLoopBudget(
+    loop: Extract<IrStmt, { kind: "while" | "doWhile" | "for" | "forOf" }>,
+  ): string | null {
+    if (!this.mod.workers) return null;
+    // A loop that runs a pending test on every iteration observes a
+    // terminate request through it; a separate poll would only add work.
+    if (loopTestsEveryIteration(loop, (e) => this.callTestsPending(e))) return null;
+    const slot = this.B.slot();
+    this.B.entryAllocas.push(`${slot} = alloca i32 ; worker cancellation budget`);
+    this.B.line(`store i32 0, ptr ${slot}`);
+    return slot;
+  }
+  emitLoopCopies(
+    loop: Extract<IrStmt, { kind: "while" | "doWhile" | "for" }>,
+    allowed: boolean,
+    exit: string,
+    emitCopy: (exit: string) => void,
+  ): void {
+    return emitLoopCopies(this, loop, allowed, exit, emitCopy);
+  }
+
+  /** Store the double of each deferred shadow back to its binding. */
+  writeBackDeferred(deferred: Set<string>): void {
+    const B = this.B;
+    for (const id of deferred) {
+      const integer = B.tmp(),
+        number = B.tmp();
+      B.line(`${integer} = load i64, ptr ${this.integerLoopBindings.get(id)!.slot}`);
+      B.line(`${number} = sitofp i64 ${integer} to double`);
+      B.line(`store double ${number}, ptr ${this.binding(id).slot}`);
+    }
+  }
+
+  /** A number local whose only storage is its own double slot, so an i64
+   * shadow beside it can stand for it within one loop. */
+  speculativeLocal(id: string): boolean {
+    const local = this.currentLocals.get(id);
+    if (!local) return this.speculativeGlobal(id);
+    if (local.type.kind !== "f64" || local.boxed || local.tdz) return false;
+    return !(
+      this.captureIds.has(id) ||
+      this.int32Locals.has(id) ||
+      this.integerLoopBindings.has(id) ||
+      this.integerViews.has(id) ||
+      this.localUnionStorage.has(id) ||
+      this.reboundOwnerSlots.has(id) ||
+      this.lazyCaptureBoxes.has(id) ||
+      this.privateSplitLocals.has(id)
+    );
+  }
+
+  /** A module-level number written only by the file's top-level code that
+   * is emitting this loop. Calls may still read it: the fast copy keeps its
+   * double current. An init function runs once and is never re-entered, so
+   * no call from the loop can write the global behind the shadow. */
+  private speculativeGlobal(id: string): boolean {
+    if (!this.speculativeFunction.startsWith("%init.")) return false;
+    const writers = this.numberGlobalWriters(id);
+    return (
+      writers !== null &&
+      (writers.size === 0 || (writers.size === 1 && writers.has(this.speculativeFunction)))
+    );
+  }
+
+  /** A module-level number a loop of any function only reads, written by
+   * nothing but top-level code: an init function never runs during a loop
+   * of another function, so the entry value stays its value. */
+  speculativeInvariantGlobal(id: string): boolean {
+    const writers = this.numberGlobalWriters(id);
+    return writers !== null && [...writers].every((name) => name.startsWith("%init."));
+  }
+
+  /** The functions writing a number global a shadow may stand for, or null
+   * when the global is not such a number. */
+  private numberGlobalWriters(id: string): ReadonlySet<string> | null {
+    if (this.globalTypes.get(id)?.kind !== "f64") return null;
+    if (this.tdzGlobals.has(id) || this.integerViews.has(id)) return null;
+    if (!this.globalWriters) {
+      const writers = new Map<string, Set<string>>();
+      for (const fn of this.mod.functions) {
+        const note = (localId: string): void => {
+          if (!localId.startsWith("%g.")) return;
+          const set = writers.get(localId) ?? new Set<string>();
+          set.add(fn.name);
+          writers.set(localId, set);
+        };
+        eachNodeOfKinds(fn, this.nodeIndex.scan(GLOBAL_WRITE_KINDS), (node) => {
+          if (
+            node.kind === "assign" ||
+            node.kind === "varDecl" ||
+            node.kind === "assignExpr" ||
+            node.kind === "incDec"
+          )
+            note(node.localId);
+        });
+      }
+      this.globalWriters = writers;
+    }
+    return this.globalWriters.get(id) ?? new Set<string>();
+  }
+  private emitSpeculativeWrite(s: IrStmt, resume: string | undefined): void {
+    return emitSpeculativeWrite(this, s, resume);
+  }
+
+  /** The amortized cancellation poll, emitted on the loop's back edge (the
+   * continue target), after the body. A poll in the header would be a loop
+   * exit ahead of the body; LLVM then cannot rotate the loop, so loads that
+   * the body repeats on every iteration (a typed array's length, for one)
+   * stay in the loop. */
+  emitWorkerLoopCheck(slot: string | null): void {
+    if (slot === null) return;
+    const B = this.B;
+    const budget = B.tmp(),
+      due = B.tmp(),
+      remaining = B.tmp();
+    const poll = B.newLabel("worker.poll"),
+      next = B.newLabel("worker.next");
+    B.line(`${budget} = load i32, ptr ${slot}`);
+    B.line(`${remaining} = sub i32 ${budget}, 1`);
+    B.line(`store i32 ${remaining}, ptr ${slot}`);
+    B.line(`${due} = icmp eq i32 ${budget}, 0`);
+    B.condBr(due, poll, next);
+    B.startBlock(poll);
+    B.line(`store i32 63, ptr ${slot}`);
+    // Calls and throwing operations retain their own checks. Amortize the
+    // extra cancellation poll across bounded loop batches so scalar work
+    // does not cross the runtime ABI on every iteration.
+    this.emitPendingCheck(undefined, true);
+    B.br(next);
+    B.startBlock(next);
   }
 
   /** Moves an already-evaluated value into the runtime's exception cell —
@@ -2650,32 +4079,41 @@ export class LlEmitter {
     } else if (t.kind === "string") {
       this.declare(`declare void @scr_throw_str(ptr)`);
       B.line(`call void @scr_throw_str(ptr ${v.name})`);
-    } else if (t.kind === "object" && this.classMeta.get(t.className)?.hierarchy === true) {
+    } else if (
+      t.kind === "object" &&
+      this.classMeta.get(t.className)?.hierarchy === true &&
+      this.classMeta.get(t.className)?.idInRc !== true
+    ) {
       // Hierarchy instances carry a vtable word: the OBJ kind keeps the
       // dynamic class inspectable (catch-binding instanceof, the uncaught
-      // printer's "name: message" for Error instances).
+      // printer's "name: message" for Error instances). Instances that keep
+      // their class id in the rc word are never Errors and are thrown as
+      // REF payloads (narrow-guards.ts emitCaughtClassIdInstanceof).
       const rc = vAdapters(this.shapeHost, t);
       this.declare(`declare void @scr_throw_obj(ptr, ptr, ptr, ptr)`);
-      B.line(`call void @scr_throw_obj(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)})`);
-    } else if (t.kind === "symbol" || t.kind === "bigint" || t.kind === "func" || t.kind === "classval") {
+      B.line(
+        `call void @scr_throw_obj(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)})`,
+      );
+    } else if (
+      t.kind === "symbol" ||
+      t.kind === "bigint" ||
+      t.kind === "func" ||
+      t.kind === "classval"
+    ) {
       const rc = vAdapters(this.shapeHost, t);
       this.declare(`declare void @scr_throw_primitive_ref(ptr, ptr, ptr, ptr)`);
-      B.line(`call void @scr_throw_primitive_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr null)`);
+      B.line(
+        `call void @scr_throw_primitive_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr null)`,
+      );
     } else if (t.kind === "dyn") {
       this.declare(`declare void @scr_dyn_throw(ptr)`);
       B.line(`call void @scr_dyn_throw(ptr ${v.name})`);
-    } else if (t.kind === "jsval") {
-      const rc = vAdapters(this.shapeHost, t);
-      const test = "scr_jsval_is_object";
-      this.declare(`declare zeroext i1 @${test}(ptr)`);
-      this.declare(`declare void @scr_throw_ref_classified(ptr, ptr, ptr, ptr, i1 zeroext)`);
-      const object = B.tmp();
-      B.line(`${object} = call zeroext i1 @${test}(ptr ${v.name})`);
-      B.line(`call void @scr_throw_ref_classified(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)}, i1 zeroext ${object})`);
     } else {
       const rc = vAdapters(this.shapeHost, t);
       this.declare(`declare void @scr_throw_ref(ptr, ptr, ptr, ptr)`);
-      B.line(`call void @scr_throw_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)})`);
+      B.line(
+        `call void @scr_throw_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)})`,
+      );
     }
   }
 
@@ -2689,24 +4127,27 @@ export class LlEmitter {
       // The ARM value's ToBoolean: an inline tag switch (the runtime ABI’s
       // per-union interned helper, emitted at the use site instead).
       const def = this.unionsById.get(v.type.unionId);
-      if (!def) throw new InternalCompilerError(`llvm emitter bug: truthiness of unknown union ${v.type.unionId}`);
+      if (!def)
+        throw new InternalCompilerError(
+          `llvm emitter bug: truthiness of unknown union ${v.type.unionId}`,
+        );
+      const nullable = this.nullableUnions.get(def.id);
+      // Object arms are always truthy: present iff neither unit encoding.
+      if (nullable && isObjectArm(nullable)) return emitNullablePresent(B, nullable, v.name);
+      const unionId = def.id;
       const slot = B.slot();
       B.entryAllocas.push(`${slot} = alloca i1`);
       const join = B.newLabel("ut.j");
       this.unionTagSwitch(v.name, def, (arm) => {
         let valueName = "false";
         if (arm.kind === "f64" || arm.kind === "procStream") {
-          valueName = B.tmp();
-          this.declare(`declare double @scr_union_get_f64(ptr)`);
-          B.line(`${valueName} = call double @scr_union_get_f64(ptr ${v.name})`);
+          valueName = this.unionGetF64(v.name);
         } else if (arm.kind === "bool") {
-          valueName = B.tmp();
-          this.declare(`declare zeroext i1 @scr_union_get_bool(ptr)`);
-          B.line(`${valueName} = call zeroext i1 @scr_union_get_bool(ptr ${v.name})`);
+          valueName = this.unionGetBool(v.name);
         } else if (arm.kind === "string") {
-          valueName = this.unionPeek(v.name);
-        } else if (arm.kind === "bigint" || arm.kind === "dyn" || arm.kind === "jsval") {
-          valueName = this.unionPeek(v.name);
+          valueName = this.unionPeek(v.name, unionId);
+        } else if (arm.kind === "bigint" || arm.kind === "dyn") {
+          valueName = this.unionPeek(v.name, unionId);
         }
         const truthy = this.truthyOf(arm.kind, valueName, true);
         B.line(`store i1 ${truthy}, ptr ${slot}`);
@@ -2754,15 +4195,43 @@ export class LlEmitter {
       // Process streams use a numeric descriptor internally, including zero
       // for stdin. They remain JavaScript objects in boolean contexts.
       case "procStream":
+      // A module namespace object is always present.
+      case "moduleNs":
         return "true";
-      case "array": case "record": case "object": case "classval": case "func":
-      case "map": case "set": case "symbol": case "regex": case "promise": case "bytes":
-      case "url": case "searchParams": case "stats": case "fileHandle": case "spawnRes":
-      case "child": case "childStream": case "childWriter": case "generator": case "fsWatcher":
-      case "cryptoHash": case "cryptoHmac":
-      case "netSocket": case "netServer": case "httpReq": case "httpRes":
-      case "httpClientReq": case "http2Session": case "http2Stream":
-      case "dgramSocket": case "secureCtx": case "testCtx": {
+      case "array":
+      case "record":
+      case "object":
+      case "classval":
+      case "func":
+      case "map":
+      case "set":
+      case "symbol":
+      case "regex":
+      case "promise":
+      case "bytes":
+      case "url":
+      case "searchParams":
+      case "stats":
+      case "fileHandle":
+      case "dir":
+      case "spawnRes":
+      case "child":
+      case "childStream":
+      case "childWriter":
+      case "generator":
+      case "fsWatcher":
+      case "cryptoHash":
+      case "cryptoHmac":
+      case "netSocket":
+      case "netServer":
+      case "httpReq":
+      case "httpRes":
+      case "httpClientReq":
+      case "http2Session":
+      case "http2Stream":
+      case "dgramSocket":
+      case "secureCtx":
+      case "testCtx": {
         if (unionArm) return "true";
         const truthy = B.tmp();
         B.line(`${truthy} = icmp ne ptr ${valueName}, null`);
@@ -2774,14 +4243,8 @@ export class LlEmitter {
         B.line(`${truthy} = call zeroext i1 @scr_dyn_truthy(ptr ${valueName})`);
         return truthy;
       }
-      case "jsval": {
-        this.declare(`declare i32 @scr_jsval_truthy(ptr)`);
-        const raw = B.tmp();
-        const truthy = B.tmp();
-        B.line(`${raw} = call i32 @scr_jsval_truthy(ptr ${valueName})`);
-        B.line(`${truthy} = icmp ne i32 ${raw}, 0`);
-        return truthy;
-      }
+      case "jsval":
+        return jsTruthy(this, valueName);
       default:
         throw new LlvmUnsupportedError(`truthy:${unionArm ? "union:" : ""}${kind}`);
     }
@@ -2789,39 +4252,62 @@ export class LlEmitter {
 
   // ── union plumbing ──────────────────────────────────────────────────────
 
-  /** Loads a union box's tag (i32). */
-  unionTag(uName: string): string {
-    const p = this.B.tmp();
-    const t = this.B.tmp();
-    this.B.line(`${p} = getelementptr inbounds %ScrUnion, ptr ${uName}, i64 0, i32 1`);
-    this.B.line(`${t} = load i32, ptr ${p}`);
-    return t;
+  /** A union value's tag (i32): the box's tag word, or the NULL test of a
+   * nullable union's pointer. */
+  /** A box's tag and payload words are written only where the box is
+   * built (runtime constructors and untagged stack stores), so their loads
+   * carry their own alias tags: element and field stores cannot change
+   * them, and loops keep them hoisted. */
+  unionTag(uName: string, unionId: string): string {
+    return emitUnionTag(
+      this.B,
+      this.nullableUnions.get(unionId),
+      uName,
+      this.memoryAliasAttachment("union.tag"),
+    );
+  }
+
+  /** Guard for helpers that build or read a union's `%ScrUnion` box
+   * directly (library-shaped unions with fixed arms): a nullable union
+   * reaching one is an emitter bug and throws InternalCompilerError. */
+  requireBoxedUnion(unionId: string): void {
+    if (this.nullableUnions.has(unionId))
+      throw new InternalCompilerError(
+        `llvm emitter bug: nullable union ${unionId} reached a tagged-box helper`,
+      );
   }
 
   /** The BORROWED payload pointer of a ref arm (scr_union_peek inlined —
-   * the runtime's is a static inline). */
-  unionPeek(uName: string): string {
-    const p = this.B.tmp();
-    const t = this.B.tmp();
-    this.B.line(`${p} = getelementptr inbounds %ScrUnion, ptr ${uName}, i64 0, i32 5`);
-    this.B.line(`${t} = load ptr, ptr ${p}`);
-    return t;
+   * the runtime's is a static inline); a nullable union is its payload. */
+  unionPeek(uName: string, unionId: string): string {
+    return emitUnionPeek(
+      this.B,
+      this.nullableUnions.get(unionId),
+      uName,
+      this.memoryAliasAttachment("union.payload"),
+    );
   }
 
   /** Emits `switch` over a union's tag with one block per arm; each arm
    * body must TERMINATE its block (the callers branch to a join). The
    * default block is the runtime ABI’s invalid-tag abort. Shared field
    * reads can group equivalent storage prefixes and emit one representative. */
-  unionTagSwitch(uName: string, def: IrUnionDef, arm: (armType: IrType, tag: number) => void, fieldGroups?: number[][]): void {
+  unionTagSwitch(
+    uName: string,
+    def: IrUnionDef,
+    arm: (armType: IrType, tag: number) => void,
+    fieldGroups?: number[][],
+  ): void {
     const B = this.B;
-    const tag = this.unionTag(uName);
+    const tag = this.unionTag(uName, def.id);
     const bad = B.newLabel("u.bad");
     const labels: string[] = [];
     if (fieldGroups) {
       for (const group of fieldGroups) {
         const label = B.newLabel("u.a");
         for (const member of group) {
-          if (member === undefined) throw new InternalCompilerError("llvm emitter bug: missing union field tag");
+          if (member === undefined)
+            throw new InternalCompilerError("llvm emitter bug: missing union field tag");
           labels[member] = label;
         }
       }
@@ -2856,30 +4342,53 @@ export class LlEmitter {
   }
 
   /** The +1 extraction of a union's single narrowed arm (unionNarrow /
-   * the nullish-family reads): scalars via the runtime getters, ref arms
+   * the nullish-family reads): scalars via inline payload loads, ref arms
    * a retained peek. */
-  unionExtract(uName: string, arm: IrType): string {
-    const B = this.B;
-    if (arm.kind === "f64" || arm.kind === "procStream") {
-      const t = B.tmp();
-      this.declare(`declare double @scr_union_get_f64(ptr)`);
-      B.line(`${t} = call double @scr_union_get_f64(ptr ${uName})`);
-      return t;
-    }
-    if (arm.kind === "bool") {
-      const t = B.tmp();
-      this.declare(`declare zeroext i1 @scr_union_get_bool(ptr)`);
-      B.line(`${t} = call zeroext i1 @scr_union_get_bool(ptr ${uName})`);
-      return t;
-    }
-    return this.retainValue(this.unionPeek(uName), arm);
+  unionExtract(uName: string, unionId: string, arm: IrType): string {
+    if (arm.kind === "f64" || arm.kind === "procStream") return this.unionGetF64(uName);
+    if (arm.kind === "bool") return this.unionGetBool(uName);
+    return this.retainFrame(this.unionPeek(uName, unionId), arm);
+  }
+
+  /** A scalar f64 arm's payload (scr_union_get_f64 inlined). Inline loads
+   * keep stack boxes free of escaping calls, so LLVM can scalarize them. */
+  unionGetF64(uName: string): string {
+    const p = this.B.tmp();
+    const t = this.B.tmp();
+    this.B.line(`${p} = getelementptr inbounds %ScrUnion, ptr ${uName}, i64 0, i32 5`);
+    this.B.line(`${t} = load double, ptr ${p}`);
+    return t;
+  }
+
+  /** A bool arm's payload (scr_union_get_bool inlined: nonzero slot). */
+  unionGetBool(uName: string): string {
+    const p = this.B.tmp();
+    const bits = this.B.tmp();
+    const t = this.B.tmp();
+    this.B.line(`${p} = getelementptr inbounds %ScrUnion, ptr ${uName}, i64 0, i32 5`);
+    this.B.line(`${bits} = load i64, ptr ${p}`);
+    this.B.line(`${t} = icmp ne i64 ${bits}, 0`);
+    return t;
   }
 
   /** Constructs a union box around an OWNED (+1, already moved) value —
    * the scr_union_new_* dispatch of unionWrap and the wrap-into-join
    * sites (shift). */
-  unionNewOwned(tag: number, v: LlValue): string {
+  unionNewOwned(unionId: string, tag: number, v: LlValue): string {
     const B = this.B;
+    const nullable = this.nullableUnions.get(unionId);
+    if (nullable) {
+      // The owned payload IS the nullable union's value.
+      if (
+        nullable.repr === "single"
+          ? tag !== nullable.refTag
+          : !nullable.arms.some((arm) => arm.tag === tag)
+      )
+        throw new InternalCompilerError(
+          `llvm emitter bug: payload wrap into unit arm ${tag} of ${unionId}`,
+        );
+      return v.name;
+    }
     const t = B.tmp();
     if (v.type.kind === "f64" || v.type.kind === "procStream") {
       this.declare(`declare ptr @scr_union_new_f64(i32, double)`);
@@ -2901,6 +4410,15 @@ export class LlEmitter {
 
   // ── class plumbing ──────────────────────────────────────────────────────
 
+  /** `name` and every class whose membership interval falls in its own. */
+  private classSubtypes(name: string): string[] {
+    const target = this.classMetaOf(name);
+    const intervals = classMembershipIntervals(this.classMeta, target.def.name);
+    return [...this.classMeta.values()]
+      .filter((meta) => intervals.some((range) => range.pre <= meta.pre && meta.pre <= range.post))
+      .map((meta) => meta.def.name);
+  }
+
   classMetaOf(className: string): LlClassMeta {
     const meta = this.classMeta.get(className);
     if (!meta) throw new InternalCompilerError(`llvm emitter bug: unknown class ${className}`);
@@ -2911,29 +4429,91 @@ export class LlEmitter {
    * 1 on hierarchy members, then the flattened field list. Runtime error
    * classes GEP through %ScrError (their structs live in the runtime; the
    * def's [name, message, %code, %cause] order matches the layout). */
-  classFieldPtr(objName: string, className: string, field: string): { ptr: string; type: IrType } {
+  classFieldPtr(
+    objName: string,
+    className: string,
+    field: string,
+    refs: "pointer" | "compressed" = "pointer",
+  ): { ptr: string; type: IrType; inline: boolean; compressed: boolean } {
     const meta = this.classMetaOf(className);
-    const { index, type } = classFieldIndex(meta, field);
+    const { index, type, compressed } = classFieldIndex(meta, field, refs);
     const p = this.B.tmp();
     this.B.line(
       `${p} = getelementptr inbounds %${classStructSym(className)}, ptr ${objName}, i64 0, i32 ${index}`,
     );
     this.markFieldPointer(p, field);
-    return { ptr: p, type };
+    if (compressed) this.compressedFieldPtrs.add(p);
+    return { ptr: p, type, inline: this.inlineUnions.classField(className, field), compressed };
   }
 
-  /** `o->vt->pre` — the dynamic class's preorder number (borrowed object;
-   * the static class names which struct spelling carries the vt word). */
+  /** Whether values of `t` are NULL or a compact class instance: `C`,
+   * `C | undefined` or `C | null` for a compact class `C`. `C | null |
+   * undefined` is not: its null is a sentinel outside the region. */
+  compactRefType(
+    t: IrType,
+    isCompact: (className: string) => boolean = (name) =>
+      this.classMeta.get(name)?.compact === true,
+  ): boolean {
+    if (t.kind === "object") return isCompact(t.className);
+    if (t.kind !== "union") return false;
+    const single = this.nullableUnions.single(t.unionId);
+    return (
+      single !== null &&
+      single.nullTag < 0 &&
+      single.arm.kind === "object" &&
+      isCompact(single.arm.className)
+    );
+  }
+
+  /** Whether arrays of `elem` hold 32-bit references (SCR_ELEM_CREF). */
+  compactArrayElem(elem: IrType): boolean {
+    return this.compactRegion && this.compactRefType(elem);
+  }
+
+  /** Loads the reference a field pointer addresses: a pointer, or the
+   * decoded 32-bit reference of a compressed field (compressedFieldPtrs).
+   * `tagged`: the load carries the field's alias tags. */
+  loadRef(ptr: string, tagged = true): string {
+    const B = this.B;
+    const v = B.tmp();
+    const tags = tagged ? this.fieldAliasAttachment(ptr) : "";
+    if (!this.compressedFieldPtrs.has(ptr)) {
+      B.line(`${v} = load ptr, ptr ${ptr}${tags}`);
+      return v;
+    }
+    const idx = B.tmp();
+    B.line(`${idx} = load i32, ptr ${ptr}${tags}`);
+    for (const line of compactRefLoadLines(idx, v, `${v}.r`)) B.line(line.trimStart());
+    return v;
+  }
+
+  /** Stores `value` (a pointer) through a field pointer: as is, or encoded
+   * as the 32-bit reference of a compressed field. */
+  storeRef(ptr: string, value: string): void {
+    const B = this.B;
+    if (!this.compressedFieldPtrs.has(ptr)) {
+      B.line(`store ptr ${value}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
+      return;
+    }
+    const idx = B.tmp();
+    for (const line of compactRefStoreLines(value, idx, `${idx}.r`)) B.line(line.trimStart());
+    B.line(`store i32 ${idx}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
+  }
+
+  /** The dynamic class's preorder number (borrowed object; the static class
+   * names the struct spelling and where the number is, classPreLines). */
   loadVtPre(objName: string, staticClassName: string): string {
     const B = this.B;
-    const vtp = B.tmp();
-    const vt = B.tmp();
-    const prep = B.tmp();
     const pre = B.tmp();
-    B.line(`${vtp} = getelementptr inbounds %${classStructSym(staticClassName)}, ptr ${objName}, i64 0, i32 1`);
-    B.line(`${vt} = load ptr, ptr ${vtp}`);
-    B.line(`${prep} = getelementptr inbounds %ScrVt, ptr ${vt}, i64 0, i32 0`);
-    B.line(`${pre} = load ${this.sizeType}, ptr ${prep}`);
+    const meta = this.classMetaOf(staticClassName);
+    for (const line of classPreLines(
+      meta,
+      classStructSym(staticClassName),
+      objName,
+      pre,
+      this.sizeType,
+    ))
+      B.line(line.trimStart());
     return pre;
   }
 
@@ -2943,8 +4523,14 @@ export class LlEmitter {
   classObjSym(className: string): string {
     if (!this.classObjs.has(className)) {
       const meta = this.classMetaOf(className);
-      this.classObjs.set(className, { nameSym: this.internLiteral(meta.def.jsName ?? "") });
+      // util.inspect prints `[class C extends B]` with the base's name.
+      const baseName = meta.base ? classJsName(meta.base.def) : "";
+      this.classObjs.set(className, {
+        nameSym: this.internLiteral(classJsName(meta.def)),
+        baseNameSym: baseName ? this.internLiteral(baseName) : null,
+      });
     }
+    this.journal?.entry("classObj", className, this.classObjs.get(className));
     return mangleClassObj(className);
   }
 
@@ -2952,7 +4538,8 @@ export class LlEmitter {
 
   recordShape(shapeId: string): IrRecordShape {
     const shape = this.recordsById.get(shapeId);
-    if (!shape) throw new InternalCompilerError(`llvm emitter bug: unknown record shape ${shapeId}`);
+    if (!shape)
+      throw new InternalCompilerError(`llvm emitter bug: unknown record shape ${shapeId}`);
     return shape;
   }
 
@@ -2970,9 +4557,13 @@ export class LlEmitter {
       if (arm.kind === "record") {
         const shape = this.recordShape(arm.shapeId);
         const index = shape.fields.findIndex((entry) => entry.name === field);
-        if (index < 0) throw new InternalCompilerError(`llvm emitter bug: missing union field ${field}`);
-        layout = "record:";
-        for (let i = 0; i <= index; i++) layout += `${llFieldType(shape.fields[i]!.type)};`;
+        if (index < 0)
+          throw new InternalCompilerError(`llvm emitter bug: missing union field ${field}`);
+        layout = this.nullableUnions.fieldBase(arm.shapeId) === 2 ? "record:tagged;" : "record:";
+        for (let i = 0; i <= index; i++) {
+          const type = shape.fields[i]!.type;
+          layout += `${llFieldType(type, this.inlineUnions.record(type))};`;
+        }
       }
       const group = groups.get(layout);
       if (group) group.push(tag);
@@ -2983,35 +4574,69 @@ export class LlEmitter {
     return result;
   }
 
-  /** The field-slot pointer of a record member (rc header at index 0). */
-  recordFieldPtr(objName: string, shapeId: string, field: string): { ptr: string; type: IrType } {
+  /** The zeroed `%ScrUnion` constant (inline-unions.ts unionBoxBits). */
+  unionNoneRef(): string {
+    this.needsUnionNone = true;
+    return "@sc_union_none";
+  }
+
+  /** The field-slot pointer of a record member (rc header at index 0).
+   * `inline`: the slot stores a scalar union's tag and bits. */
+  recordFieldPtr(
+    objName: string,
+    shapeId: string,
+    field: string,
+  ): { ptr: string; type: IrType; inline: boolean } {
     const shape = this.recordShape(shapeId);
     const idx = shape.fields.findIndex((f) => f.name === field);
-    if (idx < 0) throw new InternalCompilerError(`llvm emitter bug: unknown field ${field} on shape ${shapeId}`);
+    if (idx < 0)
+      throw new InternalCompilerError(
+        `llvm emitter bug: unknown field ${field} on shape ${shapeId}`,
+      );
     const p = this.B.tmp();
     this.B.line(
-      `${p} = getelementptr inbounds %${mangleRecordStruct(shapeId)}, ptr ${objName}, i64 0, i32 ${idx + 1}`,
+      `${p} = getelementptr inbounds %${mangleRecordStruct(shapeId)}, ptr ${objName}, i64 0, i32 ${idx + this.nullableUnions.fieldBase(shapeId)}`,
     );
-    return { ptr: p, type: shape.fields[idx]!.type };
+    const type = shape.fields[idx]!.type;
+    return { ptr: p, type, inline: this.inlineUnions.record(type) };
   }
 
   /** The overflow map's slot pointer on an index-signature shape. */
   recordOvfPtr(objName: string, shapeId: string): string {
     const shape = this.recordShape(shapeId);
-    if (!shape.indexValue) throw new InternalCompilerError(`llvm emitter bug: shape ${shapeId} has no overflow map`);
+    if (!shape.indexValue)
+      throw new InternalCompilerError(`llvm emitter bug: shape ${shapeId} has no overflow map`);
     const p = this.B.tmp();
     const v = this.B.tmp();
     this.B.line(
-      `${p} = getelementptr inbounds %${mangleRecordStruct(shapeId)}, ptr ${objName}, i64 0, i32 ${shape.fields.length + 1}`,
+      `${p} = getelementptr inbounds %${mangleRecordStruct(shapeId)}, ptr ${objName}, i64 0, i32 ${shape.fields.length + this.nullableUnions.fieldBase(shapeId)}`,
     );
     this.B.line(`${v} = load ptr, ptr ${p}`);
     return v;
   }
 
-  /** Loads a record field (i8-stored bools trunc to i1). */
-  loadField(ptr: string, t: IrType): string {
+  /** The pointer to ScrMap.flags of an index-signature record's overflow
+   * map (byte offset sizeof(size_t) + 3; SCR_MAP_NULL_PROTO is bit 0). */
+  recordMapFlagsPtr(objName: string, shapeId: string): string {
+    const ovf = this.recordOvfPtr(objName, shapeId);
+    const p = this.B.tmp();
+    this.B.line(
+      `${p} = getelementptr inbounds i8, ptr ${ovf}, i64 ${mapFlagsOffset(this.sizeType)}`,
+    );
+    return p;
+  }
+
+  /** Loads a record field (i8-stored bools trunc to i1). An inline union
+   * field answers a private stack box with the slot's own bits, ABSENT
+   * included: it may only be borrowed. */
+  loadField(ptr: string, t: IrType, inline: boolean): string {
     const B = this.B;
-    const fieldTy = llFieldType(t);
+    if (inline) {
+      const { tag, bits } = loadInlineUnion(B, ptr);
+      return stackUnionBox(B, this.sizeType, tag, bits);
+    }
+    if (this.compressedFieldPtrs.has(ptr)) return this.loadRef(ptr);
+    const fieldTy = llFieldType(t, false);
     const raw = B.tmp();
     B.line(`${raw} = load ${fieldTy}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
     if (fieldTy !== "i8") return raw;
@@ -3020,10 +4645,52 @@ export class LlEmitter {
     return b;
   }
 
-  /** Stores a record field (i1 zext to the i8 storage). */
-  storeField(ptr: string, t: IrType, value: string): void {
+  /** A record field of this shape stores its scalar union inline. */
+  recordFieldInline(shapeId: string, field: string): boolean {
+    const type = this.recordShape(shapeId).fields.find((f) => f.name === field)?.type;
+    return type !== undefined && this.inlineUnions.record(type);
+  }
+
+  /** The value a field store writes: an inline union slot copies the tag
+   * and bits of a borrowed projection, so no box is built for it. */
+  emitFieldValue(value: IrExpr, inline: boolean): LlValue {
+    return inline ? this.emitUnionProjection(value) : this.emitExpr(value);
+  }
+
+  /** Overwrites a field with `v` (from emitFieldValue). A reference moves
+   * in, and the old value is released AFTER the field is overwritten. */
+  replaceField(ptr: string, type: IrType, inline: boolean, v: LlValue): void {
+    if (!inline && isRefCounted(type)) {
+      this.toHeap(v);
+      const old = this.loadRef(ptr, false);
+      this.storeField(ptr, type, v.name, false);
+      this.releaseHeap(old, type);
+      return;
+    }
+    this.storeField(ptr, type, v.name, inline);
+  }
+
+  /** Stores `v` (from emitFieldValue) into a fresh field slot. */
+  initField(ptr: string, type: IrType, inline: boolean, v: LlValue): void {
+    if (!inline && isRefCounted(type)) this.toHeap(v);
+    this.storeField(ptr, type, v.name, inline);
+  }
+
+  /** Stores a record field (i1 zext to the i8 storage). An inline union
+   * field copies the tag and bits of the union value, which its owner
+   * keeps. */
+  storeField(ptr: string, t: IrType, value: string, inline: boolean): void {
     const B = this.B;
-    const fieldTy = llFieldType(t);
+    if (inline) {
+      const { tag, bits } = unionBoxBits(B, value, this.unionNoneRef());
+      storeInlineUnion(B, ptr, tag, bits);
+      return;
+    }
+    if (this.compressedFieldPtrs.has(ptr)) {
+      this.storeRef(ptr, value);
+      return;
+    }
+    const fieldTy = llFieldType(t, false);
     if (fieldTy !== "i8") {
       B.line(`store ${fieldTy} ${value}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
       return;
@@ -3033,11 +4700,98 @@ export class LlEmitter {
     B.line(`store i8 ${z}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
   }
 
+  /** Reads an int32-specialized class field: the i32 slot is the value,
+   * and its widening is the exact double every program observation sees. */
+  loadInt32Field(ptr: string, type: IrType): LlValue {
+    const B = this.B;
+    const raw = B.tmp();
+    const number = B.tmp();
+    B.line(`${raw} = load i32, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
+    B.line(`${number} = sitofp i32 ${raw} to double`);
+    return {
+      name: number,
+      type,
+      uint32: raw,
+      integer: { name: raw, type: "i32", signed: true, range: INT32_RANGE },
+    };
+  }
+
+  /** Stores a value the whole-program analysis proved to be an int32 (never
+   * -0, NaN or fractional) into an int32-specialized class field. */
+  storeInt32Field(ptr: string, value: LlValue, expr: IrExpr): void {
+    if (!this.int32Slots.provenWrites.has(expr))
+      throw new InternalCompilerError("llvm emitter bug: unproven int32 field write");
+    const B = this.B;
+    let bits: string;
+    if (value.integer?.type === "i32") bits = value.integer.name;
+    else if (value.integer) {
+      bits = B.tmp();
+      B.line(`${bits} = trunc i64 ${value.integer.name} to i32`);
+    } else if (value.uint32 !== undefined) bits = value.uint32;
+    else {
+      bits = B.tmp();
+      B.line(`${bits} = fptosi double ${value.name} to i32`);
+    }
+    B.line(`store i32 ${bits}, ptr ${ptr}${this.fieldAliasAttachment(ptr)}`);
+  }
+
   // ── bindings ────────────────────────────────────────────────────────────
 
   /** A binding's storage: a module global, a plain local slot, or a boxed
    * local (the slot holds the capture BOX; access goes through it). */
-  binding(id: string): { kind: "global" | "local" | "boxed"; slot: string; type: IrType; local?: IrLocal } {
+  matchBytesLoopVersion(
+    s: IrStmt & { kind: "for" | "while" },
+    counted: IntegerCountedForLoop | null,
+    paired: IntegerPairedForLoop | null = null,
+  ): ReturnType<typeof matchBytesLoopVersion> {
+    const fn = LOOPS.of(this).bytesLoopFunction;
+    if (!fn) return null;
+    LOOPS.of(this).bytesLoopEntries ??= findInitializedByteLoopBindings(fn);
+    const initialized = LOOPS.of(this).bytesLoopEntries!.get(s);
+    if (!initialized) return null;
+    const invariantGlobals = new Set(this.stableGlobals);
+    for (const global of this.initializerBindings.get(fn.name) ?? [])
+      invariantGlobals.add(global.id);
+    return matchBytesLoopVersion(
+      s,
+      counted,
+      {
+        locals: this.currentLocals,
+        invariantGlobals,
+        captured: this.captureIds,
+        ranges: this.integerRanges,
+        initialized,
+        proven: this.bytesBounds,
+        workers: this.mod.workers === true,
+        owned: this.bytesOwned,
+        scalarStrings: new Set(this.stringSlices.keys()),
+        unitSafeFunctions: this.unitSafeFunctions(),
+      },
+      paired,
+    );
+  }
+
+  private unitSafe: ReadonlySet<string> | null | undefined;
+  /** The functions a loop over a string's UTF-16 units may call, or null
+   * where emitted reads do not use the runtime's scan receiver. */
+  private unitSafeFunctions(): ReadonlySet<string> | null {
+    if (this.unitSafe === undefined)
+      this.unitSafe = stringScanInline(this) ? unitSafeFunctions(this.mod) : null;
+    return this.unitSafe;
+  }
+
+  /** The alias tag of a whole-slot load of a binding (module globals only). */
+  slotAlias(id: string): string {
+    const binding = this.binding(id);
+    return binding.kind === "global" ? globalSlotAlias(this, id, binding.type.kind) : "";
+  }
+
+  binding(id: string): {
+    kind: "global" | "local" | "boxed";
+    slot: string;
+    type: IrType;
+    local?: IrLocal;
+  } {
     const local = this.currentLocals.get(id);
     if (local) {
       return {
@@ -3049,14 +4803,20 @@ export class LlEmitter {
     }
     const g = this.globalTypes.get(id);
     if (!g) throw new InternalCompilerError(`llvm emitter bug: unknown binding ${id}`);
-    return { kind: "global", slot: `@${mangleGlobal(id)}`, type: g };
+    return {
+      kind: "global",
+      slot: this.privateGlobalSlots.get(id) ?? `@${mangleGlobal(id)}`,
+      type: g,
+    };
   }
 
-  private emitDebugLocal(local: IrLocal, slot: string, arg = 0, captured = false): void {
+  emitDebugLocal(local: IrLocal, slot: string, arg = 0, captured = false): void {
     const debug = this.debug?.local(local, this.debugScope, arg, captured);
     if (!debug) return;
     this.declare("declare void @llvm.dbg.declare(metadata, metadata, metadata)");
-    this.B.entryAllocas.push(`call void @llvm.dbg.declare(metadata ptr ${slot}, metadata ${debug.variable}, metadata ${debug.expression}), !dbg ${debug.location}`);
+    this.B.entryAllocas.push(
+      `call void @llvm.dbg.declare(metadata ptr ${slot}, metadata ${debug.variable}, metadata ${debug.expression}), !dbg ${debug.location}`,
+    );
   }
 
   /** Loads a boxed binding's box pointer out of its slot. */
@@ -3066,16 +4826,51 @@ export class LlEmitter {
     return b;
   }
 
+  /** The function a call through `callee` is known to reach (a literal
+   * closure, or a binding the constant-callback census resolves) and the
+   * entry it calls directly. Async and generator functions stay indirect. */
+  knownCallbackTarget(callee: IrExpr): { known: IrFunction; direct: string } | undefined {
+    const knownName =
+      callee.kind === "closure"
+        ? callee.fnName
+        : callee.kind === "varRef"
+          ? this.currentConstantCallbacks.get(callee.localId)
+          : undefined;
+    const known = knownName ? this.fnByName.get(knownName) : undefined;
+    if (!known || known.async || known.generator) return undefined;
+    if (known.captures === undefined) {
+      this.fnValues.add(known.name);
+      return { known, direct: `@${mangleWrapper(known.name)}` };
+    }
+    return { known, direct: `@${this.callTarget(known.name)}` };
+  }
+
+  /** The payload slot of a capture box (ScrBox.slot, field 5). */
+  boxSlot(box: string): string {
+    const slot = this.B.tmp();
+    this.B.line(`${slot} = getelementptr inbounds %ScrBox, ptr ${box}, i32 0, i32 5`);
+    return slot;
+  }
+
   boxGet(box: string, t: IrType): string {
     const B = this.B;
     const acc = boxAccess(t);
     const r = B.tmp();
+    // Scalar payloads are read in place (scr_box_get_f64/bool are a
+    // memcpy and a nonzero test of the same slot), so LLVM can keep a
+    // captured number in a register across a loop of calls. They have an
+    // alias category of their own: every other access to a box's payload
+    // is untagged or a runtime call.
     if (acc === "f64") {
-      this.declare(`declare double @scr_box_get_f64(ptr)`);
-      B.line(`${r} = call double @scr_box_get_f64(ptr ${box})`);
+      B.line(
+        `${r} = load double, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else if (acc === "bool") {
-      this.declare(`declare zeroext i1 @scr_box_get_bool(ptr)`);
-      B.line(`${r} = call zeroext i1 @scr_box_get_bool(ptr ${box})`);
+      const raw = B.tmp();
+      B.line(
+        `${raw} = load i64, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
+      B.line(`${r} = icmp ne i64 ${raw}, 0`);
     } else {
       this.declare(`declare ptr @scr_box_get_ref(ptr)`);
       B.line(`${r} = call ptr @scr_box_get_ref(ptr ${box})`); // returns +1
@@ -3088,15 +4883,46 @@ export class LlEmitter {
     const B = this.B;
     const acc = boxAccess(t);
     if (acc === "f64") {
-      this.declare(`declare void @scr_box_set_f64(ptr, double)`);
-      B.line(`call void @scr_box_set_f64(ptr ${box}, double ${value})`);
+      B.line(
+        `store double ${value}, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else if (acc === "bool") {
-      this.declare(`declare void @scr_box_set_bool(ptr, i1 zeroext)`);
-      B.line(`call void @scr_box_set_bool(ptr ${box}, i1 ${value})`);
+      const raw = B.tmp();
+      B.line(`${raw} = zext i1 ${value} to i64`);
+      B.line(
+        `store i64 ${raw}, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else {
       this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
       B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${value})`);
     }
+  }
+
+  /** The box a new environment captures for `localId` (borrowed). An
+   * unchanged parameter gets one box on first capture, holding its own
+   * reference to the value; the function scope releases the cached box. */
+  captureBox(localId: string): string {
+    const cache = this.lazyCaptureBoxes.get(localId);
+    if (cache === undefined) return this.loadBox(`%${mangleLocal(localId)}`);
+    const B = this.B;
+    const type = this.currentLocals.get(localId)!.type;
+    const current = this.loadBox(cache);
+    const missing = B.tmp();
+    B.line(`${missing} = icmp eq ptr ${current}, null`);
+    const create = B.newLabel("lazy.box"),
+      join = B.newLabel("lazy.box.j");
+    B.condBr(missing, create, join);
+    B.startBlock(create);
+    const stack = this.lazyStackBoxes.get(localId);
+    const box = stack ?? B.tmp();
+    if (!stack) B.line(`${box} = ${boxNewCall(this.shapeHost, type)}`);
+    const value = B.tmp();
+    B.line(`${value} = load ${this.llType(type)}, ptr %${mangleLocal(localId)}`);
+    this.boxSet(box, type, isRefCounted(type) ? this.retainHeap(value, type) : value);
+    B.line(`store ptr ${box}, ptr ${cache}`);
+    B.br(join);
+    B.startBlock(join);
+    return this.loadBox(cache);
   }
 
   retainBox(box: string): string {
@@ -3109,28 +4935,47 @@ export class LlEmitter {
   /** The initializing write of a scalar TDZ box: mint the one-element
    * array cell holding the value and move it into the ARR-kind box
    * (set_ref releases nothing — the slot was the empty sentinel). */
-  private tdzScalarInit(box: string, t: IrType, value: string): void {
+  tdzScalarInit(box: string, t: IrType, value: string): void {
     const B = this.B;
     const acc = boxAccess(t);
     const cell = B.tmp();
     B.line(`${cell} = ${arrNewCall(this.shapeHost, t, "1")} ; TDZ cell`);
-    this.arrPush(cell, acc === "bool" ? "bool" : "f64", value);
+    this.arrPush(cell, acc === "bool" ? "bool" : "f64", value, null);
     this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
     B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${cell})`);
+  }
+
+  /** The payload a TDZ box holds before its declaration runs, when that is
+   * not NULL. A nullable union's value is its arm pointer with NULL as a
+   * unit arm (nullable-unions.ts), so a stored `null`/`undefined` would
+   * read back as the temporal dead zone; such boxes start at the module's
+   * immortal NULLABLE_ABSENT sentinel instead, which no value of the
+   * binding can hold and every RC entry point and the collector skip. */
+  tdzEmptySentinel(t: IrType): string | null {
+    if (!this.nullableUnions.of(t)) return null;
+    this.needsNullableAbsent = true;
+    this.immortalValues.add(NULLABLE_ABSENT);
+    return NULLABLE_ABSENT;
   }
 
   /** The TDZ-guarded read of a boxed binding: an empty payload slot is
    * the temporal dead zone — throw Node's exact catchable ReferenceError
    * (exprs.ts's varRef guard). Scalars then peek the one-element
    * array cell; ref kinds read the box normally (+1). */
-  private checkTdz(box: string, name: string): string {
+  private checkTdz(box: string, t: IrType, name: string): string {
     const B = this.B;
     const slotp = B.tmp();
     const slotv = B.tmp();
     const empty = B.tmp();
     B.line(`${slotp} = getelementptr inbounds %ScrBox, ptr ${box}, i64 0, i32 5`);
-    B.line(`${slotv} = load i64, ptr ${slotp}`);
-    B.line(`${empty} = icmp eq i64 ${slotv}, 0`);
+    const sentinel = this.tdzEmptySentinel(t);
+    if (sentinel !== null) {
+      B.line(`${slotv} = load ptr, ptr ${slotp}`);
+      B.line(`${empty} = icmp eq ptr ${slotv}, ${sentinel}`);
+    } else {
+      B.line(`${slotv} = load i64, ptr ${slotp}`);
+      B.line(`${empty} = icmp eq i64 ${slotv}, 0`);
+    }
     this.throwIfUninitialized(empty, name);
     return slotv;
   }
@@ -3143,6 +4988,13 @@ export class LlEmitter {
     const empty = B.tmp();
     B.line(`${value} = load ptr, ptr @${mangleGlobal(id)}`);
     B.line(`${empty} = icmp eq ptr ${value}, null`);
+    this.throwIfUninitialized(empty, name);
+  }
+
+  /** Throws the TDZ ReferenceError for `name` unless the i1 `flag` is set. */
+  checkInitializedFlag(flag: string, name: string): void {
+    const empty = this.B.tmp();
+    this.B.line(`${empty} = xor i1 ${flag}, true`);
     this.throwIfUninitialized(empty, name);
   }
 
@@ -3163,7 +5015,7 @@ export class LlEmitter {
   }
 
   tdzBoxRead(box: string, t: IrType, name: string): string {
-    const slotv = this.checkTdz(box, name);
+    const slotv = this.checkTdz(box, t, name);
     const B = this.B;
     const acc = boxAccess(t);
     if (acc === "ref") return this.boxGet(box, t);
@@ -3172,7 +5024,9 @@ export class LlEmitter {
     const cell = B.tmp();
     B.line(`${cell} = inttoptr i64 ${slotv} to ptr`);
     const accTy = acc === "bool" ? "i1" : "double";
-    this.declare(`declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_get_${acc}(ptr, double)`);
+    this.declare(
+      `declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_get_${acc}(ptr, double)`,
+    );
     const v = B.tmp();
     B.line(`${v} = call ${accTy} @scr_arr_get_${acc}(ptr ${cell}, double ${f64Lit(0)})`);
     return v;
@@ -3180,10 +5034,16 @@ export class LlEmitter {
 
   /** Declaration stores initialize an empty TDZ box. Later stores check
    * it after the RHS and update scalar cells in place. References move in. */
-  writeBindingBox(box: string, local: IrLocal, value: string, initializes = false, borrowed = false): void {
+  writeBindingBox(
+    box: string,
+    local: IrLocal,
+    value: string,
+    initializes = false,
+    borrowed = false,
+  ): void {
     if (local.tdz) {
       const first = initializes || !local.mutable;
-      const slotv = first ? null : this.checkTdz(box, local.name);
+      const slotv = first ? null : this.checkTdz(box, local.type, local.name);
       const acc = boxAccess(local.type);
       if (acc !== "ref") {
         if (first) this.tdzScalarInit(box, local.type, value);
@@ -3191,16 +5051,43 @@ export class LlEmitter {
           const cell = this.B.tmp();
           this.B.line(`${cell} = inttoptr i64 ${slotv!} to ptr`);
           const ty = acc === "bool" ? "i1" : "double";
-          this.declare(`declare void @scr_arr_set_${acc}(ptr, double, ${acc === "bool" ? "i1 zeroext" : ty})`);
-          this.B.line(`call void @scr_arr_set_${acc}(ptr ${cell}, double ${f64Lit(0)}, ${ty} ${value})`);
+          this.declare(
+            `declare void @scr_arr_set_${acc}(ptr, double, ${acc === "bool" ? "i1 zeroext" : ty})`,
+          );
+          this.B.line(
+            `call void @scr_arr_set_${acc}(ptr ${cell}, double ${f64Lit(0)}, ${ty} ${value})`,
+          );
         }
         return;
       }
     }
-    this.boxSet(box, local.type, borrowed && isRefCounted(local.type) ? this.retainValue(value, local.type) : value);
+    this.boxSet(
+      box,
+      local.type,
+      borrowed && isRefCounted(local.type) ? this.retainHeap(value, local.type) : value,
+    );
   }
 
   // ── functions ───────────────────────────────────────────────────────────
+
+  /** True when `fnName`'s borrowing body lends every reference parameter
+   * and returns an owned result: a closure over it then carries that body
+   * as its borrowing entry (ScrClosure.fn_borrowed), which callers that
+   * keep their arguments alive across the call may enter instead of `fn`. */
+  lendsEveryArgument(fnName: string): boolean {
+    const fn = this.fnByName.get(fnName);
+    if (!fn || fn.async || fn.generator || this.borrowedReturns.has(fnName)) return false;
+    if (fn.classCaptures !== undefined || this.implSlotBorrowed(fnName).size > 0) return false;
+    const borrowed = this.callLifetimes.borrowed.get(fnName);
+    if (!borrowed) return false;
+    let any = false;
+    for (const [index, param] of fn.params.entries()) {
+      if (!isRefCounted(param.type)) continue;
+      if (!borrowed.has(index)) return false;
+      any = true;
+    }
+    return any;
+  }
 
   /** The LLVM symbol a direct call or closure enters a function through:
    * async bodies are entered via their emitted spawn wrapper (which runs
@@ -3218,8 +5105,9 @@ export class LlEmitter {
    * whether the promise waiter list or the ready FIFO owns the continuation;
    * LLVM keeps all live locals in the coroutine frame. */
   emitWasiSuspend(promise: string | null): void {
-    const coro = this.currentWasiCoro;
-    if (coro === null) throw new InternalCompilerError("llvm emitter bug: wasm suspension outside async body");
+    const coro = this.currentCoro;
+    if (coro === null)
+      throw new InternalCompilerError("llvm emitter bug: wasm suspension outside async body");
     if (promise === null) {
       this.declare(`declare void @scr_wasi_await_hop_prepare(ptr)`);
       this.B.line(`call void @scr_wasi_await_hop_prepare(ptr ${coro.self})`);
@@ -3227,14 +5115,116 @@ export class LlEmitter {
       this.declare(`declare void @scr_wasi_await_prepare(ptr, ptr)`);
       this.B.line(`call void @scr_wasi_await_prepare(ptr ${coro.self}, ptr ${promise})`);
     }
-    this.emitWasiSuspendPrepared();
+    this.emitCoroSuspendPrepared();
+  }
+
+  /** Awaits in the current body suspend its coroutine: every wasm32 async
+   * body, and native stackless async bodies (selectStacklessAsync). */
+  get coroAwait(): boolean {
+    return this.wasi || this.currentCoro?.kind === "async";
+  }
+
+  /** Suspends the current coroutine body at an await of `promise` (null: a
+   * single microtask hop, as for a non-promise operand). A native body
+   * suspends unless the runtime continues it in place, where a fiber's
+   * hop would continue without switching (scr_coro_await_prepare). */
+  emitCoroAwait(promise: string | null): void {
+    if (this.wasi) {
+      this.emitWasiSuspend(promise);
+      return;
+    }
+    const coro = this.currentCoro;
+    if (coro === null)
+      throw new InternalCompilerError("llvm emitter bug: await suspension outside a coroutine");
+    const B = this.B;
+    const suspend = B.tmp();
+    if (promise === null) {
+      this.declare(`declare zeroext i1 @scr_coro_hop_prepare(ptr)`);
+      B.line(`${suspend} = call zeroext i1 @scr_coro_hop_prepare(ptr ${coro.self})`);
+    } else {
+      this.declare(`declare zeroext i1 @scr_coro_await_prepare(ptr, ptr)`);
+      B.line(
+        `${suspend} = call zeroext i1 @scr_coro_await_prepare(ptr ${coro.self}, ptr ${promise})`,
+      );
+    }
+    const park = B.newLabel("await.suspend");
+    const ready = B.newLabel("await.ready");
+    B.condBr(suspend, park, ready);
+    B.startBlock(park);
+    this.emitCoroSuspendPrepared();
+    B.br(ready);
+    B.startBlock(ready);
+  }
+
+  /** The runtime entry extracting an await's result of `kind`. A native
+   * coroutine has already suspended until the promise settled, so its
+   * extraction takes no further turn. */
+  awaitResultFn(kind: "void" | "f64" | "bool" | "str" | "ref"): string {
+    return !this.wasi && this.currentCoro?.kind === "async"
+      ? `scr_coro_await_${kind}`
+      : `scr_await_${kind}`;
+  }
+
+  /** A native generator's OUT slot (scr_async.c's ScrGen.out, mirrored by
+   * %ScrGenHead and %ScrGenSlot { kind, f64, b, payload, release_fn }). */
+  genOutSlot(gen: string): string {
+    this.usesGenSlots = true;
+    const slot = this.B.tmp();
+    this.B.line(`${slot} = getelementptr inbounds %ScrGenHead, ptr ${gen}, i32 0, i32 4`);
+    return slot;
+  }
+
+  /** A yield on a number or boolean channel: scr_gen_slot_f64/bool inline.
+   * Such a body's OUT never holds a reference at a yield (only its final
+   * completion can park one), so the slot needs no release first. */
+  emitGenSlotStore(slot: string, kind: "f64" | "bool", value: string): void {
+    const B = this.B;
+    const field = B.tmp();
+    if (kind === "f64") {
+      B.line(`store i32 ${SCR_EXC_F64}, ptr ${slot}`);
+      B.line(`${field} = getelementptr inbounds %ScrGenSlot, ptr ${slot}, i32 0, i32 1`);
+      B.line(`store double ${value}, ptr ${field}`);
+    } else {
+      const byte = B.tmp();
+      B.line(`store i32 ${SCR_EXC_BOOL}, ptr ${slot}`);
+      B.line(`${field} = getelementptr inbounds %ScrGenSlot, ptr ${slot}, i32 0, i32 2`);
+      B.line(`${byte} = zext i1 ${value} to i8`);
+      B.line(`store i8 ${byte}, ptr ${field}`);
+    }
+  }
+
+  /** scr_gen_take_out_f64/bool inline: the slot's value when it holds that
+   * kind (otherwise 0 or false), leaving the slot empty. */
+  emitGenSlotTake(slot: string, kind: "f64" | "bool"): string {
+    const B = this.B;
+    const tag = B.tmp(),
+      matches = B.tmp(),
+      field = B.tmp(),
+      raw = B.tmp(),
+      out = B.tmp();
+    B.line(`${tag} = load i32, ptr ${slot}`);
+    B.line(`${matches} = icmp eq i32 ${tag}, ${kind === "f64" ? SCR_EXC_F64 : SCR_EXC_BOOL}`);
+    if (kind === "f64") {
+      B.line(`${field} = getelementptr inbounds %ScrGenSlot, ptr ${slot}, i32 0, i32 1`);
+      B.line(`${raw} = load double, ptr ${field}`);
+      B.line(`${out} = select i1 ${matches}, double ${raw}, double 0.0`);
+    } else {
+      const bit = B.tmp();
+      B.line(`${field} = getelementptr inbounds %ScrGenSlot, ptr ${slot}, i32 0, i32 2`);
+      B.line(`${raw} = load i8, ptr ${field}`);
+      B.line(`${bit} = trunc i8 ${raw} to i1`);
+      B.line(`${out} = select i1 ${matches}, i1 ${bit}, i1 false`);
+    }
+    B.line(`store i32 0, ptr ${slot}`);
+    return out;
   }
 
   /** Suspend after a target-specific runtime helper already queued the
    * continuation (used by module awaits, which skip the hop when settled). */
-  emitWasiSuspendPrepared(): void {
-    const coro = this.currentWasiCoro;
-    if (coro === null) throw new InternalCompilerError("llvm emitter bug: wasm suspension outside async body");
+  emitCoroSuspendPrepared(): void {
+    const coro = this.currentCoro;
+    if (coro === null)
+      throw new InternalCompilerError("llvm emitter bug: wasm suspension outside async body");
     const save = this.B.tmp();
     const state = this.B.tmp();
     const resume = this.B.newLabel("coro.resume");
@@ -3245,327 +5235,843 @@ export class LlEmitter {
     );
     this.B.startBlock(resume);
   }
+  emitWasiFulfill(v: LlValue | null): void {
+    return emitWasiFulfill(this, v);
+  }
 
-  /** Move a clean async return value into the current fiber's promise. */
-  private emitWasiFulfill(v: LlValue | null): void {
-    const coro = this.currentWasiCoro;
-    if (coro === null) throw new InternalCompilerError("llvm emitter bug: wasm fulfillment outside async body");
-    const ret = this.currentReturnType;
-    if (coro.kind === "generator") {
-      this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
-      const gen = this.B.tmp();
-      this.B.line(`${gen} = call ptr @scr_gen_of_fiber(ptr ${coro.self})`);
-      switch (ret.kind) {
-        case "void":
-          return;
-        case "f64":
-        case "date":
-          this.declare(`declare void @scr_gen_out_f64(ptr, double)`);
-          this.B.line(`call void @scr_gen_out_f64(ptr ${gen}, double ${v!.name})`);
-          return;
-        case "bool":
-          this.declare(`declare void @scr_gen_out_bool(ptr, i1 zeroext)`);
-          this.B.line(`call void @scr_gen_out_bool(ptr ${gen}, i1 ${v!.name})`);
-          return;
-        default:
-          this.declare(`declare void @scr_gen_out_ref(ptr, ptr, ptr)`);
-          this.B.line(`call void @scr_gen_out_ref(ptr ${gen}, ptr ${v!.name}, ptr ${vAdapters(this.shapeHost, ret).release})`);
-          return;
-      }
+  /** Number locals declared as a copy of a capture or of a lazily boxed
+   * parameter, at the top of the body. */
+  doubleCopies(fn: IrFunction): string[] {
+    const copies: string[] = [];
+    for (const s of fn.body) {
+      if (s.kind !== "varDecl") break;
+      if (s.init?.kind !== "varRef" || s.init.type.kind !== "f64") continue;
+      const source = s.init.localId;
+      if (this.captureIds.has(source) || this.lazyCaptureBoxes.has(source)) copies.push(s.localId);
     }
-    this.declare(`declare ptr @scr_fiber_promise(ptr)`);
-    const pr = this.B.tmp();
-    this.B.line(`${pr} = call ptr @scr_fiber_promise(ptr ${coro.self})`);
-    switch (ret.kind) {
-      case "void":
-        this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
-        this.B.line(`call void @scr_promise_fulfill_void(ptr ${pr})`);
-        break;
-      case "f64":
-      case "date":
-        this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
-        this.B.line(`call void @scr_promise_fulfill_f64(ptr ${pr}, double ${v!.name})`);
-        break;
-      case "bool":
-        this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
-        this.B.line(`call void @scr_promise_fulfill_bool(ptr ${pr}, i1 ${v!.name})`);
-        break;
-      case "string":
-        this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
-        this.B.line(`call void @scr_promise_fulfill_str(ptr ${pr}, ptr ${v!.name}) ; moves in`);
-        break;
-      case "dyn":
-        this.declare(`declare void @scr_promise_resolve_dyn(ptr, ptr)`);
-        this.B.line(`call void @scr_promise_resolve_dyn(ptr ${pr}, ptr ${v!.name}) ; moves in`);
-        break;
-      default: {
-        const rc = vAdapters(this.shapeHost, ret);
-        this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
-        this.B.line(
-          `call void @scr_promise_fulfill_ref(ptr ${pr}, ptr ${v!.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, ret)})`,
+    return copies;
+  }
+  emitFunction(fn: IrFunction): string {
+    return emitFunction(this, fn);
+  }
+
+  /** What this range emitter (chunkEmitter) hands the merging emitter, as
+   * plain data a worker process can write: its journal and the sets and
+   * flags its functions set. */
+  chunkResult(): ChunkResult {
+    return {
+      entries: this.journal!.entries,
+      debugRequests: this.debug?.recorded() ?? [],
+      flags: {
+        usesCoroutines: this.usesCoroutines,
+        usesTimers: this.usesTimers,
+        usesGenSlots: this.usesGenSlots,
+        needsUnionNone: this.needsUnionNone,
+        needsNullableAbsent: this.needsNullableAbsent,
+        needsOom: this.needsOom,
+        needsBadTag: this.needsBadTag,
+        needsBadKey: this.needsBadKey,
+        needsRetainBox: this.needsRetainBox,
+      },
+      publishedNamesSym: this.publishedNamesSym,
+      rcHelpers: this.rcHelpers === null ? [] : [...this.rcHelpers],
+      immortalValues: [...this.immortalValues],
+      fnValues: [...this.fnValues],
+      arraySearchKinds: [...this.arraySearchKinds],
+      recordCloneShapes: [...this.recordCloneShapes],
+      awaitCallees: [...this.awaitCallees],
+      adoptCallees: [...this.adoptCallees],
+      directAwaitCallees: [...this.directAwaitCallees],
+      inlineAwaitCallees: [...this.inlineAwaitCallees],
+    };
+  }
+
+  /** Merges a range emitter's result (chunkResult) into this emitter, in
+   * the range's order, and answers the rename of the range's text to this
+   * emitter's numbered helpers. Ranges merge in function order. */
+  mergeChunk(chunk: ChunkResult): (text: string) => string {
+    const names = new Map<string, string>();
+    const tags = new Map<number, number>();
+    // The range's helpers and table entries first, in its order; then the
+    // sets and flags, which replayed definitions must find as serial
+    // emission left them (a helper set guards the declarations its first
+    // request adds).
+    replayJournal(this, chunk.entries, names, tags);
+    const debugIds = new Map<string, string>();
+    this.debug?.replay(chunk.debugRequests, (name) => this.functionNamed(name), debugIds);
+    const flags = chunk.flags;
+    this.usesCoroutines ||= flags.usesCoroutines;
+    this.usesTimers ||= flags.usesTimers;
+    this.usesGenSlots ||= flags.usesGenSlots;
+    this.needsUnionNone ||= flags.needsUnionNone;
+    this.needsNullableAbsent ||= flags.needsNullableAbsent;
+    this.needsOom ||= flags.needsOom;
+    this.needsBadTag ||= flags.needsBadTag;
+    this.needsBadKey ||= flags.needsBadKey;
+    this.needsRetainBox ||= flags.needsRetainBox;
+    this.publishedNamesSym ??= chunk.publishedNamesSym;
+    if (this.rcHelpers !== null) for (const key of chunk.rcHelpers) this.rcHelpers.add(key);
+    for (const name of chunk.immortalValues) this.immortalValues.add(name);
+    for (const name of chunk.fnValues) this.fnValues.add(name);
+    for (const kind of chunk.arraySearchKinds) this.arraySearchKinds.add(kind as ArraySearchKind);
+    for (const shapeId of chunk.recordCloneShapes) this.recordCloneShapes.add(shapeId);
+    for (const name of chunk.awaitCallees) this.awaitCallees.add(name);
+    for (const name of chunk.adoptCallees) this.adoptCallees.add(name);
+    for (const name of chunk.directAwaitCallees) this.directAwaitCallees.add(name);
+    for (const name of chunk.inlineAwaitCallees) this.inlineAwaitCallees.add(name);
+    return renameChunk(names, tags, debugIds);
+  }
+
+  private functionNamed(name: string): IrFunction {
+    const fn = this.fnByName.get(name);
+    if (fn === undefined) throw new InternalCompilerError(`llvm emitter bug: no function ${name}`);
+    return fn;
+  }
+
+  /** Adds a content-named constant a chunk interned. Its symbol is this
+   * emitter's own: a digest collision retries in first-use order, which a
+   * chunk alone does not know. */
+  private addContentEntry<V extends { sym: string }>(
+    into: Map<string, V>,
+    key: string,
+    entry: V,
+    prefix: string,
+    names: Map<string, string>,
+  ): void {
+    let own = into.get(key);
+    if (own === undefined) {
+      own = { ...entry, sym: this.contentSymbol(prefix, key) };
+      into.set(key, own);
+    }
+    if (own.sym !== entry.sym) names.set(entry.sym, own.sym);
+  }
+
+  /** Applies a chunk's table entry (EmitJournal.entry) at its place in the
+   * chunk's order: a key this emitter lacks is added, numbered after its
+   * own entries where the table numbers them, and the chunk's name for it
+   * is renamed to this emitter's. */
+  applyJournalEntry(
+    table: string,
+    key: string,
+    value: unknown,
+    names: Map<string, string>,
+    tags: Map<number, number>,
+  ): void {
+    switch (table) {
+      case "decl":
+        this.decls.add(key);
+        return;
+      case "literal":
+        this.addContentEntry(
+          this.literals,
+          key,
+          value as { sym: string; len: number },
+          "sc_lit_",
+          names,
         );
+        return;
+      case "literalEquality":
+        addEntry(this.literalEqualities, key, value as string);
+        return;
+      case "bigint":
+        {
+          const entry = value as { sym: string; value: string };
+          this.addContentEntry(
+            this.bigintLiterals,
+            key,
+            { sym: entry.sym, value: BigInt(entry.value) },
+            "sc_bigint_",
+            names,
+          );
+        }
+        return;
+      case "cstr":
+        this.addContentEntry(
+          this.cstrs,
+          key,
+          value as { sym: string; len: number },
+          "sc_cs_",
+          names,
+        );
+        return;
+      case "mapOps": {
+        let own = this.mapOpsConsts.get(key);
+        if (own === undefined) {
+          own = this.contentSymbol("sc_map_ops_", key);
+          this.mapOpsConsts.set(key, own);
+        }
+        if (own !== value) names.set(value as string, own);
+        return;
       }
+      case "methodIdSlot": {
+        let own = this.methodIdSlots.get(key);
+        if (own === undefined) {
+          own = this.contentSymbol("sc_mid_", key);
+          this.methodIdSlots.set(key, own);
+        }
+        if (own !== value) names.set(value as string, own);
+        return;
+      }
+      case "classObj":
+        addEntry(this.classObjs, key, value as { nameSym: string; baseNameSym: string | null });
+        return;
+      case "retainWrapper":
+        addEntry(this.nullableUnions.retainWrappers, key, value as string);
+        return;
+      case "unit":
+        return addNumbered(this.unitInstances, key, value as string, "sc_unit_", names);
+      case "absent":
+        return addNumbered(this.absentInstances, key, value as string, "sc_absent_", names);
+      case "retype":
+        return addNumbered(this.retypeGuards, key, value as string, "sc_retype_guard_", names);
+      case "slots":
+        return addNumbered(this.threadSlotsBlocks, key, value as string, "@sc_slots_", names);
+      case "regex":
+        return addNumberedSymbol(this.regexInstances, key, value as never, "sc_re_", names);
+      case "templateStrings":
+        return addNumberedSymbol(
+          this.templateStringsInstances,
+          key,
+          value as never,
+          "sc_tsa_",
+          names,
+        );
+      case "tag": {
+        let own = this.fieldAliasTags.get(key);
+        if (own === undefined) {
+          own = 2 + this.fieldAliasTags.size * 2;
+          this.fieldAliasTags.set(key, own);
+        }
+        if (own !== value) tags.set(value as number, own);
+        return;
+      }
+      default:
+        throw new InternalCompilerError(`llvm emitter bug: no journal table ${table}`);
     }
   }
 
-  private emitFunction(fn: IrFunction): string {
-    const B = new BlockBuilder();
-    this.B = B;
-    this.debugScope = this.debug?.function(fn) ?? null;
-    B.debugLocation = this.debug?.location(fn.loc, this.debugScope) ?? null;
-    this.frames = [];
-    this.scopes = [];
-    this.unwindCleanups.clear();
-    this.jumpTargets = [];
-    this.currentLocals = new Map(fn.locals.map((l) => [l.id, l]));
-    this.borrowedParameters.clear();
-    const borrowedParameterIndexes = this.callLifetimes.parameters.get(fn.name);
-    if (borrowedParameterIndexes) {
-      for (const index of borrowedParameterIndexes) this.borrowedParameters.add(fn.params[index]!.localId);
-    }
-    this.captureIds = new Set([...(fn.captures ?? []), ...(fn.classCaptures ?? [])].map((c) => c.localId));
-    this.integerLoopBindings.clear();
-    this.integerViews.clear();
-    this.fieldPointerTags.clear();
-    this.integerArrayBindings.clear();
-    this.localArrayReads = findLocalArrayReads(fn, this.fnByName, this.unionsById, this.arrayPreservingFunctions, this.callLifetimes, this.optionalArrayReads);
-    this.callArrayReads = findCallArrayReads(fn, this.optionalArrayReads, this.arrayPreservingFunctions, this.callLifetimes);
-    this.mapReadLifetimes = findMapReadLifetimes(fn, this.unionsById, this.callLifetimes);
-    this.localStackUnions = findLocalStackUnions(fn, this.callLifetimes, this.unionsById);
-    this.integerRanges = analyzeIntegerRanges(fn);
-    this.chainSlots.clear();
-    this.finallyStack = [];
-    this.tryStack = [];
-    this.currentReturnType = fn.returnType;
-    this.currentGenerator = fn.generator ?? null;
-    this.currentWasiCoro = null;
-    this.logArgSlots = 0;
+  /** An emitter for a range of this module's functions: the same facts,
+   * empty module-level tables, and a journal of what the range adds. */
+  chunkEmitter(): LlEmitter {
+    const chunk = new LlEmitter(
+      this.mod,
+      { ...this.targetOptions, functionChunks: 1 },
+      new EmitJournal(),
+    );
+    chunk.debug?.record();
+    return chunk;
+  }
 
-    if (this.wasi && (fn.async === true || fn.generator !== undefined)) {
-      this.declare(`declare token @llvm.coro.id(i32, ptr, ptr, ptr)`);
-      this.declare(`declare ${this.sizeType} @llvm.coro.size.${this.sizeType}()`);
-      this.declare(`declare ptr @llvm.coro.begin(token, ptr)`);
-      this.declare(`declare token @llvm.coro.save(ptr)`);
-      this.declare(`declare i8 @llvm.coro.suspend(token, i1)`);
-      this.declare(`declare ptr @llvm.coro.free(token, ptr)`);
-      this.declare(`declare void @llvm.coro.end(ptr, i1, token)`);
-      this.declare(`declare ptr @malloc(${this.sizeType})`);
-      this.declare(`declare void @free(ptr)`);
-      this.declare(`declare void @scr_wasi_coro_started(ptr)`);
-      this.declare(`declare ptr @scr_fiber_self()`);
-      const id = B.tmp();
-      const size = B.tmp();
-      const mem = B.tmp();
-      const handle = B.tmp();
-      const self = B.tmp();
-      B.line(`${id} = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)`);
-      B.line(`${size} = call ${this.sizeType} @llvm.coro.size.${this.sizeType}()`);
-      B.line(`${mem} = call ptr @malloc(${this.sizeType} ${size})`);
-      B.line(`${handle} = call ptr @llvm.coro.begin(token ${id}, ptr ${mem})`);
-      B.line(`call void @scr_wasi_coro_started(ptr ${handle})`);
-      B.line(`${self} = call ptr @scr_fiber_self()`);
-      this.currentWasiCoro = {
-        kind: fn.generator !== undefined ? "generator" : "async",
-        id,
-        handle,
-        self,
-        finalLabel: B.newLabel("coro.final"),
-        cleanupLabel: B.newLabel("coro.cleanup"),
-        suspendLabel: B.newLabel("coro.suspend"),
-      };
-    }
-
-    const paramIds = new Set(fn.params.map((p) => p.localId));
-    if (this.debug === null) {
-      for (const id of findIntegerViews(fn)) {
-        const slot = B.slot();
-        B.entryAllocas.push(`${slot} = alloca i32 ; integer view ${this.currentLocals.get(id)!.name}`);
-        this.integerViews.set(id, slot);
-      }
-    }
-    for (const local of fn.locals) {
-      // Boxed locals' slots hold their capture BOX (a ptr); captured
-      // (env-borrowed) locals bind the incoming box below. A caught-typed
-      // local is a catch binding: its slot holds the ScrCaught snapshot
-      // box the catch prologue takes (scr_exc_take).
-      const slotTy =
-        local.boxed || this.captureIds.has(local.id) || local.type.kind === "caught"
-          ? "ptr"
-          : this.llType(local.type);
-      B.entryAllocas.push(`%${mangleLocal(local.id)} = alloca ${slotTy} ; ${local.name}`);
-      this.emitDebugLocal(local, `%${mangleLocal(local.id)}`, fn.params.findIndex((p) => p.localId === local.id) + 1, this.captureIds.has(local.id));
-      // Refcounted/boxed locals start NULL (the C prologue's `= NULL`):
-      // scope-exit releases run whether or not an assign ever did.
-      if (paramIds.has(local.id) || this.captureIds.has(local.id)) continue;
-      if (local.boxed || isRefCounted(local.type)) {
-        B.line(`store ptr null, ptr %${mangleLocal(local.id)}`);
-      }
-    }
-    // Captured bindings come in through the environment — borrowed for the
-    // whole call (the closure owns them): bound here, never released here.
-    (fn.captures ?? []).forEach((c, i) => {
-      const caps = B.tmp();
-      const p = B.tmp();
-      const box = B.tmp();
-      B.line(`${caps} = getelementptr inbounds %ScrClosure, ptr %sc_env, i64 1 ; caps`);
-      B.line(`${p} = getelementptr inbounds ptr, ptr ${caps}, ${this.sizeType} ${i} ; caps[${i}]`);
-      B.line(`${box} = load ptr, ptr ${p}`);
-      B.line(`store ptr ${box}, ptr %${mangleLocal(c.localId)} ; captured ${c.name}`);
+  /** The double-ABI entry of a function with an i32 entry: every caller
+   * that is not a direct call (closures, dispatch, adapters, the runtime)
+   * enters here. A pending exception passes through to its caller. */
+  emitInt32AbiWrapper(fn: IrFunction, symbol: string, abi: Int32Abi): string {
+    const lines: string[] = [];
+    const params: string[] = [];
+    const args: string[] = [];
+    fn.params.forEach((param, index) => {
+      const type = this.llType(param.type);
+      params.push(`${type} %p${index}`);
+      if (abi.params[index]) {
+        lines.push(`  %a${index} = fptosi double %p${index} to i32`);
+        args.push(`i32 %a${index}`);
+      } else args.push(`${type} %p${index}`);
     });
-    (fn.classCaptures ?? []).forEach((c) => {
-      const self = fn.params[0]!;
-      if (self.type.kind !== "object") throw new InternalCompilerError("class captures require an instance receiver");
-      const classSlot = B.tmp();
-      const classValue = B.tmp();
-      const caps = B.tmp();
-      const slot = B.tmp();
-      const box = B.tmp();
-      B.line(`${classSlot} = getelementptr inbounds %${mangleClassStruct(self.type.className)}, ptr %p_${mangleLocal(self.localId)}, i64 0, i32 ${classEnvironmentIndex(this.classMeta.get(self.type.className)!)}`);
-      B.line(`${classValue} = load ptr, ptr ${classSlot}`);
-      B.line(`${caps} = getelementptr inbounds %ScrClassObj, ptr ${classValue}, i64 1`);
-      B.line(`${slot} = getelementptr inbounds ptr, ptr ${caps}, ${this.sizeType} ${c.slot}`);
-      B.line(`${box} = load ptr, ptr ${slot}`);
-      B.line(`store ptr ${box}, ptr %${mangleLocal(c.localId)} ; class capture ${c.name}`);
-    });
-    // Params spill into their slots; the function scope owns refcounted
-    // params (callees own their params — callers passed +1). Boxed params
-    // allocate the shared binding and move the raw value in.
-    const fnScope: LlScopeEntry[] = [];
-    const borrowed = this.callLifetimes.parameters.get(fn.name);
-    for (const [index, p] of fn.params.entries()) {
-      const local = this.currentLocals.get(p.localId)!;
-      const slot = `%${mangleLocal(p.localId)}`;
-      if (local.boxed) {
-        const box = B.tmp();
-        B.line(`${box} = ${boxNewCall(this.shapeHost, p.type)} ; ${p.name} (boxed param)`);
-        this.boxSet(box, p.type, `%p_${mangleLocal(p.localId)}`);
-        B.line(`store ptr ${box}, ptr ${slot}`);
-        fnScope.push({ slot, type: p.type, boxed: true });
-        continue;
-      }
-      B.line(`store ${this.llType(p.type)} %p_${mangleLocal(p.localId)}, ptr ${slot}`);
-      this.storeIntegerView(p.localId, { name: `%p_${mangleLocal(p.localId)}`, type: p.type });
-      if (isRefCounted(p.type) && !borrowed?.has(index)) fnScope.push({ slot, type: p.type });
-    }
-    this.scopes.push(fnScope);
-    // Stackful native fibers retain these frames while suspended. The
-    // active exception context owns the chain, so concurrent fibers isolate it.
-    if (this.stackTraces && !this.wasi && fn.sourceName !== undefined) {
-      this.declare(`declare void @scr_stack_enter(ptr, ptr)`);
-      this.declare(`declare void @scr_stack_leave(ptr)`);
-      B.entryAllocas.push(`%source_frame = alloca { ptr, ptr }`);
-      const frame = `    at ${fn.sourceName} (${fn.loc.file})`;
-      B.line(`call void @scr_stack_enter(ptr %source_frame, ptr ${this.cstr(frame)})`);
-      B.returnEpilogue = `call void @scr_stack_leave(ptr %source_frame)`;
-    }
-    this.emitStmts(fn.body);
-    // Implicit exit of a void function: release the function scope unless
-    // the body already terminated its final block (return, or a throw
-    // whose unwind released everything down to depth 0).
-    if (fn.returnType.kind === "void" && !B.isTerminated()) {
-      this.releaseScope(this.scopes[0]!);
-      if (this.currentWasiCoro !== null) {
-        this.emitWasiFulfill(null);
-        B.terminate(`br label %${this.currentWasiCoro.finalLabel}`);
-      } else {
-        B.terminate("ret void");
-      }
-    }
-    this.scopes.pop();
-
-    const coro = this.currentWasiCoro;
-    if (coro !== null) {
-      B.startBlock(coro.finalLabel);
-      if (fn.captures !== undefined) {
-        this.declare(`declare void @scr_closure_release(ptr)`);
-        B.line(`call void @scr_closure_release(ptr %sc_env)`);
-      }
-      if (coro.kind === "generator") {
-        this.declare(`declare void @scr_wasi_gen_finish(ptr)`);
-        B.line(`call void @scr_wasi_gen_finish(ptr ${coro.self})`);
-      } else {
-        this.declare(`declare void @scr_wasi_async_finish(ptr)`);
-        B.line(`call void @scr_wasi_async_finish(ptr ${coro.self})`);
-      }
-      const finalState = B.tmp();
-      B.line(`${finalState} = call i8 @llvm.coro.suspend(token none, i1 true)`);
-      B.terminate(
-        `switch i8 ${finalState}, label %${coro.suspendLabel} [ i8 1, label %${coro.cleanupLabel} ]`,
-      );
-      B.startBlock(coro.cleanupLabel);
-      const frame = B.tmp();
-      B.line(`${frame} = call ptr @llvm.coro.free(token ${coro.id}, ptr ${coro.handle})`);
-      B.line(`call void @free(ptr ${frame})`);
-      B.br(coro.suspendLabel);
-      B.startBlock(coro.suspendLabel);
-      B.line(`call void @llvm.coro.end(ptr ${coro.handle}, i1 false, token none)`);
-      const ret = this.llType(fn.returnType);
-      if (ret === "void") B.terminate(`ret void`);
-      else if (ret === "double") B.terminate(`ret double ${f64Lit(0)}`);
-      else if (ret === "i1") B.terminate(`ret i1 false`);
-      else B.terminate(`ret ptr null`);
-    }
-
-    // Shared blocks have multiple source locations. Keep the location on
-    // each incoming exception check instead of assigning one to the cleanup.
-    B.debugLocation = null;
-    for (const cleanup of this.unwindCleanups.values()) {
-      B.startBlock(cleanup.label);
-      this.releaseScope(cleanup.entries);
-      B.terminate(cleanup.terminator);
-    }
-
-    if (this.logArgSlots > 0) {
-      B.entryAllocas.push(`%logargs = alloca [${this.logArgSlots} x %ScrLogArg]`);
-    }
-    const params = fn.params.map((p) => `${this.llType(p.type)} %p_${mangleLocal(p.localId)}`);
-    // Lifted functions receive their closure first (the callValue ABI).
-    if (fn.captures !== undefined) params.unshift("ptr %sc_env");
     const ret = this.llType(fn.returnType);
-    const attrs = coro !== null ? "#1" : FN_ATTRS;
-    const debug = this.debugScope === null ? "" : ` !dbg ${this.debugScope}`;
-    const symbol = borrowed ? mangleBorrowedFunction(fn.name) : mangleFunction(fn.name);
-    const body = `define internal ${ret} @${symbol}(${params.join(", ")}) ${attrs}${debug} { ; ${fn.name}\n${B.render()}\n}`;
-    return borrowed ? body + "\n" + this.emitOwnedCallAdapter(fn, borrowed) : body;
+    const entry = `@${symbol}${INT32_ABI_SUFFIX}(${args.join(", ")})`;
+    if (abi.union) {
+      // Box the register pair for every caller of the ordinary ABI.
+      const B = new BlockBuilder();
+      this.B = B;
+      for (const line of lines) B.line(line.trim());
+      const pair = B.tmp();
+      B.line(`${pair} = call ${SCALAR_UNION_RESULT} ${entry}`);
+      B.terminate(`ret ptr ${this.boxScalarUnion(pair, fn.returnType)}`);
+      return `define internal ptr @${symbol}(${params.join(", ")}) ${FN_ATTRS} {\n${B.render()}\n}`;
+    }
+    const call = `call ${abi.result ? "i32" : ret} ${entry}`;
+    if (ret === "void") lines.push(`  ${call}`, "  ret void");
+    else if (abi.result)
+      lines.push(`  %r = ${call}`, `  %d = sitofp i32 %r to double`, `  ret double %d`);
+    else lines.push(`  %r = ${call}`, `  ret ${ret} %r`);
+    return `define internal ${ret} @${symbol}(${params.join(", ")}) ${FN_ATTRS} {\nentry:\n${lines.join("\n")}\n}`;
+  }
+
+  /** The SCALAR_UNION_RESULT pair of a `%ScrUnion` box of `type`. */
+  scalarUnionPair(box: string, type: IrType): string {
+    const B = this.B;
+    const unionId = type.kind === "union" ? type.unionId : "";
+    const tag = this.unionTag(box, unionId);
+    const payload = B.tmp(),
+      bits = B.tmp(),
+      partial = B.tmp(),
+      pair = B.tmp();
+    B.line(`${payload} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 5`);
+    B.line(`${bits} = load i64, ptr ${payload}`);
+    B.line(`${partial} = insertvalue ${SCALAR_UNION_RESULT} poison, i32 ${tag}, 0`);
+    B.line(`${pair} = insertvalue ${SCALAR_UNION_RESULT} ${partial}, i64 ${bits}, 1`);
+    return pair;
+  }
+
+  /** A private stack box holding a SCALAR_UNION_RESULT pair of `type`. */
+  stackScalarUnion(pair: string, type: IrType): LlValue {
+    const B = this.B;
+    const box = B.slot(),
+      tagSlot = B.slot(),
+      payloadSlot = B.slot();
+    B.entryAllocas.push(`${box} = alloca %ScrUnion`);
+    B.entryAllocas.push(`${tagSlot} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 1`);
+    B.entryAllocas.push(
+      `${payloadSlot} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 5`,
+    );
+    const tag = B.tmp(),
+      bits = B.tmp();
+    B.line(`${tag} = extractvalue ${SCALAR_UNION_RESULT} ${pair}, 0`);
+    B.line(`${bits} = extractvalue ${SCALAR_UNION_RESULT} ${pair}, 1`);
+    B.line(`store i32 ${tag}, ptr ${tagSlot}`);
+    B.line(`store i64 ${bits}, ptr ${payloadSlot}`);
+    return { name: box, type };
+  }
+
+  /** A direct call whose i32 entry returns its scalar union in registers. */
+  scalarResultCall(e: IrExpr): boolean {
+    return e.kind === "call" && this.int32Abis.get(e.callee)?.union === true;
+  }
+
+  /** A fresh heap box (+1) for a SCALAR_UNION_RESULT pair of `type`; the
+   * exception dummy (tag -1) answers NULL. */
+  boxScalarUnion(pair: string, type: IrType): string {
+    const B = this.B;
+    const tag = B.tmp(),
+      bits = B.tmp();
+    B.line(`${tag} = extractvalue ${SCALAR_UNION_RESULT} ${pair}, 0`);
+    B.line(`${bits} = extractvalue ${SCALAR_UNION_RESULT} ${pair}, 1`);
+    return this.boxScalarUnionBits(tag, bits, type);
+  }
+
+  /** A fresh heap box (+1) for an inline union field's value; the ABSENT
+   * state reads as the undefined arm. */
+  inlineFieldUnion(ptr: string, type: IrType): string {
+    const { tag, bits } = loadInlineUnion(this.B, ptr);
+    return this.boxScalarUnionBits(tag, bits, type);
+  }
+
+  /** boxScalarUnion over a separate tag and payload bits. Unit arms answer
+   * their immortal instances whatever the bits. */
+  boxScalarUnionBits(tag: string, bits: string, type: IrType): string {
+    const B = this.B;
+    const unionId = type.kind === "union" ? type.unionId : "";
+    const arms = this.unionsById.get(unionId)!.arms;
+    const join = B.newLabel("union.box.join"),
+      none = B.newLabel("union.box.none");
+    const labels = arms.map(() => B.newLabel("union.box.arm"));
+    B.terminate(
+      `switch i32 ${tag}, label %${none} [ ${labels.map((label, armTag) => `i32 ${armTag}, label %${label}`).join(" ")} ]`,
+    );
+    const incoming: string[] = [];
+    arms.forEach((arm, armTag) => {
+      B.startBlock(labels[armTag]!);
+      let value: string;
+      if (isUnitType(arm)) value = this.unitInstanceRef(unionId, armTag);
+      else {
+        const payload = B.tmp();
+        if (arm.kind === "bool") B.line(`${payload} = trunc i64 ${bits} to i1`);
+        else B.line(`${payload} = bitcast i64 ${bits} to double`);
+        value = this.unionNewOwned(unionId, armTag, { name: payload, type: arm });
+      }
+      incoming.push(`[ ${value}, %${B.currentLabel()} ]`);
+      B.br(join);
+    });
+    B.startBlock(none);
+    incoming.push(`[ null, %${none} ]`);
+    B.br(join);
+    B.startBlock(join);
+    const box = B.tmp();
+    B.line(`${box} = phi ptr ${incoming.join(", ")}`);
+    return box;
+  }
+
+  /** The i32 bits of a number proven an int32 (a direct call's i32
+   * argument or an i32 result): its exact integer when the value carries
+   * one, else the conversion the proof makes exact. */
+  int32Argument(value: LlValue, expr: IrExpr): string {
+    const integer = exactInteger(this, value, expr);
+    if (integer && /^-?\d+$/.test(integer.name)) return String(Number(integer.name) | 0);
+    if (integer) return narrowInteger(this, integer);
+    const bits = this.B.tmp();
+    this.B.line(`${bits} = fptosi double ${value.name} to i32`);
+    return bits;
+  }
+
+  /** A direct call's i32 result as a number, with the i32 as its integer
+   * and ToUint32 forms. */
+  int32Result(bits: string, type: IrType): LlValue {
+    const number = this.B.tmp();
+    this.B.line(`${number} = sitofp i32 ${bits} to double`);
+    return {
+      name: number,
+      type,
+      uint32: bits,
+      integer: { name: bits, type: "i32", signed: true, range: INT32_RANGE },
+    };
   }
 
   /** Keep the ordinary owned ABI for closures, virtual dispatch, generated
-   * runtime adapters and library exports. Only direct IR calls select the
-   * borrowing body. Ownership of other parameters moves into that body;
+   * runtime adapters and library exports. Only direct IR calls, calls of a
+   * known closure body and borrowing closure entries (fn_borrowed) select
+   * the borrowing body. Ownership of other parameters moves into that body;
    * borrowed parameters are released here on normal and exceptional exits.
    * The pending exception remains for the adapter's caller to handle. */
-  private emitOwnedCallAdapter(fn: IrFunction, borrowed: ReadonlySet<number>): string {
+  /** With `kept`, the virtual adapter of a borrowing slot instead: the
+   * slot's parameters stay borrowed, the body's other borrowed ones are
+   * released here. */
+  emitOwnedCallAdapter(
+    fn: IrFunction,
+    borrowed: ReadonlySet<number>,
+    kept: ReadonlySet<number> = NO_BORROWED,
+  ): string {
     const B = new BlockBuilder();
     this.B = B;
     const params = fn.params.map((param, index) => `${this.llType(param.type)} %p${index}`);
+    // Lifted bodies receive their closure first (the callValue ABI).
+    if (fn.captures !== undefined) params.unshift("ptr %sc_env");
     const ret = this.llType(fn.returnType);
     const call = `call ${ret} @${mangleBorrowedFunction(fn.name)}(${params.join(", ")})`;
-    B.line(ret === "void" ? call : `%result = ${call}`);
-    for (const index of borrowed) this.releaseValue(`%p${index}`, fn.params[index]!.type);
-    B.terminate(ret === "void" ? "ret void" : `ret ${ret} %result`);
-    return `define internal ${ret} @${mangleFunction(fn.name)}(${params.join(", ")}) ${FN_ATTRS} {\n${B.render()}\n}`;
+    // The owned entry of an unwinding-ABI body releases the borrowed
+    // parameters on the unwind too, then resumes it to its caller.
+    const unwinding = this.unwindAbi.has(fn.name) && kept.size === 0;
+    if (unwinding) {
+      const ok = B.newLabel("adapt.ok");
+      const pad = B.newLabel("adapt.lp");
+      B.terminate(
+        `${ret === "void" ? "" : "%result = "}invoke ${call.slice(5)} to label %${ok} unwind label %${pad}`,
+      );
+      B.startBlock(pad);
+      const exception = B.tmp();
+      B.line(`${exception} = landingpad { ptr, i32 } cleanup`);
+      for (const index of borrowed) this.releaseFrame(`%p${index}`, fn.params[index]!.type);
+      B.terminate(`resume { ptr, i32 } ${exception}`);
+      B.startBlock(ok);
+    } else B.line(ret === "void" ? call : `%result = ${call}`);
+    // A borrowed result is reachable from the parameters: own it first. A
+    // throwing body returns a null dummy, which needs no owner (and string
+    // or array retains do not accept NULL).
+    let result = "%result";
+    if (this.borrowedReturns.has(fn.name)) {
+      const slot = B.slot();
+      B.entryAllocas.push(`${slot} = alloca ptr`);
+      B.line(`store ptr null, ptr ${slot}`);
+      const present = B.tmp();
+      const own = B.newLabel("result.own");
+      const done = B.newLabel("result.done");
+      B.line(`${present} = icmp ne ptr %result, null`);
+      B.condBr(present, own, done);
+      B.startBlock(own);
+      B.line(`store ptr ${this.retainFrame("%result", fn.returnType)}, ptr ${slot}`);
+      B.br(done);
+      B.startBlock(done);
+      result = B.tmp();
+      B.line(`${result} = load ptr, ptr ${slot}`);
+    }
+    for (const index of borrowed)
+      if (!kept.has(index)) this.releaseFrame(`%p${index}`, fn.params[index]!.type);
+    B.terminate(ret === "void" ? "ret void" : `ret ${ret} ${result}`);
+    const symbol =
+      kept.size > 0 ? `${mangleBorrowedFunction(fn.name)}.virtual` : mangleFunction(fn.name);
+    if (unwinding) this.declare(`declare i32 @__gcc_personality_v0(...)`);
+    const personality = unwinding ? ` ${UNWIND_PERSONALITY}` : "";
+    return `define internal ${ret} @${symbol}(${params.join(", ")}) ${FN_ATTRS}${personality} {\n${B.render()}\n}`;
+  }
+  canBorrowCallArgument(value: IrExpr): boolean {
+    return canBorrowCallArgument(this, value);
   }
 
-  /** A local immutable binding keeps its value alive while later arguments
-   * and the callee execute. Global, captured, TDZ and mutable bindings need
-   * an owned snapshot, even when the callee only inspects the value. */
-  canBorrowCallArgument(value: IrExpr): boolean {
-    if (value.kind === "strLit") return true;
-    if (value.kind !== "varRef") return false;
+  /** A plain-pointer read of a construction-only field outside any
+   * constructor (ImmutableFields). */
+  immutableRead(e: ExprOf<"fieldGet" | "recordGet">): boolean {
+    if (this.inConstructor || this.immutableFields === null) return false;
+    const t = e.type.kind;
+    if (t !== "object" && t !== "record" && t !== "array" && t !== "string") return false;
+    return e.kind === "fieldGet"
+      ? this.immutableFields.classField(e.className, e.field)
+      : this.immutableFields.recordField(e.shapeId, e.field);
+  }
+
+  /** A projection read whose locations nothing writes while a borrowed
+   * read of it is in use (ReferenceWrites), given the writes of that
+   * extent. The root binding itself must stay alive across it too, which
+   * its own location (`l:`, `g:`, `bx`) covers. */
+  unwrittenRead(e: IrExpr, writes: Writes): boolean {
+    const rw = this.referenceWrites;
+    if (rw === null) return false;
+    const keys = rw.readKeys(e, (call) => this.borrowedReturnKeys(call.callee));
+    return keys !== null && !rw.conflicts(keys, writes);
+  }
+
+  /** A stable binding initialized by a projection can borrow it when the
+   * rest of its block (its whole lifetime) writes none of the projection's
+   * locations: the source edge then keeps the value alive, and uses that
+   * escape still retain their own copies. */
+  unwrittenAlias(s: IrStmt & { kind: "varDecl" }): boolean {
+    const cursor = this.stmtCursor;
+    const rw = this.referenceWrites;
+    if (rw === null || s.init === null || cursor === null || cursor.stmts[cursor.index] !== s)
+      return false;
+    if (
+      !this.plainReference(s.init.type) ||
+      !this.canBorrowReceiver(s.init) ||
+      !this.unownedWalk(s.init)
+    )
+      return false;
+    const writes = rw.union([rw.expr(s.init), rw.stmts(cursor.stmts.slice(cursor.index + 1))]);
+    return this.unwrittenRead(s.init, writes);
+  }
+
+  /** An optional element read into a projection-only local can borrow the
+   * element when the rest of the block writes no array element and none of
+   * the locations keeping the array alive (which must itself be read
+   * without a frame owner). */
+  unwrittenLocalArrayRead(s: IrStmt & { kind: "varDecl" }, read: LocalArrayRead): boolean {
+    const cursor = this.stmtCursor;
+    const rw = this.referenceWrites;
+    if (rw === null || s.init === null || cursor === null || cursor.stmts[cursor.index] !== s)
+      return false;
+    if (!this.unownedWalk(read.array)) return false;
+    const keys = rw.readKeys(read.array);
+    if (keys === null || rw.expr(read.index) !== null) return false;
+    const writes = rw.union([rw.expr(s.init), rw.stmts(cursor.stmts.slice(cursor.index + 1))]);
+    return !rw.conflicts(["a", ...keys], writes);
+  }
+
+  /** An optional element read passed to a projection-only parameter can
+   * borrow the element when the callee and later arguments (`writes`)
+   * write no array element and nothing keeping the array alive. */
+  unwrittenCallArrayRead(read: LocalArrayRead, writes: Writes): boolean {
+    const rw = this.referenceWrites;
+    if (rw === null) return false;
+    const keys = rw.readKeys(read.array);
+    if (keys === null || rw.expr(read.index) !== null) return false;
+    return !rw.conflicts(["a", ...keys], writes);
+  }
+
+  /** `return p` of a promise inside try regions of an async function. JS
+   * completes the return first: p is evaluated, every crossed finally runs,
+   * and only then does the function's promise adopt p's settlement (a then
+   * job, then p's reaction). So the promise parks in a slot through the
+   * finally copies, like any pending return value, and the adopting await
+   * runs afterwards with no handler in scope: a rejection settles the
+   * function's promise instead of reaching its own catch clauses. */
+  emitAdoptingReturn(s: IrStmt & { kind: "return" }, adopted: ExprOf<"awaitExpr">): void {
+    const B = this.B;
+    const promise = this.emitExpr(adopted.value);
+    this.toFrame(promise);
+    const slot = B.slot();
+    B.entryAllocas.push(`${slot} = alloca ptr ; adopted return promise`);
+    B.line(`store ptr ${promise.name}, ptr ${slot}`);
+    const parked: LlScopeEntry = { slot, type: adopted.value.type };
+    const savedFrames = this.frames;
+    const savedScopes = this.scopes;
+    const savedFinally = this.finallyStack;
+    const savedTry = this.tryStack;
+    for (let i = savedFinally.length - 1; i >= 0 && !B.isTerminated(); i--) {
+      const fin = savedFinally[i]!;
+      this.releaseForJump(fin.frameDepth, fin.scopeDepth);
+      this.frames = this.frames.slice(0, fin.frameDepth);
+      this.scopes = this.scopes.slice(0, fin.scopeDepth);
+      this.finallyStack = savedFinally.slice(0, i);
+      this.tryStack = savedTry.slice(0, fin.tryDepth);
+      this.scopes.push([parked]);
+      this.emitBlock(fin.body);
+      this.scopes.pop();
+    }
+    if (!B.isTerminated()) {
+      this.releaseForJump(0, 0);
+      // Nothing of the body is live any more except the parked promise,
+      // whose scope releases it on either exit of the await.
+      this.frames = [[]];
+      this.scopes = [[parked]];
+      this.finallyStack = [];
+      this.tryStack = [];
+      const loaded = B.tmp();
+      B.line(`${loaded} = load ptr, ptr ${slot}`);
+      this.adoptedOperand = { name: loaded, type: adopted.value.type };
+      const v = this.emitExpr(s.value!);
+      if (this.adoptedOperand !== null)
+        throw new InternalCompilerError("llvm emitter bug: adopted return promise was not awaited");
+      if (this.currentCoro !== null) this.toHeap(v);
+      else this.toFrame(v);
+      this.releaseForJump(0, 0);
+      if (!B.isTerminated()) {
+        if (this.currentCoro !== null) {
+          this.emitWasiFulfill(v);
+          B.terminate(`br label %${this.currentCoro.finalLabel}`);
+        } else if (s.value!.type.kind === "void") B.terminate("ret void");
+        else B.terminate(`ret ${this.llType(s.value!.type)} ${v.name}`);
+      }
+    }
+    this.frames = savedFrames;
+    this.scopes = savedScopes;
+    this.finallyStack = savedFinally;
+    this.tryStack = savedTry;
+  }
+
+  /** An async generator completing without a further turn: its request
+   * settles as the body returns (scr_async_gen_hop_done). */
+  emitAsyncGenSettled(): void {
+    this.declare(`declare void @scr_async_gen_hop_done()`);
+    this.B.line(`call void @scr_async_gen_hop_done()`);
+  }
+
+  /** Owned-binding reads that take over the binding's reference, by read
+   * node (the binding's slot). */
+  readonly lastUseMoves = new Map<IrExpr, string>();
+  /** How often each varRef node object occurs in the current function:
+   * lowering may share one node between several reads, and a move keyed by
+   * node identity must fire for exactly one of them. */
+  varRefCounts: Map<IrExpr, number> | null = null;
+  currentFunctionBody: IrStmt[] = [];
+
+  private varRefCount(e: IrExpr): number {
+    if (this.varRefCounts === null) {
+      const counts = new Map<IrExpr, number>();
+      everyStmtList(this.currentFunctionBody, {
+        stmt: () => true,
+        expr: (node) => {
+          if (node.kind === "varRef") counts.set(node, (counts.get(node) ?? 0) + 1);
+          return true;
+        },
+      });
+      this.varRefCounts = counts;
+    }
+    return this.varRefCounts.get(e) ?? 0;
+  }
+
+  /** Moves need plain slots that nothing else reads behind the binding's
+   * back: no debugger view, no coroutine frame, no borrowed (+0) return. */
+  /** Whether the program reads event-loop utilization (perf.loopStart /
+   * perf.idleTime): main then marks the loop's start before running it. */
+  private loopMetricsRead: boolean | undefined;
+  readsLoopMetrics(): boolean {
+    if (this.loopMetricsRead !== undefined) return this.loopMetricsRead;
+    let found = false;
+    const scan = this.nodeIndex.scan(LIB_CALL_KINDS);
+    for (const fn of this.mod.functions) {
+      eachNodeOfKinds(fn, scan, (node) => {
+        if (
+          node.kind === "libCall" &&
+          (node.fn === "perf.loopStart" || node.fn === "perf.idleTime")
+        )
+          found = true;
+        return !found;
+      });
+      if (found) break;
+    }
+    this.loopMetricsRead = found;
+    return found;
+  }
+
+  private lastUseMovesAllowed(): boolean {
+    return (
+      this.debug === null &&
+      !this.currentBorrowedReturn &&
+      this.currentCoro === null &&
+      this.currentGenerator === null
+    );
+  }
+
+  /** An owned local declared at the statement cursor whose last statement
+   * reads it once (lastUseRead): that read moves the reference. */
+  noteLastUseMove(s: IrStmt & { kind: "varDecl" }, b: ReturnType<LlEmitter["binding"]>): void {
+    const cursor = this.stmtCursor;
+    if (
+      !this.lastUseMovesAllowed() ||
+      cursor === null ||
+      cursor.stmts[cursor.index] !== s ||
+      b.kind !== "local" ||
+      b.local === undefined ||
+      b.local.boxed ||
+      b.local.tdz ||
+      this.integerViews.has(s.localId)
+    )
+      return;
+    const read = lastUseRead(cursor.stmts, cursor.index, s.localId);
+    if (read !== null && this.varRefCount(read) === 1) this.lastUseMoves.set(read, b.slot);
+  }
+
+  /** An owned parameter whose last statement in the body reads it once:
+   * that read moves the reference. Walk locals may borrow from an owned
+   * parameter's slot (they need it until the function returns), so bodies
+   * with walks keep their parameters, and locals rebound from the
+   * parameter count as derived from it. */
+  noteParameterMove(fn: IrFunction, localId: string, slot: string): void {
+    if (
+      !this.lastUseMovesAllowed() ||
+      fn.async ||
+      fn.generator !== undefined ||
+      (this.walkBorrowsByFunction.get(fn.name)?.size ?? 0) > 0 ||
+      this.reboundByFunction.get(fn.name)?.has(localId) === true ||
+      this.integerViews.has(localId)
+    )
+      return;
+    const read = lastUseRead(fn.body, -1, localId, true);
+    if (read !== null && this.varRefCount(read) === 1) this.lastUseMoves.set(read, slot);
+  }
+
+  /** Emits the move of a noted last read: the slot is cleared, so scope
+   * exits release nothing and the read's owned temp carries the reference. */
+  takeLastUseMove(e: IrExpr, slot: string, type: IrType): boolean {
+    if (this.lastUseMoves.get(e) !== slot || !typeEquals(type, e.type)) return false;
+    this.lastUseMoves.delete(e);
+    this.B.line(`store ptr null, ptr ${slot}`);
+    return true;
+  }
+
+  /** `return x` of a local whose slot is an owned scope entry of the same
+   * type: the return can take over the local's reference. */
+  movableReturn(
+    value: IrExpr | null,
+  ): { scope: LlScopeEntry[]; entry: LlScopeEntry; index: number } | null {
+    if (value === null || value.kind !== "varRef" || !isRefCounted(value.type)) return null;
+    if (this.currentBorrowedReturn || this.currentCoro !== null) return null;
     const binding = this.binding(value.localId);
-    return binding.kind === "local" && binding.local !== undefined &&
-      (!binding.local.mutable || this.borrowedParameters.has(value.localId)) && !binding.local.boxed && !binding.local.tdz;
+    if (binding.kind !== "local" || binding.local === undefined || binding.local.boxed) return null;
+    if (!typeEquals(binding.type, value.type) || !typeEquals(this.currentReturnType, value.type))
+      return null;
+    for (const scope of this.scopes) {
+      const index = scope.findIndex((entry) => entry.slot === binding.slot);
+      if (index < 0) continue;
+      const entry = scope[index]!;
+      if (entry.boxed || entry.lazy || !typeEquals(entry.type, value.type)) return null;
+      return { scope, entry, index };
+    }
+    return null;
+  }
+
+  /** A walk host for a body that may write the heap: each walk must read
+   * only locations the whole body (with its callees) never writes;
+   * rebinding the walk locals themselves releases nothing. */
+  unwrittenWalkHost(fn: IrFunction, host: WalkBorrowHost): WalkBorrowHost {
+    return {
+      ...host,
+      unwritten: (value, candidates) =>
+        this.referenceWrites?.unwrittenWalk(fn, value, candidates, (call) =>
+          this.borrowedReturnKeys(call.callee),
+        ) ?? false,
+    };
+  }
+
+  /** emitReadReceiver yields a plain pointer for `e` that no statement
+   * frame owns, so it can outlive the statement (walk-borrows' walks, from
+   * any unboxed plain-pointer binding, plus element reads). */
+  private unownedWalk(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "varRef": {
+        const binding = this.binding(e.localId);
+        if (binding.kind === "global") return this.plainReference(binding.type);
+        return (
+          binding.kind === "local" &&
+          binding.local !== undefined &&
+          !binding.local.boxed &&
+          !binding.local.tdz &&
+          this.plainReference(binding.local.type) &&
+          !this.stringSlices.has(e.localId) &&
+          !this.storedSplits.has(e.localId) &&
+          !this.localUnionStorage.has(e.localId)
+        );
+      }
+      case "fieldGet":
+      case "recordGet":
+        return this.borrowsWithoutOwning(e) && this.unownedWalk(e.obj);
+      case "unionNarrow":
+      case "downcast":
+      case "upcast":
+        return this.borrowsWithoutOwning(e) && this.unownedWalk(e.value);
+      case "unionWrap":
+        if (!this.borrowsWithoutOwning(e)) return false;
+        return e.value.kind === "unitLit" || this.unownedWalk(e.value);
+      case "ternary": {
+        const arm = (v: IrExpr): boolean =>
+          (v.kind === "libCall" && v.fn === "error.nodeThrow") || this.unownedWalk(v);
+        return this.borrowsWithoutOwning(e) && arm(e.then) && arm(e.else_);
+      }
+      case "call":
+        return (
+          this.borrowsWithoutOwning(e) &&
+          e.args.every((arg) => !isRefCounted(arg.type) || this.unownedWalk(arg))
+        );
+      case "arrayGet":
+        return (
+          !this.isStackUnionSource(e) &&
+          this.optionalArrayReads.get(e) === null &&
+          this.unownedWalk(e.arr)
+        );
+      case "seqExpr": {
+        const guarded = guardedValue(e);
+        return guarded !== null && this.unownedWalk(guarded);
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** Every location a borrowed-return callee's walks can read (its body's
+   * field, record and element reads, through nested borrowed returns). */
+  private borrowedReturnKeys(callee: string): string[] | null {
+    if (!this.borrowedReturns.has(callee)) return null;
+    const known = this.borrowedReturnKeyCache.get(callee);
+    if (known) return known;
+    const rw = this.referenceWrites!;
+    const keys = new Set<string>();
+    const seen = new Set([callee]);
+    const pending = [callee];
+    while (pending.length > 0) {
+      const fn = this.fnByName.get(pending.pop()!);
+      if (!fn) continue;
+      everyStmtList(fn.body, {
+        stmt: () => true,
+        expr: (e) => {
+          if (e.kind === "fieldGet") keys.add(rw.fieldKey(e.className, e.field));
+          else if (e.kind === "recordGet") {
+            keys.add(`r:${e.field}`);
+            keys.add("r:*");
+          } else if (e.kind === "arrayGet") keys.add("a");
+          else if (e.kind === "call" && this.borrowedReturns.has(e.callee) && !seen.has(e.callee)) {
+            seen.add(e.callee);
+            pending.push(e.callee);
+          }
+          return true;
+        },
+      });
+    }
+    const result = [...keys];
+    this.borrowedReturnKeyCache.set(callee, result);
+    return result;
   }
 
   // ── statements ──────────────────────────────────────────────────────────
 
-  private emitStmts(stmts: IrStmt[]): void {
-    for (const s of stmts) {
-      // Statements after a terminator are unreachable (dead code after
-      // return/break/continue). Skip them so no dropped SSA definition
-      // can leak forward.
-      if (this.B.isTerminated()) return;
-      this.emitStmt(s);
+  emitStmts(stmts: IrStmt[], scoped = false): void {
+    const saved = this.stmtCursor;
+    const cursor = scoped ? { stmts, index: 0 } : null;
+    try {
+      for (let i = 0; i < stmts.length; i++) {
+        // Statements after a terminator are unreachable (dead code after
+        // return/break/continue). Skip them so no dropped SSA definition
+        // can leak forward.
+        if (this.B.isTerminated()) return;
+        if (cursor) cursor.index = i;
+        this.stmtCursor = cursor;
+        const reserve = reservedArrayLength(stmts, i);
+        if (reserve !== null) this.reservedArrayLengths.set(reserve.literal, reserve.hint);
+        const deferred = this.deferredPromiseAllLocal(stmts, i);
+        if (deferred !== null) {
+          this.deferredPromiseAllEntries.set((stmts[i] as { localId: string }).localId, deferred);
+          continue;
+        }
+        this.emitStmt(stmts[i]!);
+      }
+    } finally {
+      this.stmtCursor = saved;
     }
   }
 
@@ -3574,998 +6080,78 @@ export class LlEmitter {
    * scope opens, before the statements — the catch-binding hook: it may
    * emit prelude lines and register entries the scope owns (released on
    * every exit, jumps and unwinds included). */
-  private emitBlock(stmts: IrStmt[], setup?: (scope: LlScopeEntry[]) => void): void {
+  emitBlock(stmts: IrStmt[], setup?: (scope: LlScopeEntry[]) => void): void {
     const scope: LlScopeEntry[] = [];
     this.scopes.push(scope);
     setup?.(scope);
-    this.emitStmts(stmts);
+    this.emitStmts(stmts, true);
     const ended = endsWithJump(stmts);
     this.scopes.pop();
     if (!ended) this.releaseScope(scope);
   }
 
   emitStmt(s: IrStmt): void {
+    const resume = this.speculationResume?.get(s);
+    if (resume && !resume.placed && !this.B.isTerminated()) {
+      // The fast copy's failed checks re-execute this statement here.
+      resume.placed = true;
+      // A write with hoisted leaves resumed from its own failed check
+      // re-executes its arithmetic over the leaves' stored doubles: each
+      // leaf ran once, in the fast copy. Reached from an earlier statement
+      // of this copy (a failed check before it), its leaves never ran, so
+      // it runs as written.
+      const rewritten = this.speculationResumeValues?.get(s);
+      if (rewritten !== undefined && rewritten.leaves.length > 0) {
+        const join = this.B.newLabel("spec.resume.join");
+        this.emitStmt(s);
+        if (!this.B.isTerminated()) this.B.br(join);
+        this.B.startBlock(resume.label);
+        this.emitStmt(withSpeculativeValue(s, rewritten.value));
+        if (!this.B.isTerminated()) this.B.br(join);
+        this.B.startBlock(join);
+        return;
+      }
+      this.B.br(resume.label);
+      this.B.startBlock(resume.label);
+    }
+    if (this.speculation?.writes.has(s)) {
+      this.emitSpeculativeWrite(s, this.speculation.resume.get(s));
+      return;
+    }
     const previous = this.B.debugLocation;
     this.B.debugLocation = this.debug?.location(s.loc, this.debugScope) ?? null;
+    const loop =
+      s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forOf";
+    if (loop) this.loopDepth++;
+    // An int32 kind loop's fast-copy write leaves for its resume point.
+    const kindResume = this.int32KindResume;
+    this.int32KindResume = this.int32Kinds?.resume.get(s) ?? null;
     try {
       this.emitStmtBody(s);
     } finally {
       this.B.debugLocation = previous;
+      this.int32KindResume = kindResume;
+      if (loop) this.loopDepth--;
     }
   }
-
   private emitStmtBody(s: IrStmt): void {
-    const B = this.B;
-    this.frames.push([]);
-    switch (s.kind) {
-      case "varDecl": {
-        const b = this.binding(s.localId);
-        const localUnion = this.localStackUnions.get(s.localId);
-        if (localUnion) {
-          const union = emitStackUnion(this, localUnion);
-          B.line(`store ptr ${union.value.name}, ptr ${b.slot}`);
-          if (union.payload) {
-            this.moveTemp(union.payload);
-            this.scopes[this.scopes.length - 1]!.push({ slot: union.payloadSlot, type: union.payload.type });
-          }
-          break;
-        }
-        const localRead = this.localArrayReads.get(s.localId);
-        if (localRead) {
-          const owner = emitLocalArrayRead(this, localRead, b.slot);
-          if (owner) this.scopes[this.scopes.length - 1]!.push(owner);
-          break;
-        }
-        const mapRead = this.mapReadLifetimes.locals.get(s.localId);
-        if (mapRead) {
-          const result = emitStackMapRead(this, mapRead);
-          B.line(`store ptr ${result.value.name}, ptr ${b.slot}`);
-          if (result.owner) this.scopes[this.scopes.length - 1]!.push(result.owner);
-          break;
-        }
-        if (b.kind === "boxed") {
-          // Box FIRST, then evaluate the initializer: a named function
-          // expression's closure captures this box during init evaluation.
-          // A SCALAR TDZ box rides an ARR-kind box: the value lives in a
-          // one-element array cell, so the empty (NULL) slot stays the
-          // not-yet-initialized sentinel — a raw scalar slot has no spare
-          // bit pattern to spend on it (stmts.ts's varDecl).
-          const boxNew =
-            b.local!.tdz === true && boxAccess(b.type) !== "ref"
-              ? (this.declare(`declare ptr @scr_box_new(i32)`), `call ptr @scr_box_new(i32 3)`)
-              : boxNewCall(this.shapeHost, b.type);
-          const box = B.tmp();
-          B.line(`${box} = ${boxNew} ; let ${b.local!.name} (boxed)`);
-          B.line(`store ptr ${box}, ptr ${b.slot}`);
-          this.scopes[this.scopes.length - 1]!.push({ slot: b.slot, type: b.type, boxed: true });
-          if (s.init === null) break;
-          const v = this.emitExpr(s.init);
-          if (isRefCounted(v.type)) this.moveTemp(v); // the box takes ownership
-          if (b.local!.tdz === true && boxAccess(b.type) !== "ref") {
-            this.tdzScalarInit(box, b.type, v.name);
-          } else {
-            this.boxSet(box, b.type, v.name);
-          }
-          break;
-        }
-        if (s.init === null) {
-          // Declared, uninitialized (`let x: number;`): reset the slot —
-          // inside a loop the previous iteration's scope exit released the
-          // old value and left a stale pointer (NULL-tolerant releases).
-          if (isRefCounted(b.type)) {
-            B.line(`store ptr null, ptr ${b.slot}`);
-            this.scopes[this.scopes.length - 1]!.push({ slot: b.slot, type: b.type });
-          }
-          break;
-        }
-        const v = this.emitExpr(s.init);
-        this.moveTemp(v);
-        B.line(`store ${this.llType(b.type)} ${v.name}, ptr ${b.slot}`);
-        this.storeIntegerView(s.localId, v, s.init);
-        if (isRefCounted(b.type)) {
-          this.scopes[this.scopes.length - 1]!.push({ slot: b.slot, type: b.type });
-        }
-        break;
-      }
-      case "assign": {
-        const concat = s.value;
-        const suffix = matchStringSelfConcat(s.localId, concat);
-        if (suffix && concat.kind === "strConcat") {
-          this.emitStringSelfConcatAssign(s.localId, concat.left, suffix, false);
-          break;
-        }
-        const b = this.binding(s.localId);
-        const v = this.emitExpr(s.value);
-        if (b.kind === "global" && !s.initializes) this.checkGlobalTdz(s.localId);
-        if (b.kind === "boxed") {
-          this.writeBindingBox(this.loadBox(b.slot), b.local!, v.name, s.initializes);
-          // The RHS remains frame-owned until a possible TDZ throw passes.
-          if (isRefCounted(v.type)) this.moveTemp(v);
-          break;
-        }
-        this.moveTemp(v);
-        if (isRefCounted(b.type)) {
-          const old = B.tmp();
-          B.line(`${old} = load ptr, ptr ${b.slot}`);
-          this.releaseValue(old, b.type);
-        }
-        B.line(`store ${this.llType(b.type)} ${v.name}, ptr ${b.slot}`);
-        this.storeIntegerView(s.localId, v, s.value);
-        break;
-      }
-      case "exprStmt":
-        this.emitExpr(s.expr);
-        break;
-      case "arraySet": {
-        // Evaluation order matches JS: array, index, then value. Ownership
-        // of a refcounted value moves into the array (the runtime releases
-        // the replaced element itself).
-        const arr = this.emitExpr(s.arr);
-        const idx = this.emitExpr(s.index);
-        const v = this.emitExpr(s.value);
-        if (s.arr.type.kind !== "array") throw new InternalCompilerError("llvm emitter bug: arraySet on non-array");
-        const acc = elemAccess(s.arr.type.elem);
-        if (acc === "ref") this.moveTemp(v);
-        const argTy = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-        this.declare(`declare void @scr_arr_set_${acc}(ptr, double, ${argTy === "i1" ? "i1 zeroext" : argTy})`);
-        B.line(`call void @scr_arr_set_${acc}(ptr ${arr.name}, double ${idx.name}, ${argTy} ${v.name})`);
-        break;
-      }
-      case "arraySetLength": {
-        const arr = this.emitExpr(s.arr);
-        const length = this.emitExpr(s.length);
-        if (s.arr.type.kind !== "array") throw new InternalCompilerError("llvm emitter bug: arraySetLength on non-array");
-        this.declare(`declare void @scr_arr_set_len(ptr, double)`);
-        B.line(`call void @scr_arr_set_len(ptr ${arr.name}, double ${length.name})`);
-        this.emitPendingCheck();
-        break;
-      }
-      case "arraySetUndefined":
-      case "arrayDelete": {
-        const arr = this.emitExpr(s.arr);
-        const idx = this.emitExpr(s.index);
-        if (s.arr.type.kind !== "array") throw new InternalCompilerError(`llvm emitter bug: ${s.kind} on non-array`);
-        const fn = s.kind === "arraySetUndefined" ? "scr_arr_set_undefined" : "scr_arr_delete";
-        this.declare(`declare ${s.kind === "arrayDelete" ? "zeroext i1" : "void"} @${fn}(ptr, double)`);
-        if (s.kind === "arrayDelete") B.line(`call zeroext i1 @${fn}(ptr ${arr.name}, double ${idx.name})`);
-        else B.line(`call void @${fn}(ptr ${arr.name}, double ${idx.name})`);
-        break;
-      }
-      case "bytesSet": {
-        // Typed-array element write: same evaluation order as arraySet;
-        // the value is a scalar (the kind-specific inline path coerces
-        // JS-exactly), so no ownership moves. Invalid writes are ignored.
-        // IrBytesElem is static, so never rediscover it through the
-        // generic runtime switch in a hot loop.
-        const arr = this.emitStableReceiver(s.arr, [s.index, s.value]);
-        const integerIndex = this.emitIntegerLoopIndex(s.index);
-        const idx = integerIndex ?? this.emitExpr(s.index).name;
-        const v = this.emitExpr(s.value);
-        if (s.arr.type.kind !== "bytes") throw new InternalCompilerError("llvm emitter bug: bytesSet on non-bytes");
-        this.emitBytesSet(s.arr.type.elem, arr.name, idx, v, integerIndex !== null, s.value);
-        break;
-      }
-      case "fieldSet":
-      case "recordSet": {
-        // Evaluation order: obj, then value. New value moved in; the old
-        // value is released AFTER the field is overwritten (unlink-then-
-        // release — a release can trigger a cycle collection, which must
-        // never see a heap edge whose count was already given up).
-        // Classes and records share the struct layout, so one emission.
-        const obj = isRefCounted(s.value.type) ? this.emitExpr(s.obj) : this.emitStableReceiver(s.obj, [s.value]);
-        const v = this.emitExpr(s.value);
-        const { ptr, type } =
-          s.kind === "fieldSet"
-            ? this.classFieldPtr(obj.name, s.className, s.field)
-            : this.recordFieldPtr(obj.name, s.shapeId, s.field);
-        if (isRefCounted(type)) {
-          this.moveTemp(v);
-          const old = B.tmp();
-          B.line(`${old} = load ptr, ptr ${ptr}`);
-          this.storeField(ptr, type, v.name);
-          this.releaseValue(old, type);
-        } else {
-          this.storeField(ptr, type, v.name);
-        }
-        if (s.kind === "fieldSet" && s.field === "name" && this.classMeta.get(s.className)?.root.def.name === "%Error") {
-          const present = this.classFieldPtr(obj.name, s.className, "%namePresent").ptr;
-          const enumerable = this.classFieldPtr(obj.name, s.className, "%nameEnumerable").ptr;
-          const wasPresent = B.tmp(), wasEnumerable = B.tmp(), isPresent = B.tmp(), nextEnumerable = B.tmp();
-          B.line(`${wasPresent} = load i8, ptr ${present}`);
-          B.line(`${wasEnumerable} = load i8, ptr ${enumerable}`);
-          B.line(`${isPresent} = icmp ne i8 ${wasPresent}, 0`);
-          B.line(`${nextEnumerable} = select i1 ${isPresent}, i8 ${wasEnumerable}, i8 1`);
-          B.line(`store i8 1, ptr ${present}`);
-          B.line(`store i8 ${nextEnumerable}, ptr ${enumerable}`);
-        }
-        break;
-      }
-      case "recordKeyDelete": {
-        // `delete obj[k]` on a pure index-signature shape: a Map delete on
-        // the overflow (key and value released; absent keys no-op).
-        const obj = this.emitExpr(s.obj);
-        const key = this.emitExpr(s.key);
-        const ovf = this.recordOvfPtr(obj.name, s.shapeId);
-        this.declare(`declare zeroext i1 @scr_map_delete_str(ptr, ptr)`);
-        const t = B.tmp();
-        B.line(`${t} = call zeroext i1 @scr_map_delete_str(ptr ${ovf}, ptr ${key.name})`);
-        break;
-      }
-      case "recordKeySet": {
-        // Dynamic-keyed record write (the C per-shape helper, inline):
-        // declared keys write through (same-typed — dyn-valued shapes,
-        // whose writes validate and can throw, stay refused), undeclared
-        // keys insert/replace in the overflow map. Evaluation order: obj,
-        // key, value; the write OWNS the value (+1 moves in).
-        const obj = this.emitExpr(s.obj);
-        const key = this.emitExpr(s.key);
-        const v = this.emitExpr(s.value);
-        if (isRefCounted(v.type)) this.moveTemp(v);
-        const shape = this.recordShape(s.shapeId);
-        // Signature-free shapes dispatch over their (one-typed) declared
-        // fields and TRAP on a miss (scr_record_key_miss — JS would add
-        // the property, which a monomorphic struct cannot); overflow
-        // shapes keep the map insert tail.
-        const iv = shape.indexValue ?? shape.fields[0]?.type;
-        if (!iv) throw new InternalCompilerError(`llvm emitter bug: keyed write on field-free non-overflow shape ${s.shapeId}`);
-        const vAcc = iv.kind === "f64" ? "f64" : iv.kind === "bool" ? "bool" : "ref";
-        if (s.overflowOnly === true) {
-          // A LITERAL key naming no declared field: a plain overflow
-          // insert — no field chain.
-          const ovf = this.recordOvfPtr(obj.name, s.shapeId);
-          this.mapSet(ovf, "str", vAcc, key.name, v.name);
-          break;
-        }
-        const join = B.newLabel("rks.j");
-        this.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
-        if (iv.kind === "dyn" && shape.indexValue) {
-          // A dyn-valued shape (the C recordKeySetHelper's dyn arm,
-          // inline): declared keys VALIDATE the dyn value against the
-          // field's type first (dynCheck — a mismatched write throws the
-          // catchable TypeError and leaves the field untouched; JS would
-          // store anything, the documented divergence); undeclared keys
-          // insert the dyn value into the overflow map as-is.
-          this.declare(`declare void @scr_dyn_release(ptr)`);
-          for (const f of shape.fields) {
-            const lit = this.internLiteral(f.name);
-            const hit = B.tmp();
-            B.line(`${hit} = call zeroext i1 @scr_str_eq(ptr ${key.name}, ptr ${lit}) ; ${llvmCommentText(f.name)}`);
-            const lh = B.newLabel("rks.h");
-            const ln = B.newLabel("rks.n");
-            B.condBr(hit, lh, ln);
-            B.startBlock(lh);
-            const pathSlot = B.slot();
-            B.entryAllocas.push(`${pathSlot} = alloca %ScrDynPath`);
-            const pp = B.tmp();
-            const kp = B.tmp();
-            const ip = B.tmp();
-            B.line(`${pp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 0`);
-            B.line(`store ptr null, ptr ${pp}`);
-            B.line(`${kp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
-            B.line(`store ptr ${this.cstr(f.name)}, ptr ${kp}`);
-            B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-            B.line(`store ${this.sizeType} 0, ptr ${ip}`);
-            const helper = this.dyn.dynCheckHelper(f.type);
-            const fty = this.llType(f.type);
-            const nv = B.tmp();
-            B.line(`${nv} = call ${fty === "i1" ? "zeroext i1" : fty} @${helper}(ptr ${v.name}, ptr ${pathSlot})`);
-            B.line(`call void @scr_dyn_release(ptr ${v.name})`);
-            // Mismatched write: TypeError pending, field untouched — the
-            // statement-level check below unwinds.
-            this.declare(`declare zeroext i1 @scr_exc_pending()`);
-            const pend = B.tmp();
-            B.line(`${pend} = call zeroext i1 @scr_exc_pending()`);
-            const lw = B.newLabel("rks.w");
-            B.condBr(pend, join, lw);
-            B.startBlock(lw);
-            const { ptr, type } = this.recordFieldPtr(obj.name, s.shapeId, f.name);
-            if (isRefCounted(type)) {
-              const old = B.tmp();
-              B.line(`${old} = load ptr, ptr ${ptr}`);
-              this.storeField(ptr, type, nv);
-              this.releaseValue(old, type);
-            } else {
-              this.storeField(ptr, type, nv);
-            }
-            B.br(join);
-            B.startBlock(ln);
-          }
-          const ovf = this.recordOvfPtr(obj.name, s.shapeId);
-          this.mapSet(ovf, "str", vAcc, key.name, v.name);
-          B.br(join);
-          B.startBlock(join);
-          // MAY THROW exactly when a dyn value can validate against a
-          // declared field (stmts.ts's condition).
-          if (shape.fields.length > 0) this.emitPendingCheck();
-          break;
-        }
-        for (const f of shape.fields) {
-          // typeEquals(f.type, iv) — the frontend fences everything else.
-          const lit = this.internLiteral(f.name);
-          const hit = B.tmp();
-          B.line(`${hit} = call zeroext i1 @scr_str_eq(ptr ${key.name}, ptr ${lit}) ; ${llvmCommentText(f.name)}`);
-          const lh = B.newLabel("rks.h");
-          const ln = B.newLabel("rks.n");
-          B.condBr(hit, lh, ln);
-          B.startBlock(lh);
-          const { ptr, type } = this.recordFieldPtr(obj.name, s.shapeId, f.name);
-          if (isRefCounted(type)) {
-            const old = B.tmp();
-            B.line(`${old} = load ptr, ptr ${ptr}`);
-            this.storeField(ptr, type, v.name);
-            this.releaseValue(old, type);
-          } else {
-            this.storeField(ptr, type, v.name);
-          }
-          B.br(join);
-          B.startBlock(ln);
-        }
-        if (!shape.indexValue) {
-          // The MISS on a fixed shape: release the moved-in value, throw
-          // the catchable TypeError naming the key (scr_record_key_miss —
-          // JS would add the property, the documented divergence).
-          if (isRefCounted(iv)) this.releaseValue(v.name, iv);
-          this.declare(`declare void @scr_record_key_miss(ptr)`);
-          B.line(`call void @scr_record_key_miss(ptr ${key.name})`);
-          B.br(join);
-          B.startBlock(join);
-          this.emitPendingCheck();
-          break;
-        }
-        const ovf = this.recordOvfPtr(obj.name, s.shapeId);
-        this.mapSet(ovf, "str", vAcc, key.name, v.name);
-        B.br(join);
-        B.startBlock(join);
-        break;
-      }
-      case "block": {
-        if (s.labels === undefined) {
-          this.emitBlock(s.body);
-          break;
-        }
-        // A labeled block: `break lbl` inside branches to the end label.
-        const le = B.newLabel("blk.e");
-        this.jumpTargets.push({
-          kind: "block",
-          brkLabel: le,
-          contLabel: null,
-          labels: s.labels,
-          frameDepth: this.frames.length,
-          scopeDepth: this.scopes.length,
-          finallyDepth: this.finallyStack.length,
-        });
-        this.emitBlock(s.body);
-        this.jumpTargets.pop();
-        B.br(le);
-        B.startBlock(le);
-        break;
-      }
-      case "if": {
-        const cond = this.emitCondition(s.cond);
-        const trueLabel = B.newLabel("if.t");
-        const joinLabel = B.newLabel("if.j");
-        const falseLabel = s.else_ ? B.newLabel("if.f") : joinLabel;
-        B.condBr(cond, trueLabel, falseLabel);
-        B.startBlock(trueLabel);
-        this.emitBlock(s.then);
-        B.br(joinLabel);
-        if (s.else_) {
-          B.startBlock(falseLabel);
-          this.emitBlock(s.else_);
-          B.br(joinLabel);
-        }
-        B.startBlock(joinLabel);
-        break;
-      }
-      case "while": {
-        const lc = B.newLabel("loop.c");
-        const lb = B.newLabel("loop.b");
-        const le = B.newLabel("loop.e");
-        B.br(lc);
-        B.startBlock(lc);
-        B.condBr(this.emitCondition(s.cond), lb, le);
-        B.startBlock(lb);
-        this.jumpTargets.push({
-          kind: "loop",
-          brkLabel: le,
-          contLabel: lc,
-          labels: s.labels,
-          frameDepth: this.frames.length,
-          scopeDepth: this.scopes.length,
-          finallyDepth: this.finallyStack.length,
-        });
-        this.emitBlock(s.body);
-        this.jumpTargets.pop();
-        B.br(lc);
-        B.startBlock(le);
-        break;
-      }
-      case "doWhile": {
-        // Body first (runs at least once); continue jumps to the CONDITION.
-        const lb = B.newLabel("loop.b");
-        const lc = B.newLabel("loop.c");
-        const le = B.newLabel("loop.e");
-        B.br(lb);
-        B.startBlock(lb);
-        this.jumpTargets.push({
-          kind: "loop",
-          brkLabel: le,
-          contLabel: lc,
-          labels: s.labels,
-          frameDepth: this.frames.length,
-          scopeDepth: this.scopes.length,
-          finallyDepth: this.finallyStack.length,
-        });
-        this.emitBlock(s.body);
-        this.jumpTargets.pop();
-        B.br(lc);
-        B.startBlock(lc);
-        B.condBr(this.emitCondition(s.cond), lb, le);
-        B.startBlock(le);
-        break;
-      }
-      case "for": {
-        // The init's scope wraps the whole loop (break/continue must NOT
-        // release it — scopeDepth captured after the push, C parity).
-        const integerArrayLoop = this.debug === null ? matchIntegerArrayForLoop(s, this.currentLocals, this.integerArrayBindings) : null;
-        const integerLoop = integerArrayLoop ?? (this.debug === null ? matchIntegerBytesForLoop(s, this.currentLocals) : null);
-        this.scopes.push([]);
-        let integerSlot: string | null = null;
-        if (integerLoop) {
-          integerSlot = B.slot();
-          B.entryAllocas.push(`${integerSlot} = alloca ${this.sizeType} ; integer induction ${this.currentLocals.get(integerLoop.localId)!.name}`);
-          let start = "0";
-          if (integerArrayLoop && s.init?.kind === "varDecl" && s.init.init) {
-            const value = this.emitExpr(s.init.init);
-            start = B.tmp();
-            B.line(`${start} = fptoui double ${value.name} to ${this.sizeType}`);
-            this.integerArrayBindings.add(integerLoop.localId);
-          }
-          B.line(`store ${this.sizeType} ${start}, ptr ${integerSlot}`);
-          this.integerLoopBindings.set(integerLoop.localId, integerSlot);
-        } else if (s.init) {
-          // A multi-declarator head shares the loop's scope. Emitting its
-          // IR block as an ordinary block would release captured/ref locals
-          // before the first condition.
-          const initializers = s.init.kind === "block" ? s.init.body : [s.init];
-          for (const initializer of initializers) this.emitStmt(initializer);
-        }
-        const lc = B.newLabel("loop.c");
-        const lb = B.newLabel("loop.b");
-        const le = B.newLabel("loop.e");
-        // JS `for (let i ...)`: each iteration gets a FRESH binding holding
-        // a copy of the previous one (closures made in iteration k keep
-        // seeing iteration k's value) — only observable, and only emitted,
-        // when a let variable is captured (boxed). Freshen before the first
-        // condition and again in the continue-target block before updating.
-        const initializers = s.init?.kind === "block" ? s.init.body : s.init ? [s.init] : [];
-        const capturedLets = initializers.flatMap((init) => {
-          const local = init.kind === "varDecl" ? this.currentLocals.get(init.localId) : undefined;
-          return local?.boxed && local.mutable ? [local] : [];
-        });
-        const freshenBindings = (): void => {
-          for (const local of capturedLets) {
-            const slot = `%${mangleLocal(local.id)}`;
-            const fresh = B.tmp();
-            const old = B.tmp();
-            B.line(`${fresh} = ${boxNewCall(this.shapeHost, local.type)} ; per-iteration ${local.name}`);
-            B.line(`${old} = load ptr, ptr ${slot}`);
-            const val = this.boxGet(old, local.type);
-            this.boxSet(fresh, local.type, val);
-            this.declare(`declare void @scr_box_release(ptr)`);
-            B.line(`call void @scr_box_release(ptr ${old})`);
-            B.line(`store ptr ${fresh}, ptr ${slot}`);
-          }
-        };
-        const lu = s.update || capturedLets.length > 0 ? B.newLabel("loop.u") : lc;
-        freshenBindings();
-        B.br(lc);
-        B.startBlock(lc);
-        if (integerLoop && integerSlot) {
-          const receiver = this.emitStableReceiver(integerLoop.limitReceiver, []);
-          const lenPtr = B.tmp();
-          const len = B.tmp();
-          const index = B.tmp();
-          const inBounds = B.tmp();
-          B.line(`${lenPtr} = getelementptr inbounds %${integerArrayLoop ? "ScrArr" : "ScrBytes"}, ptr ${receiver.name}, i64 0, i32 1`);
-          if (integerArrayLoop) this.markMemoryPointer(lenPtr, "array:header");
-          B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}${this.fieldAliasAttachment(lenPtr)}`);
-          B.line(`${index} = load ${this.sizeType}, ptr ${integerSlot}`);
-          B.line(`${inBounds} = icmp ult ${this.sizeType} ${index}, ${len}`);
-          B.condBr(inBounds, lb, le);
-        } else if (s.cond) B.condBr(this.emitCondition(s.cond), lb, le);
-        else B.br(lb);
-        B.startBlock(lb);
-        this.jumpTargets.push({
-          kind: "loop",
-          brkLabel: le,
-          contLabel: lu,
-          labels: s.labels,
-          frameDepth: this.frames.length,
-          scopeDepth: this.scopes.length,
-          finallyDepth: this.finallyStack.length,
-        });
-        this.emitBlock(s.body);
-        this.jumpTargets.pop();
-        B.br(lu);
-        if (lu !== lc) {
-          B.startBlock(lu);
-          freshenBindings();
-          if (integerLoop && integerSlot) {
-            const old = B.tmp();
-            const next = B.tmp();
-            B.line(`${old} = load ${this.sizeType}, ptr ${integerSlot}`);
-            B.line(`${next} = add nuw ${this.sizeType} ${old}, 1`);
-            B.line(`store ${this.sizeType} ${next}, ptr ${integerSlot}`);
-          } else if (s.update) this.emitStmt(s.update);
-          B.br(lc);
-        }
-        B.startBlock(le);
-        this.releaseScope(this.scopes.pop()!);
-        if (integerLoop) this.integerLoopBindings.delete(integerLoop.localId);
-        if (integerArrayLoop) this.integerArrayBindings.delete(integerArrayLoop.localId);
-        break;
-      }
-      case "forOf": {
-        // Ascending index loop; the length is re-read every iteration
-        // (JS-exact — pushes inside the body extend the iteration). The
-        // iterable temp lives in this statement's frame, so it is released
-        // when the whole loop ends (and by `return`'s frame sweep).
-        if (s.iterable.type.kind !== "array") throw new LlvmUnsupportedError(`forOf:${s.iterable.type.kind}`, s.loc);
-        const elem = s.iterable.type.elem;
-        const arr = this.emitExpr(s.iterable);
-        const idxSlot = B.slot();
-        B.entryAllocas.push(`${idxSlot} = alloca double`);
-        B.line(`store double ${f64Lit(0)}, ptr ${idxSlot}`);
-        const lc = B.newLabel("fof.c");
-        const lb = B.newLabel("fof.b");
-        const lu = B.newLabel("fof.u");
-        const le = B.newLabel("fof.e");
-        B.br(lc);
-        B.startBlock(lc);
-        const i = B.tmp();
-        const len = B.tmp();
-        const inBounds = B.tmp();
-        this.declare(`declare double @scr_arr_len(ptr)`);
-        B.line(`${i} = load double, ptr ${idxSlot}`);
-        B.line(`${len} = call double @scr_arr_len(ptr ${arr.name})`);
-        B.line(`${inBounds} = fcmp olt double ${i}, ${len}`);
-        B.condBr(inBounds, lb, le);
-        B.startBlock(lb);
-        this.jumpTargets.push({
-          kind: "loop",
-          brkLabel: le,
-          contLabel: lu,
-          labels: s.labels,
-          frameDepth: this.frames.length,
-          scopeDepth: this.scopes.length,
-          finallyDepth: this.finallyStack.length,
-        });
-        // The loop variable is a fresh const per iteration: its scope opens
-        // here, holds the (for ref elements: owned +1) current element, and
-        // releases it at the end of each iteration.
-        this.scopes.push([]);
-        const localInfo = this.currentLocals.get(s.localId);
-        const slot = `%${mangleLocal(s.localId)}`;
-        const acc = elemAccess(elem);
-        const accTy = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-        this.declare(
-          `declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_get_${acc}(ptr, double)`,
-        );
-        const cur = B.tmp();
-        B.line(`${cur} = call ${accTy} @scr_arr_get_${acc}(ptr ${arr.name}, double ${i})`);
-        if (localInfo?.boxed) {
-          // Captured loop variable: a fresh box per iteration, matching the
-          // fresh const binding. The box takes ownership of a ref element's
-          // +1 and is released with the iteration's scope.
-          const box = B.tmp();
-          B.line(`${box} = ${boxNewCall(this.shapeHost, elem)} ; per-iteration ${localInfo.name}`);
-          this.boxSet(box, elem, cur);
-          B.line(`store ptr ${box}, ptr ${slot}`);
-          this.scopes[this.scopes.length - 1]!.push({ slot, type: elem, boxed: true });
-        } else {
-          B.line(`store ${this.llType(elem)} ${cur}, ptr ${slot}`);
-          if (isRefCounted(elem)) this.scopes[this.scopes.length - 1]!.push({ slot, type: elem });
-        }
-        this.emitStmts(s.body);
-        const endedWithJump = endsWithJump(s.body);
-        const scope = this.scopes.pop()!;
-        if (!endedWithJump) this.releaseScope(scope);
-        this.jumpTargets.pop();
-        B.br(lu);
-        B.startBlock(lu);
-        const i2 = B.tmp();
-        const i3 = B.tmp();
-        B.line(`${i2} = load double, ptr ${idxSlot}`);
-        B.line(`${i3} = fadd double ${i2}, ${f64Lit(1)}`);
-        B.line(`store double ${i3}, ptr ${idxSlot}`);
-        B.br(lc);
-        B.startBlock(le);
-        break;
-      }
-      case "switch":
-        this.emitSwitch(s);
-        break;
-      case "break": {
-        // Unlabeled: the innermost loop OR switch (labeled blocks are
-        // skipped); labeled: the entry carrying the label.
-        let target: (typeof this.jumpTargets)[number] | undefined;
-        for (let i = this.jumpTargets.length - 1; i >= 0; i--) {
-          const t = this.jumpTargets[i]!;
-          if (s.label !== undefined ? t.labels?.includes(s.label) : t.kind !== "block") {
-            target = t;
-            break;
-          }
-        }
-        if (!target) throw new InternalCompilerError("llvm emitter bug: break target not found");
-        this.emitFinallysForJump(target.finallyDepth, target.frameDepth, target.scopeDepth);
-        if (!B.isTerminated()) B.terminate(`br label %${target.brkLabel}`);
-        break;
-      }
-      case "continue": {
-        // Unlabeled: the innermost loop; labeled: the loop carrying the
-        // label (tsc + the validator guarantee it IS a loop).
-        let target: (typeof this.jumpTargets)[number] | undefined;
-        for (let i = this.jumpTargets.length - 1; i >= 0; i--) {
-          const t = this.jumpTargets[i]!;
-          if (t.kind === "loop" && (s.label === undefined || t.labels?.includes(s.label))) {
-            target = t;
-            break;
-          }
-        }
-        if (!target || target.contLabel === null) throw new InternalCompilerError("llvm emitter bug: continue target not found");
-        this.emitFinallysForJump(target.finallyDepth, target.frameDepth, target.scopeDepth);
-        if (!B.isTerminated()) B.terminate(`br label %${target.contLabel}`);
-        break;
-      }
-      case "return": {
-        // The value computes FIRST (an SSA temp — finally mutations of
-        // returned locals cannot change it, Node-exact), then every
-        // crossed finally runs innermost-first with the frames/scopes/
-        // tryStack it sees truncated to its region (its releases already
-        // ran; a throw inside a copy propagates OUT of the completing
-        // try, past its own catch), then the function-level releases and
-        // the actual ret. The parked value owns a synthetic slot-backed
-        // scope entry during each copy so a throwing finally releases it.
-        let v: LlValue | null = null;
-        if (s.value !== null) {
-          v = this.emitExpr(s.value);
-          this.moveTemp(v);
-        }
-        if (this.finallyStack.length > 0) {
-          let pretSlot: string | null = null;
-          if (v !== null && isRefCounted(v.type)) {
-            pretSlot = B.slot();
-            B.entryAllocas.push(`${pretSlot} = alloca ptr ; pending return (through finally)`);
-            B.line(`store ptr ${v.name}, ptr ${pretSlot}`);
-          }
-          const savedFrames = this.frames;
-          const savedScopes = this.scopes;
-          const savedFinally = this.finallyStack;
-          const savedTry = this.tryStack;
-          for (let i = savedFinally.length - 1; i >= 0 && !B.isTerminated(); i--) {
-            const fin = savedFinally[i]!;
-            this.releaseForJump(fin.frameDepth, fin.scopeDepth);
-            this.frames = this.frames.slice(0, fin.frameDepth);
-            this.scopes = this.scopes.slice(0, fin.scopeDepth);
-            this.finallyStack = savedFinally.slice(0, i);
-            this.tryStack = savedTry.slice(0, fin.tryDepth);
-            if (pretSlot !== null) this.scopes.push([{ slot: pretSlot, type: v!.type }]);
-            this.emitBlock(fin.body);
-            if (pretSlot !== null) this.scopes.pop();
-          }
-          if (!B.isTerminated()) this.releaseForJump(0, 0);
-          this.frames = savedFrames;
-          this.scopes = savedScopes;
-          this.finallyStack = savedFinally;
-          this.tryStack = savedTry;
-        } else {
-          this.releaseForJump(0, 0);
-        }
-        if (!B.isTerminated()) {
-          if (this.currentWasiCoro !== null) {
-            this.emitWasiFulfill(v);
-            B.terminate(`br label %${this.currentWasiCoro.finalLabel}`);
-          } else if (v === null) B.terminate("ret void");
-          else B.terminate(`ret ${this.llType(s.value!.type)} ${v.name}`);
-        }
-        break;
-      }
-      case "throw": {
-        // Evaluate, move ownership into the runtime's exception cell, then
-        // unwind unconditionally (the innermost try handler, or out of the
-        // function) — the same release path as return/break/continue.
-        const v = this.emitExpr(s.value);
-        if (isRefCounted(s.value.type)) this.moveTemp(v); // the cell takes ownership
-        this.emitThrowValue({ name: v.name, type: s.value.type });
-        this.emitUnwind();
-        break;
-      }
-      case "rethrow": {
-        // Re-raise the saved snapshot (payload retained — the binding
-        // local releases with its scope) and unwind like `throw`.
-        const c = this.emitExpr({ kind: "varRef", localId: s.localId, type: CAUGHT, loc: s.loc });
-        this.declare(`declare void @scr_rethrow(ptr)`);
-        B.line(`call void @scr_rethrow(ptr ${c.name})`);
-        this.emitUnwind();
-        break;
-      }
-      case "runtimeFence": {
-        // The deferred JS compile fence: throw a catchable Error naming
-        // the construct (message) with the SC code stamped on `code`,
-        // then unwind exactly like `throw`. SCR_ERR_ERROR = 0.
-        const bytes = Buffer.byteLength(s.message, "utf8");
-        this.declare(`declare void @scr_throw_error_msg_code(i32, ptr, ${this.sizeType}, ptr)`);
-        B.line(
-          `call void @scr_throw_error_msg_code(i32 0, ptr ${this.cstr(s.message)}, ${this.sizeType} ${bytes}, ptr ${this.cstr(s.code)})`,
-        );
-        this.emitUnwind();
-        break;
-      }
-      case "tryCatch":
-        this.emitTryCatch(s);
-        break;
-      default: {
-        // Statement coverage is now total (bytesSet closed the set) —
-        // keep the loud refusal for any future IR statement kind.
-        const rest: never = s;
-        const k = (rest as IrStmt).kind;
-        throw new LlvmUnsupportedError(`stmt:${k}`, (rest as IrStmt).loc);
-      }
-    }
-    const frame = this.frames.pop()!;
-    // return/throw already released their frames on the jump path; the
-    // fall-through releases after them would be dead double-release code.
-    if (s.kind !== "return" && s.kind !== "throw" && s.kind !== "rethrow" && s.kind !== "runtimeFence") {
-      this.releaseFrame(frame);
-    }
+    return emitStmtBody(this, s);
   }
-
-  /** try/catch/finally via pending-flag unwinding — stmts.ts's
-   * emitTryCatch, block-flavored. Entering a try emits NO code: the try
-   * context is compile-time state (tryStack) redirecting unwinds inside
-   * the region to a label here. Shape:
-   *
-   *   { try body }           unwinds inside release frames/scopes down to
-   *                          this statement's depths, then br the handler
-   *   br after               (normal completion skips the handler)
-   *   try.c:                 (emitted only when some unwind targets it)
-   *     binding = scr_exc_take()   (or scr_exc_clear() when bindingless)
-   *     { catch body }
-   *   after: { finally body }      normal path
-   *   br try.e
-   *   try.fx:                exception path: the pending exception is
-   *     stash = scr_exc_take()     STASHED across the finally body so the
-   *     { finally body }           body's own pending checks answer for
-   *     scr_rethrow(stash)         themselves; a throw inside REPLACES the
-   *     <unwind>                   stash (it unwinds through the synthetic
-   *   try.e:                       scope entry) — JS's semantics exactly
-   *
-   * Abrupt completions inside tryBody/catchBody ride the finallyStack:
-   * returns inline copies at the return site, while break/continue use the
-   * shared region walk before branching to their resolved target. */
-  private emitTryCatch(s: IrStmt & { kind: "tryCatch" }): void {
-    const B = this.B;
-    const hasCatch = s.catchBody !== null;
-    const hasFinally = s.finallyBody !== null;
-    const catchLabel = B.newLabel("try.c");
-    const finExcLabel = B.newLabel("try.fx");
-    const endLabel = B.newLabel("try.e");
-    const afterTryLabel = hasFinally ? B.newLabel("try.f") : endLabel;
-
-    const handler = {
-      label: hasCatch ? catchLabel : finExcLabel,
-      used: false,
-      frameDepth: this.frames.length,
-      scopeDepth: this.scopes.length,
-    };
-    if (hasFinally) {
-      this.finallyStack.push({
-        frameDepth: this.frames.length,
-        scopeDepth: this.scopes.length,
-        tryDepth: this.tryStack.length,
-        body: s.finallyBody!,
-      });
-    }
-    this.tryStack.push(handler);
-    this.emitBlock(s.tryBody);
-    this.tryStack.pop();
-    B.br(afterTryLabel); // no-op when the try body already terminated
-
-    // Exceptions raised in the CATCH body unwind to the exception-path
-    // finally (pending stays set through it) when one exists.
-    const excHandler = {
-      label: finExcLabel,
-      used: !hasCatch && handler.used,
-      frameDepth: this.frames.length,
-      scopeDepth: this.scopes.length,
-    };
-
-    if (hasCatch && handler.used) {
-      B.startBlock(catchLabel);
-      if (hasFinally) this.tryStack.push(excHandler);
-      if (this.currentGenerator !== null) {
-        // Generator bodies: a pending GENRET sentinel (.return(v)
-        // injected at a yield) is a RETURN completion, not a throw —
-        // catch must not take it. Re-unwind past this handler (finally
-        // still runs — the unwind targets the exception-path finally or
-        // the enclosing context; the depths here equal the handler's).
-        this.declare(`declare zeroext i1 @scr_exc_genret_pending()`);
-        const gr = B.tmp();
-        B.line(`${gr} = call zeroext i1 @scr_exc_genret_pending()`);
-        const lg = B.newLabel("try.gr");
-        const lk = B.newLabel("try.gk");
-        B.condBr(gr, lg, lk);
-        B.startBlock(lg);
-        this.emitUnwind();
-        B.startBlock(lk);
-      }
-      if (s.catchLocalId !== null) {
-        // catch (e): the exception MOVES into the binding's snapshot box,
-        // owned by the catch body's scope (released on every exit —
-        // normal fall-through, jumps out, and unwinds from the body).
-        const slot = `%${mangleLocal(s.catchLocalId)}`;
-        this.declare(`declare ptr @scr_exc_take()`);
-        this.emitBlock(s.catchBody!, (scope) => {
-          const c = B.tmp();
-          B.line(`${c} = call ptr @scr_exc_take() ; catch binding`);
-          if (this.currentLocals.get(s.catchLocalId!)?.boxed) {
-            const box = B.tmp();
-            B.line(`${box} = ${boxNewCall(this.shapeHost, CAUGHT)} ; captured exception`);
-            this.boxSet(box, CAUGHT, c);
-            B.line(`store ptr ${box}, ptr ${slot}`);
-            scope.push({ slot, type: CAUGHT, boxed: true });
-          } else {
-            B.line(`store ptr ${c}, ptr ${slot}`);
-            scope.push({ slot, type: CAUGHT });
-          }
-        });
-      } else {
-        this.declare(`declare void @scr_exc_clear()`);
-        B.line(`call void @scr_exc_clear() ; catch takes the exception`);
-        this.emitBlock(s.catchBody!);
-      }
-      if (hasFinally) this.tryStack.pop();
-      B.br(afterTryLabel); // the catch's normal completion
-    }
-    if (hasFinally) this.finallyStack.pop();
-
-    if (hasFinally) {
-      B.startBlock(afterTryLabel);
-      this.emitBlock(s.finallyBody!); // normal path
-      B.br(endLabel);
-      if (excHandler.used) {
-        // The pending exception is STASHED across the finally body (a
-        // ScrCaught snapshot, re-raised after) so the body runs with a
-        // CLEAN cell — see stmts.ts's exception-path copy. The
-        // stash rides an alloca slot so a throw inside the body unwinds
-        // through the synthetic scope entry (replace semantics).
-        B.startBlock(finExcLabel);
-        this.declare(`declare ptr @scr_exc_take()`);
-        this.declare(`declare void @scr_rethrow(ptr)`);
-        this.declare(`declare void @scr_caught_release(ptr)`);
-        const stash = B.tmp();
-        const stashSlot = B.slot();
-        B.entryAllocas.push(`${stashSlot} = alloca ptr ; finally exception stash`);
-        B.line(`${stash} = call ptr @scr_exc_take() ; stash across finally`);
-        B.line(`store ptr ${stash}, ptr ${stashSlot}`);
-        this.scopes.push([{ slot: stashSlot, type: CAUGHT }]);
-        const suppressHandler = s.suppressFinallyErrors
-          ? {
-              label: B.newLabel("try.fs"),
-              used: false,
-              frameDepth: this.frames.length,
-              scopeDepth: this.scopes.length,
-            }
-          : null;
-        if (suppressHandler) this.tryStack.push(suppressHandler);
-        this.emitBlock(s.finallyBody!);
-        if (suppressHandler) this.tryStack.pop();
-        this.scopes.pop(); // normal completion keeps the stash for the re-raise
-        B.line(`call void @scr_rethrow(ptr ${stash})`);
-        B.line(`call void @scr_caught_release(ptr ${stash})`);
-        this.emitUnwind();
-        if (suppressHandler?.used) {
-          B.startBlock(suppressHandler.label);
-          this.declare(`declare void @scr_exc_suppress(ptr)`);
-          B.line(`call void @scr_exc_suppress(ptr ${stash}) ; consumes stash`);
-          this.emitUnwind();
-        }
-      }
-      B.startBlock(endLabel);
-    } else {
-      B.startBlock(endLabel);
-    }
+  emitTryCatch(s: IrStmt & { kind: "tryCatch" }): void {
+    return emitTryCatch(this, s);
   }
-
-  /** JS-exact switch: lazily evaluated, arbitrary-expression case tests in
-   * source order, bodies falling through in source order until a break —
-   * A chain of conditional branches. All case bodies
-   * share ONE scope; because dispatch can jump PAST a varDecl into a later
-   * case, refcounted/boxed case-body locals are NULL-reset up front and
-   * the scope-exit releases rely on NULL tolerance. */
-  private emitSwitch(s: IrStmt & { kind: "switch" }): void {
-    const B = this.B;
-    const discKind = s.disc.type.kind;
-    if (discKind !== "f64" && discKind !== "string" && discKind !== "bool") {
-      throw new LlvmUnsupportedError(`switch:${discKind}`, s.loc);
-    }
-    // The disc temp lives in the whole statement's frame: for a string
-    // discriminant it stays alive across every test and body, released
-    // when the switch statement ends (break lands past this statement's
-    // frame release — releaseForJump keeps the target's own frame).
-    const disc = this.emitExpr(s.disc);
-    for (const c of s.cases) {
-      for (const stmt of c.body) {
-        if (stmt.kind !== "varDecl") continue;
-        const local = this.currentLocals.get(stmt.localId)!;
-        if (local.boxed || isRefCounted(local.type)) {
-          B.line(`store ptr null, ptr %${mangleLocal(local.id)} ; case-scoped ${local.name}`);
-        }
-      }
-    }
-    const end = B.newLabel("sw.e");
-    const caseLabels = s.cases.map(() => B.newLabel("sw.c"));
-    let defaultIdx = -1;
-    s.cases.forEach((c, i) => {
-      if (c.test === null) {
-        defaultIdx = i;
-        return;
-      }
-      // Lazy source-order test evaluation (a test after the match never
-      // runs). Each test's temps release right after its comparison.
-      this.frames.push([]);
-      const t = this.emitExpr(c.test);
-      const hit = B.tmp();
-      if (c.test.type.kind === "string") {
-        this.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
-        B.line(`${hit} = call zeroext i1 @scr_str_eq(ptr ${disc.name}, ptr ${t.name})`);
-      } else if (c.test.type.kind === "bool") {
-        B.line(`${hit} = icmp eq i1 ${disc.name}, ${t.name}`);
-      } else {
-        B.line(`${hit} = fcmp oeq double ${disc.name}, ${t.name}`);
-      }
-      this.releaseFrame(this.frames.pop()!);
-      const next = B.newLabel("sw.t");
-      B.condBr(hit, caseLabels[i]!, next);
-      B.startBlock(next);
-    });
-    B.br(defaultIdx >= 0 ? caseLabels[defaultIdx]! : end);
-
-    this.jumpTargets.push({
-      kind: "switch",
-      brkLabel: end,
-      contLabel: null,
-      labels: s.labels,
-      frameDepth: this.frames.length,
-      scopeDepth: this.scopes.length,
-      finallyDepth: this.finallyStack.length,
-    });
-    const scope: LlScopeEntry[] = [];
-    this.scopes.push(scope);
-    s.cases.forEach((c, i) => {
-      B.br(caseLabels[i]!); // the previous body's natural fall-through
-      B.startBlock(caseLabels[i]!);
-      this.emitStmts(c.body);
-    });
-    this.jumpTargets.pop();
-    this.scopes.pop();
-    // Natural fall-off of the last body releases the shared scope; a jump
-    // already released it before jumping.
-    const lastBody = s.cases[s.cases.length - 1]?.body;
-    if (!lastBody || !endsWithJump(lastBody)) this.releaseScope(scope);
-    B.br(end);
-    B.startBlock(end);
+  emitSwitch(s: IrStmt & { kind: "switch" }): void {
+    return emitSwitch(this, s);
   }
 
   /** Evaluates a condition (IR conds are bool-typed) and releases its
    * temps BEFORE the branch — safe because the result is a scalar i1, and
    * required in loop-condition blocks (their temps must not survive into
    * later blocks across the back edge). */
-  private emitCondition(cond: IrExpr): string {
+  emitCondition(cond: IrExpr): string {
     const v = this.emitExpr(cond);
     const frame = this.currentFrame();
-    this.releaseFrame(frame);
+    this.releaseTemps(frame);
     frame.length = 0;
     return v.name;
   }
@@ -4577,203 +6163,1158 @@ export class LlEmitter {
   emitBranchInto(slot: string, expr: IrExpr, integerSlot?: string): boolean {
     this.frames.push([]);
     const v = this.emitExpr(expr);
-    this.moveTemp(v);
+    this.toFrame(v);
     this.B.line(`store ${this.llType(expr.type)} ${v.name}, ptr ${slot}`);
-    if (integerSlot !== undefined && v.uint32 !== undefined) this.B.line(`store i32 ${v.uint32}, ptr ${integerSlot}`);
-    this.releaseFrame(this.frames.pop()!);
+    if (integerSlot !== undefined && v.uint32 !== undefined)
+      this.B.line(`store i32 ${v.uint32}, ptr ${integerSlot}`);
+    this.releaseTemps(this.frames.pop()!);
     return v.uint32 !== undefined;
   }
 
   // ── expressions ─────────────────────────────────────────────────────────
 
-  emitLiteralExpr(e: ExprOf<"numLit" | "boolLit" | "strLit" | "moduleNsRef" | "unitLit" | "varRef">): LlValue {
+  emitLiteralExpr(
+    e: ExprOf<"numLit" | "boolLit" | "strLit" | "moduleNsRef" | "unitLit" | "varRef">,
+  ): LlValue {
     return emitLiteralExpr(this, e);
   }
 
-  emitOperatorExpr(e: ExprOf<"bin" | "unary" | "incDec" | "fieldIncDec" | "assignExpr" | "seqExpr">): LlValue {
-    if (e.kind === "seqExpr") {
-      // Saved operands can feed later call arguments. Transfer ownership
-      // to this expression's frame so they survive those reads and still
-      // die on the path that created them, including inside lazy branches.
-      this.scopes.push([]);
-      const result = emitBorrowedFieldSequence(this, e) ?? emitOperatorExpr(this, e);
-      for (const local of this.scopes.pop()!) {
-        this.currentFrame().push({ name: local.slot, type: local.type, slot: true, ...(local.boxed ? { boxed: true } : {}) });
-      }
-      return result;
-    }
+  emitOperatorExpr(
+    e: ExprOf<"bin" | "unary" | "incDec" | "fieldIncDec" | "assignExpr" | "seqExpr">,
+  ): LlValue {
+    if (e.kind === "seqExpr")
+      return this.emitSequence(
+        () => emitBorrowedFieldSequence(this, e) ?? emitOperatorExpr(this, e),
+      );
     return emitOperatorExpr(this, e);
   }
 
-  emitControlExpr(e: ExprOf<"dynDestrCheck" | "dynIterN" | "toBool" | "logical" | "ternary" | "optChain" | "chainRecv" | "orDefault" | "nullish">): LlValue {
+  /** Saved operands can feed later call arguments. Transfer ownership of a
+   * sequence's locals to this expression's frame so they survive those
+   * reads and still die on the path that created them, including inside
+   * lazy branches. */
+  private emitSequence<T>(body: () => T): T {
+    this.scopes.push([]);
+    const result = body();
+    for (const local of this.scopes.pop()!) {
+      this.currentFrame().push({
+        name: local.slot,
+        type: local.type,
+        slot: true,
+        ...(local.boxed ? { boxed: true } : {}),
+      });
+    }
+    return result;
+  }
+
+  /** A statement-position expression whose value is dropped. When a
+   * sequence's result only reads an unchanged local (a derived
+   * constructor's `super()` evaluates to `this`), its statements still run
+   * in place, but the result is neither retained nor released. */
+  /** Whether a discarded value can be skipped entirely: a borrowable read
+   * with no effect of its own. canBorrowCallArgument also accepts checked
+   * projections (a ternary or narrow whose failing arm throws, and the
+   * throwing call itself) because a borrowed use still evaluates them;
+   * skipping those would drop the throw. */
+  private discardableRead(value: IrExpr): boolean {
+    if (value.kind === "libCall" || value.kind === "ternary" || value.kind === "unionNarrow")
+      return false;
+    if (
+      (value.kind === "upcast" || value.kind === "downcast" || value.kind === "unionWrap") &&
+      !this.discardableRead(value.value)
+    )
+      return false;
+    if (value.kind === "seqExpr") {
+      const guarded = guardedValue(value);
+      if (guarded === null || !this.discardableRead(guarded)) return false;
+    }
+    return this.canBorrowCallArgument(value);
+  }
+
+  emitDiscarded(e: IrExpr): void {
+    // A statement-position yield never reads the resumed value: it stays
+    // in the IN slot until the next resume replaces it.
+    if (e.kind === "yieldExpr" && e.captureCompletion === undefined && e.type.kind !== "void") {
+      this.emitExpr({ ...e, type: VOID });
+      return;
+    }
+    if (
+      e.kind === "seqExpr" &&
+      isRefCounted(e.result.type) &&
+      e.result.kind !== "strLit" &&
+      (this.discardableRead(e.result) ||
+        // A function-local binding's read has no effect of its own (a
+        // compound assignment's result, say); a module binding's read may
+        // throw before initialization, so it stays.
+        (e.result.kind === "varRef" && this.binding(e.result.localId).kind === "local"))
+    ) {
+      this.emitSequence(() => {
+        for (const s of e.stmts) this.emitStmt(s);
+      });
+      return;
+    }
+    if (e.kind === "dynInvoke" && e.calleeNameValue === undefined) {
+      emitDynamicExpr(this, e, true);
+      return;
+    }
+    this.emitExpr(e);
+  }
+
+  emitControlExpr(
+    e: ExprOf<
+      | "dynDestrCheck"
+      | "dynIterN"
+      | "toBool"
+      | "logical"
+      | "ternary"
+      | "optChain"
+      | "chainRecv"
+      | "orDefault"
+      | "nullish"
+    >,
+  ): LlValue {
     return emitControlExpr(this, e);
   }
 
-  emitStringExpr(e: ExprOf<"strConcat" | "strEq" | "strCmp" | "toString" | "strIntrinsic" | "regexLit" | "templateStrings" | "regexIntrinsic">): LlValue {
+  emitStringExpr(
+    e: ExprOf<
+      | "strConcat"
+      | "strEq"
+      | "strCmp"
+      | "toString"
+      | "strIntrinsic"
+      | "regexLit"
+      | "templateStrings"
+      | "regexIntrinsic"
+    >,
+  ): LlValue {
     return emitStringExpr(this, e);
   }
-
-  /**
-   * Lower canonical `target = target + suffix` after evaluating the old
-   * left side and suffix in JavaScript order.  The snapshot stays owned by
-   * the statement frame while the destination relinquishes its CURRENT
-   * value, making the snapshot unique unless a real observable alias exists.
-   */
   emitStringSelfConcatAssign(
     localId: string,
     left: IrExpr,
     suffix: IrExpr,
     retainForYield: boolean,
   ): LlValue {
-    const snapshot = this.emitExpr(left);
-    const right = this.emitExpr(suffix);
-    const b = this.binding(localId);
-    const B = this.B;
-    if (b.kind === "boxed") {
-      // set_ref(NULL) unlinks then releases the binding's post-suffix value.
-      this.boxSet(this.loadBox(b.slot), b.type, "null");
-    } else {
-      const old = B.tmp();
-      B.line(`${old} = load ptr, ptr ${b.slot}`);
-      B.line(`store ptr null, ptr ${b.slot}`);
-      this.releaseValue(old, b.type);
-    }
-    this.declare(`declare ptr @scr_str_concat(ptr, ptr)`);
-    const raw = B.tmp();
-    B.line(`${raw} = call ptr @scr_str_concat(ptr ${snapshot.name}, ptr ${right.name})`);
-    const result = this.own({ name: raw, type: left.type });
-    if (retainForYield) {
-      const stored = this.retainValue(result.name, result.type);
-      if (b.kind === "boxed") this.boxSet(this.loadBox(b.slot), b.type, stored);
-      else B.line(`store ptr ${stored}, ptr ${b.slot}`);
-    } else {
-      this.moveTemp(result);
-      if (b.kind === "boxed") this.boxSet(this.loadBox(b.slot), b.type, result.name);
-      else B.line(`store ptr ${result.name}, ptr ${b.slot}`);
-    }
-    return result;
+    return emitStringSelfConcatAssign(this, localId, left, suffix, retainForYield);
   }
 
-  emitContainerExpr(e: ExprOf<"arrayLit" | "arrayNewLen" | "arrayGet" | "arrayHas" | "arrayState" | "arrIntrinsic" | "bytesNew" | "bytesIntrinsic" | "mapNew" | "mapIntrinsic" | "setIntrinsic" | "setNew">): LlValue {
+  /** The code of a one-argument `String.fromCharCode(c)` suffix, emitted, so
+   * `s += String.fromCharCode(c)` appends the character without building
+   * the one-character string; null for any other suffix. */
+  emitSingleCharCode(suffix: IrExpr): LlValue | null {
+    if (suffix.kind !== "libCall" || suffix.fn !== "string.fromCharCode") return null;
+    const packed = suffix.args[0];
+    if (packed?.kind !== "arrayLit" || packed.elems.length !== 1 || packed.spreads?.length)
+      return null;
+    return this.emitExpr(packed.elems[0]!);
+  }
+
+  /**
+   * Lower `recv.f = recv.f + suffix` on a plain string field like
+   * emitStringSelfConcatAssign does for locals. The field's old value is
+   * snapshotted (+1) and the suffix evaluated in JavaScript order; then the
+   * field unlinks and releases its CURRENT value, so the snapshot is unique
+   * unless a real alias exists and the concat appends in place instead of
+   * copying the whole string on every append. Returns false (emitting
+   * nothing) for every other store.
+   */
+  emitFieldSelfConcat(s: Extract<IrStmt, { kind: "fieldSet" | "recordSet" }>): boolean {
+    const suffix = matchFieldSelfConcat(s);
+    if (!suffix || s.value.kind !== "strConcat") return false;
+    let fieldType: IrType | undefined;
+    if (s.kind === "fieldSet") {
+      if (
+        this.inlineUnions.classField(s.className, s.field) ||
+        this.classMeta.get(s.className)?.root.def.name === "%Error"
+      )
+        return false;
+      fieldType = classFieldIndex(this.classMetaOf(s.className), s.field).type;
+    } else {
+      fieldType = this.recordShape(s.shapeId).fields.find((f) => f.name === s.field)?.type;
+    }
+    if (fieldType?.kind !== "string") return false;
+    const B = this.B;
+    const obj = this.emitStableReceiver(s.obj, [s.value]);
+    const snapshot = this.emitExpr(s.value.left);
+    const parts = stringParts(suffix);
+    const mixed = parts.length > 1 || numberPart(parts[0]!) !== null;
+    const inputs = mixed ? emitConcatInputs(this, parts) : [];
+    const right = mixed ? null : this.emitExpr(suffix);
+    if (s.kind === "fieldSet") this.emitStoreGuard(obj.name, s);
+    else if (this.publishedTypes?.recordGuarded(s.shapeId) === true)
+      this.emitPublishedFieldGuard(obj.name, null, s.field);
+    const { ptr } =
+      s.kind === "fieldSet"
+        ? this.classFieldPtr(obj.name, s.className, s.field)
+        : this.recordFieldPtr(obj.name, s.shapeId, s.field);
+    // Unlink, then release: nothing between here and the store below can
+    // run user code or observe the field (the concat only traps on OOM).
+    // Only an owned snapshot may survive the field's release.
+    const owned = this.ownsSnapshot(snapshot.name);
+    if (owned) {
+      const old = this.loadField(ptr, fieldType, false);
+      this.storeField(ptr, fieldType, "null", false);
+      this.releaseHeap(old, fieldType);
+    }
+    let raw: string;
+    if (right === null) {
+      raw = emitMixedConcat(this, snapshot.name, inputs);
+    } else {
+      this.declare(`declare ptr @scr_str_concat(ptr, ptr)`);
+      raw = B.tmp();
+      B.line(`${raw} = call ptr @scr_str_concat(ptr ${snapshot.name}, ptr ${right.name})`);
+    }
+    // The +1 result moves straight into the (now empty) field.
+    if (owned) this.storeField(ptr, fieldType, raw, false);
+    else this.replaceField(ptr, fieldType, false, this.own({ name: raw, type: fieldType }));
+    return true;
+  }
+
+  /** A snapshot the current statement frames own (+1), or an immortal
+   * value: it stays valid after its container releases the same string. */
+  private ownsSnapshot(name: string): boolean {
+    return (
+      this.isImmortal(name) || this.frames.some((f) => f.some((v) => v.name === name && !v.slot))
+    );
+  }
+
+  /**
+   * `a[i] = a[i] + suffix` on a string array (the canonical statement form
+   * of `a[i] += suffix`): the old element is snapshotted (+1) and the
+   * suffix evaluated in JavaScript order; then, when the slot still holds
+   * the snapshot, the array lets go of it (emitDenseSlotUnlink) so the
+   * concat can append in place, and the result is stored as usual.
+   */
+  emitArraySelfConcat(s: Extract<IrStmt, { kind: "arraySet" }>): boolean {
+    const value = s.value;
+    if (
+      value.kind !== "strConcat" ||
+      value.type.kind !== "string" ||
+      value.left.type.kind !== "string" ||
+      value.right.type.kind !== "string" ||
+      s.arr.type.kind !== "array" ||
+      s.arr.type.elem.kind !== "string" ||
+      s.arr.kind !== "varRef" ||
+      s.index.kind !== "varRef" ||
+      !readsArraySlot(value.left, s.arr.localId, s.index.localId)
+    )
+      return false;
+    const elem = s.arr.type.elem;
+    const B = this.B;
+    const arr = this.emitStableReceiver(s.arr, [s.index, s.value]);
+    const idx = this.emitExpr(s.index);
+    const snapshot = this.emitExpr(value.left);
+    const parts = stringParts(value.right);
+    const mixed = parts.length > 1 || numberPart(parts[0]!) !== null;
+    const inputs = mixed ? emitConcatInputs(this, parts) : [];
+    const right = mixed ? null : this.emitExpr(value.right);
+    this.emitPublishedArrayGuard(arr.name, s.arr.type, 0, idx.name);
+    if (this.ownsSnapshot(snapshot.name))
+      emitDenseSlotUnlink(
+        this,
+        arr.name,
+        idx,
+        s.index,
+        snapshot.name,
+        this.internLiteral(""),
+        elem,
+      );
+    let raw: string;
+    if (right === null) {
+      raw = emitMixedConcat(this, snapshot.name, inputs);
+    } else {
+      this.declare(`declare ptr @scr_str_concat(ptr, ptr)`);
+      raw = B.tmp();
+      B.line(`${raw} = call ptr @scr_str_concat(ptr ${snapshot.name}, ptr ${right.name})`);
+    }
+    emitDenseArraySet(this, arr.name, idx, s.index, "ref", elem, raw);
+    return true;
+  }
+
+  /** `local = local + suffix` when the suffix cannot read or write the
+   * local (an unboxed binding is only reachable through this function's own
+   * expressions): reading the binding after the suffix gives the value the
+   * left side had, so it moves into a consuming concat, and the result takes
+   * its place. Null when the general snapshot path is needed. */
+  emitMovedSelfConcat(
+    localId: string,
+    left: IrExpr,
+    suffix: IrExpr,
+    retainForYield: boolean,
+  ): LlValue | null {
+    const b = this.binding(localId);
+    if (
+      retainForYield ||
+      b.kind !== "local" ||
+      b.local === undefined ||
+      b.local.boxed ||
+      b.local.tdz ||
+      b.type.kind !== "string" ||
+      left.kind !== "varRef" ||
+      left.localId !== localId ||
+      mentionsLocal(suffix, localId)
+    )
+      return null;
+    const parts = stringParts(suffix);
+    const mixed = parts.length > 1 || numberPart(parts[0]!) !== null;
+    const charCode = mixed ? null : this.emitSingleCharCode(suffix);
+    const inputs = mixed ? emitConcatInputs(this, parts) : [];
+    // The concat only reads the suffix, which may stay borrowed.
+    const right = mixed || charCode !== null ? null : emitStringInputs(this, [suffix])[0]!;
+    this.materializeSplitLocal(localId);
+    const B = this.B;
+    const head = B.tmp();
+    B.line(`${head} = load ptr, ptr ${b.slot}`);
+    let raw: string;
+    if (charCode !== null) {
+      this.declare(`declare ptr @scr_str_concat_move_char_code(ptr, double)`);
+      raw = B.tmp();
+      B.line(
+        `${raw} = call ptr @scr_str_concat_move_char_code(ptr ${head}, double ${charCode.name})`,
+      );
+    } else if (right === null) {
+      raw = emitMixedConcat(this, head, inputs, true);
+    } else {
+      this.declare(`declare ptr @scr_str_concat_move(ptr, ptr)`);
+      raw = B.tmp();
+      B.line(`${raw} = call ptr @scr_str_concat_move(ptr ${head}, ptr ${right.name})`);
+    }
+    B.line(`store ptr ${raw}, ptr ${b.slot}`);
+    return { name: raw, type: left.type }; // moved into the binding
+  }
+
+  emitContainerExpr(
+    e: ExprOf<
+      | "arrayLit"
+      | "arrayNewLen"
+      | "arrayGet"
+      | "arrayHas"
+      | "arrayState"
+      | "arrIntrinsic"
+      | "bytesNew"
+      | "bytesIntrinsic"
+      | "mapNew"
+      | "mapIntrinsic"
+      | "setIntrinsic"
+      | "setNew"
+    >,
+  ): LlValue {
     return emitContainerExpr(this, e);
   }
 
-  emitCallExpr(e: ExprOf<"call" | "ffiCall" | "closure" | "callValue" | "selfRef" | "new" | "classRef" | "newValue" | "instanceOfValue" | "promiseVoidWiden" | "upcast" | "downcast" | "instanceOf" | "virtualCall">): LlValue {
+  emitCallExpr(
+    e: ExprOf<
+      | "call"
+      | "ffiCall"
+      | "closure"
+      | "callValue"
+      | "selfRef"
+      | "new"
+      | "classRef"
+      | "newValue"
+      | "instanceOfValue"
+      | "promiseVoidWiden"
+      | "upcast"
+      | "downcast"
+      | "instanceOf"
+      | "virtualCall"
+    >,
+  ): LlValue {
     return emitCallExpr(this, e);
   }
 
-  emitRecordExpr(e: ExprOf<"fieldGet" | "recordGet" | "recordLit" | "recordClone" | "recordKeyGet" | "recordOvfKeys" | "recordOvfHas">): LlValue {
+  /** A direct async call an enclosing `await` consumes whole: emitted
+   * through the callee's await-call entry, yielding the awaited value. */
+  emitAwaitedCall(e: ExprOf<"call">, adopt = false): LlValue {
+    return emitCallExpr(this, e, adopt ? "adopt" : "await");
+  }
+
+  emitRecordExpr(
+    e: ExprOf<
+      | "fieldGet"
+      | "recordGet"
+      | "recordLit"
+      | "recordClone"
+      | "recordKeyGet"
+      | "recordOvfKeys"
+      | "recordOvfHas"
+      | "recordNullProto"
+      | "recordHas"
+      | "fieldAbsent"
+    >,
+  ): LlValue {
     return emitRecordExpr(this, e);
   }
 
-  emitDynamicExpr(e: ExprOf<"dynFrom" | "dynFromJsval" | "dynCall" | "dynInvoke" | "dynArrLit" | "dynObjLit" | "unionWrap" | "unionNarrow" | "unionDisc" | "unionKeyGet" | "unionIsTag" | "dynKeyGet" | "dynHasKey" | "dynScalarEq" | "dynTest" | "unionEq" | "unionFuncEq" | "caughtTest" | "caughtCheck" | "caughtNarrow" | "caughtToDyn">): LlValue {
+  emitDynamicExpr(
+    e: ExprOf<
+      | "dynFrom"
+      | "dynCall"
+      | "dynInvoke"
+      | "dynArrLit"
+      | "dynObjLit"
+      | "unionWrap"
+      | "unionNarrow"
+      | "unionDisc"
+      | "unionKeyGet"
+      | "unionIsTag"
+      | "dynKeyGet"
+      | "dynHasKey"
+      | "dynScalarEq"
+      | "dynTest"
+      | "unionEq"
+      | "unionFuncEq"
+      | "caughtTest"
+      | "caughtCheck"
+      | "caughtNarrow"
+      | "caughtToDyn"
+    >,
+  ): LlValue {
     return emitDynamicExpr(this, e);
   }
 
   emitIntrinsicExpr(e: ExprOf<"intrinsic">): LlValue {
+    if (e.name === "threads.publish") return this.emitPublish(e);
+    if (
+      e.name === "region.create" ||
+      e.name === "region.enter" ||
+      e.name === "region.leave" ||
+      e.name === "region.release"
+    )
+      return this.emitRegionIntrinsic(e);
+    if (e.name.startsWith("itable.")) return this.emitInternTableIntrinsic(e);
+    if (e.name.startsWith("slots.")) return emitThreadSlotsIntrinsic(this, e);
     return emitIntrinsicExpr(this, e);
+  }
+
+  /** The ScrSlots block of the ThreadSlots family `name`. */
+  threadSlotsBlock(name: string): string {
+    let sym = this.threadSlotsBlocks.get(name);
+    if (sym === undefined) {
+      sym = `@sc_slots_${this.threadSlotsBlocks.size}`;
+      this.threadSlotsBlocks.set(name, sym);
+    }
+    this.journal?.entry("slots", name, sym);
+    return sym;
+  }
+
+  /** InternTable's runtime calls (scr_itable.c). Table and entry handles
+   * are f64 values carrying pointer bits; entry values are 64-bit slots
+   * (double bits, a bool, or a pointer to an immortal value) that the
+   * table neither retains nor releases. Lookups and inserts of array keys
+   * throw a TypeError for keys longer than a table accepts. */
+  private emitInternTableIntrinsic(e: ExprOf<"intrinsic">): LlValue {
+    const B = this.B;
+    // The runtime copies keys and stores published values without counts,
+    // so every operand is borrowed.
+    const args = emitBorrowedInputs(this, e.args);
+    if (B.isTerminated()) return { name: "", type: e.type };
+    const toPtr = (handle: string): string => {
+      const bits = B.tmp(),
+        ptr = B.tmp();
+      B.line(`${bits} = bitcast double ${handle} to i64`);
+      B.line(`${ptr} = inttoptr i64 ${bits} to ptr`);
+      return ptr;
+    };
+    const toHandle = (ptr: string): LlValue => {
+      const bits = B.tmp(),
+        handle = B.tmp();
+      B.line(`${bits} = ptrtoint ptr ${ptr} to i64`);
+      B.line(`${handle} = bitcast i64 ${bits} to double`);
+      return { name: handle, type: e.type };
+    };
+    const keyCall = (op: "find" | "insert"): string => {
+      const kind = e.args[1]!.type.kind;
+      const key = kind === "string" ? "str" : kind === "array" ? "arr" : "f64";
+      const keyTy = key === "f64" ? "double" : "ptr";
+      const value = op === "insert" ? ", i64" : "";
+      this.declare(`declare ptr @scr_itable_${op}_${key}(ptr, ${keyTy}${value})`);
+      return `@scr_itable_${op}_${key}(ptr ${toPtr(args[0]!.name)}, ${keyTy} ${args[1]!.name}`;
+    };
+    switch (e.name) {
+      case "itable.open": {
+        this.declare(`declare ptr @scr_itable_open(ptr, i32)`);
+        const kind = B.tmp(),
+          table = B.tmp();
+        B.line(`${kind} = fptosi double ${args[1]!.name} to i32`);
+        B.line(`${table} = call ptr @scr_itable_open(ptr ${args[0]!.name}, i32 ${kind})`);
+        return toHandle(table);
+      }
+      case "itable.find": {
+        const call = keyCall("find");
+        const entry = B.tmp();
+        B.line(`${entry} = call ptr ${call})`);
+        // Array keys longer than a table accepts throw a TypeError.
+        if (e.args[1]!.type.kind === "array") this.emitPendingCheck();
+        return toHandle(entry);
+      }
+      case "itable.insert": {
+        const value = args[2]!;
+        const ty = this.llType(value.type);
+        let slot = value.name;
+        if (ty === "double") {
+          slot = B.tmp();
+          B.line(`${slot} = bitcast double ${value.name} to i64`);
+        } else if (ty === "i1") {
+          slot = B.tmp();
+          B.line(`${slot} = zext i1 ${value.name} to i64`);
+        } else if (ty === "ptr") {
+          slot = B.tmp();
+          B.line(`${slot} = ptrtoint ptr ${value.name} to i64`);
+        } else throw new InternalCompilerError(`llvm emitter bug: itable value of type ${ty}`);
+        const call = keyCall("insert");
+        const entry = B.tmp();
+        B.line(`${entry} = call ptr ${call}, i64 ${slot})`);
+        if (e.args[1]!.type.kind === "array") this.emitPendingCheck();
+        return toHandle(entry);
+      }
+      case "itable.value": {
+        // The handle's bits reach the address through memory: at -O0, x86
+        // FastISel folds inttoptr(bitcast double) into the load's address
+        // without moving the value out of its XMM register. Optimized
+        // builds turn the stack round trip back into one register move.
+        const carrier = B.slot();
+        B.entryAllocas.push(`${carrier} = alloca double`);
+        B.line(`store double ${args[0]!.name}, ptr ${carrier}`);
+        const bits = B.tmp(),
+          entry = B.tmp();
+        B.line(`${bits} = load i64, ptr ${carrier}`);
+        B.line(`${entry} = inttoptr i64 ${bits} to ptr`);
+        const slot = B.tmp();
+        B.line(`${slot} = load i64, ptr ${entry}, align 8`);
+        const ty = this.llType(e.type);
+        const result = B.tmp();
+        if (ty === "double") B.line(`${result} = bitcast i64 ${slot} to double`);
+        else if (ty === "i1") B.line(`${result} = trunc i64 ${slot} to i1`);
+        else if (ty === "ptr") B.line(`${result} = inttoptr i64 ${slot} to ptr`);
+        else throw new InternalCompilerError(`llvm emitter bug: itable value of type ${ty}`);
+        // Stored values are immortal: owning one adds no count.
+        return isRefCounted(e.type)
+          ? this.own({ name: result, type: e.type })
+          : { name: result, type: e.type };
+      }
+      case "itable.size": {
+        this.declare(`declare double @scr_itable_size(ptr)`);
+        const size = B.tmp();
+        B.line(`${size} = call double @scr_itable_size(ptr ${toPtr(args[0]!.name)})`);
+        return { name: size, type: e.type };
+      }
+      default:
+        throw new InternalCompilerError(`llvm emitter bug: unknown intrinsic ${e.name}`);
+    }
+  }
+
+  /** Lifetime regions in modules with lifetimeRegions (llvm/regions.ts).
+   * Created with the class graph; null elsewhere. */
+  regions: LifetimeRegions | null = null;
+
+  /** LifetimeRegion's runtime calls: create answers the region id, enter
+   * and leave bracket run(), release condemns. */
+  private emitRegionIntrinsic(e: ExprOf<"intrinsic">): LlValue {
+    if (this.regions === null)
+      throw new InternalCompilerError(`llvm emitter bug: ${e.name} without lifetimeRegions`);
+    const args = e.args.map((a) => this.emitExpr(a));
+    if (this.B.isTerminated()) return { name: "", type: e.type };
+    switch (e.name) {
+      case "region.create": {
+        this.declare(`declare double @scr_region_create(ptr)`);
+        const id = this.B.tmp();
+        this.B.line(`${id} = call double @scr_region_create(ptr ${REGION_TYPES})`);
+        return { name: id, type: e.type };
+      }
+      case "region.enter":
+        this.declare(`declare void @scr_region_enter(double)`);
+        this.B.line(`call void @scr_region_enter(double ${args[0]!.name})`);
+        break;
+      case "region.leave":
+        this.declare(`declare void @scr_region_leave()`);
+        this.B.line(`call void @scr_region_leave()`);
+        break;
+      default:
+        this.declare(`declare void @scr_region_release(double)`);
+        this.B.line(`call void @scr_region_release(double ${args[0]!.name})`);
+    }
+    return { name: "", type: e.type };
+  }
+
+  publishWalkersCache: PublishWalkers | null = null;
+
+  /** Per-type publication walkers, created on the first publish. */
+  get publishWalkers(): PublishWalkers {
+    if (this.publishWalkersCache !== null) return this.publishWalkersCache;
+    const byPre = [...this.classMeta.values()].sort((a, b) => a.pre - b.pre);
+    this.publishWalkersCache = new PublishWalkers({
+      // Journal hooks only on emitters that can emit ranges (chunk
+      // emitters, and emitters whose workers take a journal after the
+      // fork), so the host's optional calls cost nothing otherwise.
+      journalAllocated: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.allocated(name, op, args),
+      journalBuilt: !this.journaled ? undefined : () => this.journal?.built(),
+      journalOpened: !this.journaled ? undefined : (op) => this.journal?.opened(op),
+      journalUsed: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.used(name, op, args),
+      journalEntry: !this.journaled
+        ? undefined
+        : (table, key, value) => this.journal?.entry(table, key, value),
+      declare: (decl) => this.declare(decl),
+      cstr: (text) => this.cstr(text),
+      sizeType: this.sizeType,
+      rcAudit: this.shapeHost.objectAudit !== false,
+      tracedShapes: this.tracedShapes,
+      unionsById: this.unionsById,
+      recordsById: this.recordsById,
+      inlineUnions: this.inlineUnions,
+      nullableArm: (t) => {
+        const nullable = this.nullableUnions.of(t);
+        return nullable?.repr === "single" ? nullable.arm : null;
+      },
+      shapeUnion: (t) => this.nullableUnions.of(t)?.repr === "shapes",
+      fieldBase: (shapeId) => this.nullableUnions.fieldBase(shapeId),
+      classInfo: (className) => {
+        const meta = this.classMetaOf(className);
+        return {
+          def: meta.def,
+          hierarchy: meta.hierarchy,
+          pre: meta.pre,
+          post: meta.post,
+          runtimeRooted: meta.root.def.runtime === true,
+          idInRc: meta.idInRc,
+          compact: meta.compact,
+          // Inline scalar-union fields are plain bits: nothing to push.
+          fields: meta.def.fields.flatMap((f) =>
+            this.inlineUnions.classField(className, f.name)
+              ? []
+              : [
+                  {
+                    name: f.name,
+                    index: classFieldIndex(meta, f.name, "compressed").index,
+                    type: this.nullableFields.storageType(className, f.name, f.type),
+                    compressed: classFieldIndex(meta, f.name, "compressed").compressed,
+                  },
+                ],
+          ),
+        };
+      },
+      classesInInterval: (pre, post) =>
+        byPre.filter((m) => m.pre >= pre && m.pre <= post).map((m) => m.def.name),
+    });
+    return this.publishWalkersCache;
+  }
+
+  /** `publish(value)` (@scriptc/threads): makes the graph immortal and
+   * immutable (scr_publish with the static type's walker) and answers the
+   * same value. Throws (pending) when a dyn part is unpublishable. */
+  private emitPublish(e: ExprOf<"intrinsic">): LlValue {
+    const value = this.emitExpr(e.args[0]!);
+    if (this.B.isTerminated()) return value;
+    const lines = this.publishWalkers.emitPublish(value.name, value.type, e.loc);
+    if (lines.length > 0) {
+      for (const line of lines) this.B.line(line.trimStart());
+      // A refusal unwinds while the operand temp still owns its reference.
+      this.emitPendingCheck();
+    }
+    // The result IS the operand: ownership moves to the result temp.
+    if (!isRefCounted(value.type)) return { name: value.name, type: e.type };
+    this.toFrame(value);
+    return this.own({ name: value.name, type: e.type });
+  }
+
+  /** Branches on "`obj` is published" (rc == SIZE_MAX, or a count of
+   * UINT32_MAX in the low half for `count` i32: classes.ts
+   * LlClassMeta.idInRc, or the top bit of a compact header word for
+   * "compact": classes.ts COMPACT_PUBLISHED); leaves the builder in the cold
+   * block and answers the continuation label. */
+  private emitPublishedTest(obj: string, count: "i32" | "i64" | "compact" = this.sizeType): string {
+    const B = this.B;
+    const rc = B.tmp(),
+      frozen = B.tmp(),
+      expected = B.tmp();
+    if (count === "compact") {
+      B.line(`${rc} = load i32, ptr ${obj}`);
+      B.line(`${frozen} = icmp slt i32 ${rc}, 0`);
+    } else {
+      B.line(`${rc} = load ${count}, ptr ${obj}`);
+      B.line(`${frozen} = icmp eq ${count} ${rc}, -1`);
+    }
+    this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
+    B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${frozen}, i1 false)`);
+    const cold = B.newLabel("pub.frozen"),
+      ok = B.newLabel("pub.ok");
+    B.condBr(expected, cold, ok);
+    B.startBlock(cold);
+    return ok;
+  }
+
+  /** Branches on "the array `arr` is frozen" (SCR_ARR_FROZEN in its storage
+   * flags, scr_array.h), or published too when `published`; like
+   * emitPublishedTest, leaves the builder in the cold block and answers the
+   * continuation label. */
+  private emitFrozenArrayTest(arr: string, published: boolean): string {
+    const B = this.B;
+    const sparep = B.tmp(),
+      spare = B.tmp(),
+      bit = B.tmp();
+    let frozen = B.tmp();
+    B.line(
+      `${sparep} = getelementptr inbounds %ScrArr, ptr ${arr}, i32 0, i32 ${SCR_ARR_FIELD.spare}`,
+    );
+    B.line(`${spare} = load i16, ptr ${sparep}`);
+    B.line(`${bit} = and i16 ${spare}, ${SCR_ARR_FROZEN}`);
+    B.line(`${frozen} = icmp ne i16 ${bit}, 0`);
+    if (published) {
+      const rc = B.tmp(),
+        immortal = B.tmp(),
+        either = B.tmp();
+      B.line(`${rc} = load ${this.sizeType}, ptr ${arr}`);
+      B.line(`${immortal} = icmp eq ${this.sizeType} ${rc}, -1`);
+      B.line(`${either} = or i1 ${frozen}, ${immortal}`);
+      frozen = either;
+    }
+    this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
+    const expected = B.tmp();
+    B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${frozen}, i1 false)`);
+    const cold = B.newLabel("arr.frozen"),
+      ok = B.newLabel("arr.ok");
+    B.condBr(expected, cold, ok);
+    B.startBlock(cold);
+    return ok;
+  }
+
+  private publishedNamesSym: string | null = null;
+
+  /** The class-name table the hierarchy field guards index by preorder. */
+  publishedClassNamesDefs(): string[] {
+    if (this.publishedNamesSym === null) return [];
+    const metas = [...this.classMeta.values()];
+    const size = metas.reduce((max, m) => Math.max(max, m.pre + 1), 0);
+    const names: string[] = new Array<string>(size).fill("ptr null");
+    for (const m of metas) names[m.pre] = `ptr ${this.cstr(m.def.jsName ?? m.def.name)}`;
+    return [
+      `${this.publishedNamesSym} = internal constant [${size} x ptr] [ ${names.join(", ")} ]`,
+      ``,
+    ];
+  }
+
+  /** The frozen-object guard of a class field store, unless the store
+   * provably targets a still-private `this` (PublishedTypes.privateStores). */
+  emitStoreGuard(obj: string, s: Extract<IrStmt, { kind: "fieldSet" }>): void {
+    if (this.publishedTypes?.privateStores.has(s) === true) return;
+    this.emitPublishedFieldGuard(obj, s.className, s.field);
+  }
+
+  /** The frozen-object guard of a class field or record field store:
+   * Node's "Cannot assign to read only property" TypeError when the target
+   * is published. `className` null means a record (`#<Object>`). */
+  emitPublishedFieldGuard(obj: string, className: string | null, field: string): void {
+    const published = this.publishedTypes;
+    if (published === null) return;
+    if (className !== null && !published.classGuarded(className)) return;
+    const B = this.B;
+    const meta = className === null ? undefined : this.classMeta.get(className);
+    const ok = this.emitPublishedTest(
+      obj,
+      meta?.compact === true ? "compact" : meta?.idInRc === true ? "i32" : this.sizeType,
+    );
+    let owner: string;
+    if (meta === undefined) owner = this.cstr("Object");
+    else if (!meta.hierarchy) owner = this.cstr(meta.def.jsName ?? meta.def.name);
+    else {
+      // The DYNAMIC class names the object, as in Node.
+      this.publishedNamesSym ??= "@sc_pub_class_names";
+      const pre = this.loadVtPre(obj, meta.def.name),
+        slot = B.tmp(),
+        name = B.tmp();
+      B.line(
+        `${slot} = getelementptr inbounds ptr, ptr ${this.publishedNamesSym}, ${this.sizeType} ${pre}`,
+      );
+      B.line(`${name} = load ptr, ptr ${slot}`);
+      owner = name;
+    }
+    this.declare(`declare void @scr_throw_published_field(ptr, ptr)`);
+    B.line(`call void @scr_throw_published_field(ptr ${this.cstr(field)}, ptr ${owner})`);
+    this.emitUnwind();
+    B.startBlock(ok);
+  }
+
+  /** The frozen-array guard (scr_throw_published_array's ops): `index` and
+   * `count` are doubles (the written index, the argument count). */
+  emitPublishedArrayGuard(
+    arr: string,
+    arrType: IrType,
+    op: number,
+    index = f64Lit(0),
+    count = f64Lit(0),
+    third: string | null = null,
+  ): void {
+    const published = this.publishedTypes;
+    if (published?.containerGuarded(arrType) !== true) return;
+    const B = this.B;
+    const guards = published.arrayGuards(arrType);
+    const ok = guards.frozen
+      ? this.emitFrozenArrayTest(arr, guards.published)
+      : this.emitPublishedTest(arr);
+    const threw = B.tmp();
+    if (third === null) {
+      this.declare(`declare zeroext i1 @scr_throw_published_array(i32, ptr, double, double)`);
+      B.line(
+        `${threw} = call zeroext i1 @scr_throw_published_array(i32 ${op}, ptr ${arr}, double ${index}, double ${count})`,
+      );
+    } else {
+      this.declare(
+        `declare zeroext i1 @scr_throw_published_array_range(i32, ptr, double, double, double)`,
+      );
+      B.line(
+        `${threw} = call zeroext i1 @scr_throw_published_array_range(i32 ${op}, ptr ${arr}, double ${index}, double ${count}, double ${third})`,
+      );
+    }
+    const unwind = B.newLabel("pub.throw");
+    B.condBr(threw, unwind, ok);
+    B.startBlock(unwind);
+    this.emitUnwind();
+    B.startBlock(ok);
+  }
+
+  /** The published Map/Set guard: "Cannot modify a published Map/Set". */
+  emitPublishedCollectionGuard(m: string, t: IrType): void {
+    if (this.publishedTypes?.containerGuarded(t) !== true) return;
+    const B = this.B;
+    const ok = this.emitPublishedTest(m);
+    this.declare(`declare void @scr_throw_published_collection(i1 zeroext)`);
+    B.line(`call void @scr_throw_published_collection(i1 ${t.kind === "set" ? "true" : "false"})`);
+    this.emitUnwind();
+    B.startBlock(ok);
   }
 
   emitSerializationExpr(e: ExprOf<"jsonStringify" | "dynCheck">): LlValue {
     return emitSerializationExpr(this, e);
   }
 
-  emitAsyncExpr(e: ExprOf<"yieldExpr" | "genResume" | "awaitExpr" | "awaitUnionExpr" | "newPromise" | "promiseWithResolvers">): LlValue {
+  emitAsyncExpr(
+    e: ExprOf<
+      | "yieldExpr"
+      | "genResume"
+      | "awaitExpr"
+      | "awaitUnionExpr"
+      | "newPromise"
+      | "promiseWithResolvers"
+    >,
+  ): LlValue {
     return emitAsyncExpr(this, e);
   }
-
-  emitJsInteropExpr(e: ExprOf<"jsMarshal" | "jsOp" | "jsExit" | "jsBridgePromise">): LlValue {
-    return emitJsInteropExpr(this, e);
-  }
-
-  /** Read a receiver whose value is consumed immediately by a field or tag
-   * load. No user code may run between this read and its consumer. Locals
-   * and their projections already have an owner; other expressions keep
-   * their ordinary statement-frame ownership. The caller must retain any
-   * reference result before evaluating another expression. */
   emitReadReceiver(e: IrExpr): LlValue {
-    if (!isRefCounted(e.type)) return this.emitExpr(e);
-    if (e.kind === "strLit") return { name: this.internLiteral(e.value), type: e.type };
-    if (e.kind === "varRef") {
-      const binding = this.binding(e.localId);
-      // Capture boxes can carry TDZ and caught-value conversion semantics.
-      if (binding.kind === "boxed") return this.emitExpr(e);
-      if (binding.kind === "global") this.checkGlobalTdz(e.localId);
-      const value = this.B.tmp();
-      this.B.line(`${value} = load ptr, ptr ${binding.slot}`);
-      return { name: value, type: e.type };
-    }
-    if (e.kind === "unionNarrow") {
-      const union = this.emitReadReceiver(e.value);
-      return { name: this.unionPeek(union.name), type: e.type };
-    }
-    if (e.kind === "recordGet" || e.kind === "fieldGet") {
-      const receiver = this.emitReadReceiver(e.obj);
-      const { ptr, type } = e.kind === "recordGet"
-        ? this.recordFieldPtr(receiver.name, e.shapeId, e.field)
-        : this.classFieldPtr(receiver.name, e.className, e.field);
-      return { name: this.loadField(ptr, type), type: e.type };
-    }
-    if (e.kind === "ternary" && this.canBorrowReceiver(e.then) && this.canBorrowReceiver(e.else_)) {
-      // Checked projections lower to a ternary with an always-throwing
-      // arm. Keep that check at the use, but borrow the successful arm.
-      const B = this.B;
-      const cond = this.emitExpr(e.cond);
-      const slot = B.slot();
-      B.entryAllocas.push(`${slot} = alloca ptr`);
-      const yes = B.newLabel("read.then"), no = B.newLabel("read.else"), join = B.newLabel("read.join");
-      B.condBr(cond.name, yes, no);
-      for (const [label, value] of [[yes, e.then], [no, e.else_]] as const) {
-        B.startBlock(label);
-        this.frames.push([]);
-        const result = this.emitReadReceiver(value);
-        B.line(`store ptr ${result.name}, ptr ${slot}`);
-        this.releaseFrame(this.frames.pop()!);
-        B.br(join);
-      }
-      B.startBlock(join);
-      const value = B.tmp();
-      B.line(`${value} = load ptr, ptr ${slot}`);
-      return { name: value, type: e.type };
-    }
-    return this.emitExpr(e);
+    return emitReadReceiver(this, e);
   }
 
-  canBorrowReceiver(e: IrExpr): boolean {
-    switch (e.kind) {
-      case "varRef": return this.binding(e.localId).kind !== "boxed";
-      case "unionNarrow": return this.canBorrowReceiver(e.value);
-      case "fieldGet": case "recordGet": return this.canBorrowReceiver(e.obj);
-      case "ternary": return this.canBorrowReceiver(e.then) && this.canBorrowReceiver(e.else_);
-      // The runtime always sets a pending exception; its unreachable
-      // typed dummy is null and owns no receiver.
-      case "libCall": return e.fn === "error.nodeThrow";
-      default: return false;
+  /** The frame slot a reassigned stack-object local keeps for its value. */
+  stackObjectSlot(localId: string, type: IrType): string {
+    let slot = this.stackObjectSlots.get(localId);
+    if (slot === undefined) {
+      slot = this.B.slot();
+      this.B.entryAllocas.push(`${slot} = alloca ${stackObjectStruct(type)}, align 8`);
+      this.stackObjectSlots.set(localId, slot);
     }
+    return slot;
+  }
+  canStackReceiver(e: IrExpr): boolean {
+    return canStackReceiver(this, e);
+  }
+  isStackUnionSource(e: IrExpr): boolean {
+    return isStackUnionSource(this, e);
+  }
+
+  /** A read of a record or class field that stores its scalar union
+   * inline. */
+  inlineFieldGet(e: IrExpr): boolean {
+    if (e.kind === "recordGet") return this.recordFieldInline(e.shapeId, e.field);
+    return e.kind === "fieldGet" && this.inlineUnions.classField(e.className, e.field);
+  }
+
+  /** The nullable-pointer representation behind a union-typed class field
+   * read, or null for every other expression. */
+  nullableFieldGet(e: IrExpr): NullableRefField | null {
+    if (e.kind !== "fieldGet" || e.type.kind !== "union") return null;
+    return this.nullableFields.get(e.className, e.field);
+  }
+
+  /** A union operand consumed only by a projection (tag test, payload
+   * extraction, arm compare, truthiness). A nullable-pointer field read
+   * becomes a private stack box whose payload is borrowed from the field:
+   * the consumer must finish before any later expression can store to the
+   * field, and must never retain, release, or store the box. Every other
+   * operand takes the ordinary borrowed-receiver path. */
+  emitUnionProjection(e: IrExpr): LlValue {
+    const nullable = this.nullableFieldGet(e);
+    if (!nullable || e.kind !== "fieldGet") return this.emitReadReceiver(e);
+    const receiver = this.emitReadReceiver(e.obj);
+    const { ptr } = this.classFieldPtr(receiver.name, e.className, e.field, "compressed");
+    const p = this.loadRef(ptr);
+    return { name: this.stackNullableBox(p, nullable), type: e.type };
+  }
+
+  /** A private stack box over a nullable-pointer field read whose payload
+   * is retained into the current frame: an independent owner, so the box
+   * may outlive later stores to the field (call arguments, local copies).
+   * The box itself must still never reach an RC entry point. */
+  emitOwnedNullableStack(e: IrExpr): { box: string; owner: LlValue } {
+    const nullable = this.nullableFieldGet(e);
+    if (!nullable || e.kind !== "fieldGet")
+      throw new InternalCompilerError("llvm emitter bug: owned nullable stack of non-field");
+    const receiver = this.emitReadReceiver(e.obj);
+    const { ptr } = this.classFieldPtr(receiver.name, e.className, e.field, "compressed");
+    const p = this.loadRef(ptr);
+    const owner = this.own({ name: this.retainFrame(p, nullable.arm), type: nullable.arm });
+    return { box: this.stackNullableBox(owner.name, nullable), owner };
+  }
+
+  /** A private stack box over a borrowed nullable pointer. */
+  stackNullableBox(p: string, nullable: NullableRefField): string {
+    const B = this.B;
+    const box = B.slot();
+    B.entryAllocas.push(`${box} = alloca %ScrUnion`);
+    const isNull = B.tmp(),
+      tag = B.tmp(),
+      tagPtr = B.tmp(),
+      slot = B.tmp();
+    B.line(`${isNull} = icmp eq ptr ${p}, null`);
+    B.line(`${tag} = select i1 ${isNull}, i32 ${nullable.unitTag}, i32 ${nullable.refTag}`);
+    B.line(`${tagPtr} = getelementptr inbounds %ScrUnion, ptr ${box}, i64 0, i32 1`);
+    B.line(`store i32 ${tag}, ptr ${tagPtr}`);
+    B.line(`${slot} = getelementptr inbounds %ScrUnion, ptr ${box}, i64 0, i32 5`);
+    B.line(`store i64 0, ptr ${slot}`);
+    B.line(`store ptr ${p}, ptr ${slot}`);
+    return box;
+  }
+
+  /** The owned (+1) union value of a nullable-pointer slot: the unit arm's
+   * immortal instance, or a fresh heap box around a retained instance. */
+  nullableToOwnedUnion(p: string, nullable: NullableRefField): string {
+    const B = this.B;
+    const slot = B.slot();
+    B.entryAllocas.push(`${slot} = alloca ptr`);
+    const isNull = B.tmp();
+    const unit = B.newLabel("nf.u"),
+      ref = B.newLabel("nf.r"),
+      join = B.newLabel("nf.j");
+    B.line(`${isNull} = icmp eq ptr ${p}, null`);
+    B.condBr(isNull, unit, ref);
+    B.startBlock(unit);
+    B.line(`store ptr ${this.unitInstanceRef(nullable.unionId, nullable.unitTag)}, ptr ${slot}`);
+    B.br(join);
+    B.startBlock(ref);
+    const owned = this.retainHeap(p, nullable.arm);
+    const box = this.unionNewOwned(nullable.unionId, nullable.refTag, {
+      name: owned,
+      type: nullable.arm,
+    });
+    B.line(`store ptr ${box}, ptr ${slot}`);
+    B.br(join);
+    B.startBlock(join);
+    const t = B.tmp();
+    B.line(`${t} = load ptr, ptr ${slot}`);
+    return t;
+  }
+
+  /** The owned (+1) instance pointer (NULL for the unit arm) of a union
+   * box, which stays owned by its existing owner. */
+  unionToNullable(u: string, nullable: NullableRefField): string {
+    const B = this.B;
+    const tag = this.unionTag(u, nullable.unionId);
+    const isRef = B.tmp(),
+      sel = B.tmp();
+    B.line(`${isRef} = icmp eq i32 ${tag}, ${nullable.refTag}`);
+    const payload = this.unionPeek(u, nullable.unionId);
+    B.line(`${sel} = select i1 ${isRef}, ptr ${payload}, ptr null`);
+    return this.retainHeap(sel, nullable.arm);
+  }
+
+  /** `obj.f = value` for a nullable-pointer field: the new instance pointer
+   * is produced without a union box where the value is a wrap, and as a
+   * retained payload of a borrowed box otherwise. Unlink-then-release like
+   * every field store. */
+  emitNullableFieldStore(
+    obj: string,
+    className: string,
+    field: string,
+    nullable: NullableRefField,
+    value: IrExpr,
+  ): void {
+    let next: string;
+    if (
+      value.kind === "unionWrap" &&
+      value.unionId === nullable.unionId &&
+      (value.tag === nullable.refTag
+        ? typeEquals(value.value.type, nullable.arm)
+        : value.tag === nullable.unitTag)
+    ) {
+      if (value.tag === nullable.refTag) {
+        const inner = this.emitExpr(value.value);
+        this.toHeap(inner);
+        next = inner.name;
+      } else {
+        // Unit payloads carry nothing; a void payload runs for effects.
+        if (!isUnitType(value.value.type)) this.emitExpr(value.value);
+        next = "null";
+      }
+    } else if (value.kind === "varRef" && !this.canBorrowReceiver(value)) {
+      next = this.unionToNullable(this.emitExpr(value).name, nullable);
+    } else {
+      next = this.unionToNullable(this.emitUnionProjection(value).name, nullable);
+    }
+    const { ptr } = this.classFieldPtr(obj, className, field, "compressed");
+    const old = this.loadRef(ptr, false);
+    this.storeRef(ptr, next);
+    this.releaseHeap(old, nullable.arm);
+  }
+
+  /** A union binding whose slot may hold a private stack box: stack locals
+   * and projection-only parameters (callers may pass stack boxes). Such a
+   * box must only be projected: never retained, released, or stored. */
+  isStackUnionLocal(localId: string): boolean {
+    return (
+      this.projectedParameters.has(localId) ||
+      this.localStackUnions.has(localId) ||
+      this.localUnionStorage.has(localId) ||
+      this.localArrayReads.has(localId) ||
+      this.mapReadLifetimes.locals.has(localId)
+    );
+  }
+
+  /** The instance of a capsule known to hold exactly this class (borrowed). */
+  emitExactCapsuleObject(value: IrExpr, type: IrType): LlValue {
+    const capsule = this.emitReadReceiver(value);
+    const slot = this.B.tmp();
+    const object = this.B.tmp();
+    this.B.line(
+      `${slot} = getelementptr inbounds i8, ptr ${capsule.name}, i64 16 ; ->v.typed_ref.ptr`,
+    );
+    this.B.line(`${object} = load ptr, ptr ${slot}`);
+    return { name: object, type };
+  }
+  canBorrowReceiver(e: IrExpr): boolean {
+    return canBorrowReceiver(this, e);
+  }
+
+  /** A reference held as one plain pointer that emitReadReceiver can read
+   * without owning: class instances, records, arrays, strings, typed arrays
+   * and nullable-pointer unions. Tagged union boxes, closures and dynamic
+   * values keep ordinary ownership. */
+  plainReference(type: IrType): boolean {
+    switch (type.kind) {
+      case "object":
+      case "record":
+      case "array":
+      case "string":
+      case "bytes":
+        return true;
+      case "union":
+        return this.nullableUnions.has(type.unionId);
+      default:
+        return false;
+    }
+  }
+  private analyzeBorrowedReturns(): void {
+    return analyzeBorrowedReturns(this);
+  }
+
+  /** emitReadReceiver produces this node's pointer without acquiring a
+   * reference, given operands (and ternary arms) that do the same: plain
+   * class/record field reads, class casts, nullable-pointer narrows and
+   * wraps, and checked ternaries. Stack-boxed, map-read and boxed-field
+   * sources are owned. Depends only on module facts, not the current
+   * function. */
+  borrowsWithoutOwning(e: IrExpr): boolean {
+    if (!isRefCounted(e.type) || this.isStackUnionSource(e)) return false;
+    if (matchMapRead(e, this.boxedUnionsById)) return false;
+    switch (e.kind) {
+      case "fieldGet":
+        return this.nullableFieldGet(e) === null;
+      case "recordGet":
+        return true;
+      // emitReadReceiver lends a required element of a borrowed array when
+      // computing the index removes no edge.
+      case "arrayGet":
+        return (
+          e.arr.type.kind === "array" &&
+          this.optionalArrayReads.get(e) === null &&
+          this.referenceEffects.preserves(e.index)
+        );
+      case "unionNarrow":
+        return this.nullableUnions.has(e.unionId);
+      case "downcast":
+      case "upcast":
+        return e.value.type.kind === "object";
+      case "unionWrap":
+        return this.borrowableNullableWrap(e) !== null;
+      // The caller proves each arm separately.
+      case "ternary":
+        return true;
+      // The caller proves the arguments are walks; their evaluation must not
+      // remove an edge before the call reads them.
+      case "call":
+        return (
+          this.borrowedReturns.has(e.callee) &&
+          e.args.every((arg) => this.referenceEffects.preserves(arg))
+        );
+      default:
+        return false;
+    }
+  }
+
+  /** A wrap into a nullable-pointer union is the payload pointer itself
+   * (the reference arm) or an immortal constant (a unit arm), so it can
+   * borrow exactly when its payload can. Void payloads run for effects and
+   * keep the ordinary path; tagged unions still construct a box. */
+  borrowableNullableWrap(e: IrExpr): "unit" | "ref" | null {
+    if (e.kind !== "unionWrap") return null;
+    const nullable = this.nullableUnions.get(e.unionId);
+    if (!nullable) return null;
+    if (isUnitType(e.value.type)) return e.value.kind === "unitLit" ? "unit" : null;
+    const refArm =
+      nullable.repr === "single"
+        ? e.tag === nullable.refTag
+        : nullable.arms.some((arm) => arm.tag === e.tag);
+    return refArm && isRefCounted(e.value.type) ? "ref" : null;
+  }
+
+  materializeSplitLocal(localId: string): void {
+    const span = this.splitSpans.get(localId);
+    if (span) materializeSplitPiece(this, localId, span);
   }
 
   emitExpr(e: IrExpr): LlValue {
     return emitExpr(this, e);
   }
 
-  emitJsMarshal(e: IrExpr & { kind: "jsMarshal" }): LlValue {
-    return emitJsMarshal(this, e);
+  /** The helper classification of this module's inline-cache sites. */
+  get jsIcSites(): JsIcSites {
+    return (this.jsIcSitesMemo ??= new JsIcSites(this.mod));
   }
 
-  emitJsOp(e: IrExpr & { kind: "jsOp" }): LlValue {
-    return emitJsOp(this, e);
+  jsIcSite(): string {
+    const name = `@sc_js_ic_${this.jsIcSiteCount++}`;
+    this.journal?.site(name, "jsIcSite");
+    return name;
   }
 
-  emitJsExit(e: IrExpr & { kind: "jsExit" }): LlValue {
-    return emitJsExit(this, e);
+  /** A fresh read-site cache for one constant-key dyn read. */
+  dynReadIcSite(): string {
+    const name = `@sc_dyn_read_ic_${this.dynReadIcSites++}`;
+    this.journal?.site(name, "dynReadIcSite");
+    return name;
   }
 
-  islandAdapter(arity: number, retKind: "void" | "jsval" | "f64" | "bool" | "string"): string {
-    return islandAdapter(this, arity, retKind);
-  }
-
-  islandTypedAdapter(fn: IrType & { kind: "func" }): string {
-    return islandTypedAdapter(this, fn);
+  /** A fresh speculative loop site: the global that counts its bailing
+   * entries in a row. */
+  speculativeLoopSite(): string {
+    const name = `@sc_spec_bails_${this.speculativeLoopSites++}`;
+    this.journal?.site(name, "speculativeLoopSite");
+    this.journal?.opened("speculativeLoopSite");
+    this.declare(`${name} = internal global i8 0`);
+    this.journal?.built();
+    return name;
   }
 
   dynKind(d: string): string {
@@ -4784,7 +7325,10 @@ export class LlEmitter {
     return raceAdapterFor(this, from, to);
   }
 
-  genResultThunkFor(genT: IrType & { kind: "generator" }, recT: IrType & { kind: "record" }): string {
+  genResultThunkFor(
+    genT: IrType & { kind: "generator" },
+    recT: IrType & { kind: "record" },
+  ): string {
     return genResultThunkFor(this, genT, recT);
   }
 
@@ -4812,8 +7356,22 @@ export class LlEmitter {
     return childDataThunkFor(this, param);
   }
 
-  emitterFixedAdapter(cbT: IrType & { kind: "func" }): { fn: string; shim: string } {
+  childDataDynThunkFor(chunk: "bytes" | "str"): string {
+    return childDataDynThunkFor(this, chunk);
+  }
+
+  emitterFixedAdapter(cbT: IrType & { kind: "func" }): {
+    fn: string;
+    shim: string;
+  } {
     return emitterFixedAdapter(this, cbT);
+  }
+
+  emitterOnceAdapter(
+    boxerT: IrType & { kind: "func" },
+    fire?: string,
+  ): { fn: string; shim: string } {
+    return emitterOnceAdapter(this, boxerT, fire);
   }
 
   wrapEmitterListener(target: string, adapterFn: string): string {
@@ -4836,7 +7394,10 @@ export class LlEmitter {
     return streamDataAdapter(this, cbT);
   }
 
-  streamDoneFnFor(kind: "w" | "f" | "d" | "t" | "l", doneT: IrType & { kind: "func" }): string {
+  streamDoneFnFor(
+    kind: "w" | "f" | "d" | "t" | "l" | "c",
+    doneT: IrType & { kind: "func" },
+  ): string {
     return streamDoneFnFor(this, kind, doneT);
   }
 
@@ -4844,15 +7405,23 @@ export class LlEmitter {
     return fsRenameThunkFor(this, cbT);
   }
 
-  cryptoBytesThunkFor(cbT: IrType & { kind: "func" }, arrayBuffer = false): string {
-    return cryptoBytesThunkFor(this, cbT, arrayBuffer);
+  cryptoBytesThunkFor(
+    cbT: IrType & { kind: "func" },
+    arrayBuffer = false,
+    valueMode: BytesThunkValue = "buffer",
+  ): string {
+    return cryptoBytesThunkFor(this, cbT, arrayBuffer, valueMode);
+  }
+
+  cryptoIntThunkFor(cbT: IrType & { kind: "func" }): string {
+    return cryptoIntThunkFor(this, cbT);
   }
 
   zlibBytesThunkFor(cbT: IrType & { kind: "func" }): string {
     return zlibBytesThunkFor(this, cbT);
   }
 
-  streamCbThunkFor(kind: "r" | "w" | "f" | "d" | "t" | "l" | "e", cbT: IrType): string {
+  streamCbThunkFor(kind: "r" | "w" | "f" | "d" | "t" | "l" | "e" | "c" | "v", cbT: IrType): string {
     return streamCbThunkFor(this, kind, cbT);
   }
 
@@ -4860,12 +7429,12 @@ export class LlEmitter {
     return resolveThunkFor(this, inner);
   }
 
-  tagInSet(uName: string, tags: number[]): string {
-    return tagInSet(this, uName, tags);
+  tagInSet(uName: string, unionId: string, tags: number[]): string {
+    return tagInSet(this, uName, unionId, tags);
   }
 
-  arrPush(arr: string, acc: "f64" | "bool" | "ref", value: string): string {
-    return arrPush(this, arr, acc, value);
+  arrPush(arr: string, acc: ArrayAccess, value: string, element: IrType | null): string {
+    return arrPush(this, arr, acc, value, element);
   }
 
   emitArrayCopyLoop(dst: string, src: string, acc: "f64" | "bool" | "ref"): void {
@@ -4880,7 +7449,14 @@ export class LlEmitter {
     return emitArrIntrinsic(this, e);
   }
 
-  wrapNullable(raw: string, present: string, valueType: IrType, valueTag: number, resultType: IrType & { kind: "union" }, absentTag: number): LlValue {
+  wrapNullable(
+    raw: string,
+    present: string,
+    valueType: IrType,
+    valueTag: number,
+    resultType: IrType & { kind: "union" },
+    absentTag: number,
+  ): LlValue {
     return wrapNullable(this, raw, present, valueType, valueTag, resultType, absentTag);
   }
 
@@ -4888,13 +7464,17 @@ export class LlEmitter {
     return emitMapNew(this, e);
   }
 
-  mapSet(m: string, kAcc: "f64" | "str" | "ref", vAcc: "f64" | "bool" | "ref", key: string, value: string): void {
+  mapSet(
+    m: string,
+    kAcc: MapKeyAccess,
+    vAcc: "f64" | "bool" | "ref",
+    key: string,
+    value: string,
+  ): void {
     return mapSet(this, m, kAcc, vAcc, key, value);
   }
 
-  emitMapLikeIntrinsic(
-    e: Extract<IrExpr, { kind: "mapIntrinsic" | "setIntrinsic" }>,
-  ): LlValue {
+  emitMapLikeIntrinsic(e: Extract<IrExpr, { kind: "mapIntrinsic" | "setIntrinsic" }>): LlValue {
     return emitMapLikeIntrinsic(this, e);
   }
 
@@ -4910,8 +7490,8 @@ export class LlEmitter {
     return emitIntegerLoopIndex(this, expr);
   }
 
-  emitBytesIndex(receiver: string, index: string, integerIndex = false): string {
-    return emitBytesIndex(this, receiver, index, integerIndex);
+  emitBytesIndex(receiver: string, index: LlValue, expr?: IrExpr, inBounds = false): string {
+    return emitBytesIndex(this, receiver, index, expr, undefined, inBounds);
   }
 
   emitBytesData(receiver: string): string {
@@ -4922,12 +7502,62 @@ export class LlEmitter {
     return emitBytesLength(this, elem, receiver, bytes);
   }
 
-  emitBytesGet(elem: IrBytesElem, receiver: string, index: string, integerIndex = false): LlValue {
-    return emitBytesGet(this, elem, receiver, index, integerIndex);
+  emitBytesGet(
+    elem: IrBytesElem,
+    receiver: string,
+    index: LlValue,
+    expr?: IrExpr,
+    inBounds = false,
+    invalidNaN = false,
+    owned = false,
+    scope = "",
+  ): LlValue {
+    return emitBytesGet(this, elem, receiver, index, expr, inBounds, invalidNaN, owned, scope);
   }
 
   emitToUint32(value: string, expr?: IrExpr, uint32?: string): string {
     return emitToUint32(this, value, expr, uint32);
+  }
+
+  /** Stores a number into its int32-stored local, when it is one. The
+   * value is proven to be in the local's range, so its low 32 bits are the
+   * exact value. */
+  storeInt32Local(localId: string, value: LlValue, expr?: IrExpr): boolean {
+    const local = this.int32Locals.get(localId);
+    if (local === undefined) return false;
+    if (expr !== undefined && !this.int32LocalWrites.has(expr))
+      throw new InternalCompilerError(`llvm emitter bug: unproven write of int32 local ${localId}`);
+    const B = this.B;
+    const integer = exactInteger(this, value, expr);
+    let bits: string;
+    if (integer && /^-?\d+$/.test(integer.name)) bits = String(Number(integer.name) | 0); // a literal's i32 bits
+    else if (integer) bits = narrowInteger(this, integer);
+    else if (value.uint32 !== undefined) bits = value.uint32;
+    else {
+      // An Int32 contract proved this write without a range at the value.
+      bits = B.tmp();
+      B.line(`${bits} = ${local.signed ? "fptosi" : "fptoui"} double ${value.name} to i32`);
+    }
+    B.line(`store i32 ${bits}, ptr %${mangleLocal(localId)}`);
+    return true;
+  }
+
+  /** The number of an int32-stored local's i32, with the i32 as its
+   * integer and ToUint32 forms. A parameter the body never writes reads
+   * as its incoming double, which is the same number. */
+  int32LocalValue(localId: string, bits: string, type: IrType): LlValue {
+    const local = this.int32Locals.get(localId)!;
+    let number = `%p_${mangleLocal(localId)}`;
+    if (!local.incoming) {
+      number = this.B.tmp();
+      this.B.line(`${number} = ${local.signed ? "sitofp" : "uitofp"} i32 ${bits} to double`);
+    }
+    return {
+      name: number,
+      type,
+      uint32: bits,
+      integer: { name: bits, type: "i32", signed: local.signed, range: local.range },
+    };
   }
 
   storeIntegerView(localId: string, value: LlValue, expr?: IrExpr): void {
@@ -4937,8 +7567,29 @@ export class LlEmitter {
     this.B.line(`store i32 ${integer}, ptr ${slot}`);
   }
 
-  private emitBytesSet(elem: IrBytesElem, receiver: string, index: string, value: LlValue, integerIndex = false, expr?: IrExpr): void {
-    return emitBytesSet(this, elem, receiver, index, value, integerIndex, expr);
+  emitBytesSet(
+    elem: IrBytesElem,
+    receiver: string,
+    index: LlValue,
+    value: LlValue,
+    indexExpr?: IrExpr,
+    expr?: IrExpr,
+    inBounds = false,
+    owned = false,
+    scope = "",
+  ): void {
+    return emitBytesSet(
+      this,
+      elem,
+      receiver,
+      index,
+      value,
+      indexExpr,
+      expr,
+      inBounds,
+      owned,
+      scope,
+    );
   }
 
   emitBytesIntrinsic(e: IrExpr & { kind: "bytesIntrinsic" }): LlValue {
@@ -4962,18 +7613,27 @@ export class LlEmitter {
     resultType: IrType,
     overflowOnly: boolean,
     loc?: SrcLoc,
+    missNaN = false,
   ): void {
-    return keyedRecordReadInto(this, slot, join, objName, keyName, shapeId, resultType, overflowOnly, loc);
+    return keyedRecordReadInto(
+      this,
+      slot,
+      join,
+      objName,
+      keyName,
+      shapeId,
+      resultType,
+      overflowOnly,
+      loc,
+      missNaN,
+    );
   }
 
   dynPromiseAdapter(inner: IrType): string {
     return dynPromiseAdapter(this, inner);
   }
 
-  streamTypedRefCommitAdapter(
-    t: IrType,
-    snapshot: string,
-  ): string {
+  streamTypedRefCommitAdapter(t: IrType, snapshot: string): string {
     return streamTypedRefCommitAdapter(this, t, snapshot);
   }
 
@@ -4984,23 +7644,15 @@ export class LlEmitter {
     return streamTypedRefMaterializeAdapter(this, t);
   }
 
-  liveDynUnionRefAdapter(
-    t: IrType & { kind: "union" },
-  ): string {
+  liveDynUnionRefAdapter(t: IrType & { kind: "union" }): string {
     return liveDynUnionRefAdapter(this, t);
   }
 
-  streamTypedRefBoxValue(
-    B: BlockBuilder,
-    t: IrType,
-    value: string,
-  ): string {
+  streamTypedRefBoxValue(B: BlockBuilder, t: IrType, value: string): string {
     return streamTypedRefBoxValue(this, B, t, value);
   }
 
-  streamFromArrayAdapter(
-    t: IrType & { kind: "array" },
-  ): string {
+  streamFromArrayAdapter(t: IrType & { kind: "array" }): string {
     return streamFromArrayAdapter(this, t);
   }
 
@@ -5064,3 +7716,95 @@ export class LlEmitter {
     return emitLibCall(this, e);
   }
 }
+
+/** The adopting await a `return` value resolves through, if any: the value
+ * itself or the operand of its conversion into the declared result. */
+export function adoptingAwaitOf(value: IrExpr | null): ExprOf<"awaitExpr"> | null {
+  if (value === null) return null;
+  let found: ExprOf<"awaitExpr"> | null = null;
+  everyExpr(value, {
+    expr: (node) => {
+      if (found !== null) return false;
+      if (node.kind === "awaitExpr" && node.adopt === true) {
+        found = node;
+        return false;
+      }
+      return true;
+    },
+    stmt: () => true,
+  });
+  return found;
+}
+
+/** Adds `key` to `into` when it lacks it. */
+function addEntry<V>(into: Map<string, V>, key: string, value: V): void {
+  if (!into.has(key)) into.set(key, value);
+}
+
+/** Adds `key` to a numbered table when it lacks it, numbering it after the
+ * table's own entries (`prefix` and its index), and records the rename of
+ * the chunk's `name` for it. */
+function addNumbered(
+  into: Map<string, string>,
+  key: string,
+  name: string,
+  prefix: string,
+  names: Map<string, string>,
+): void {
+  let own = into.get(key);
+  if (own === undefined) {
+    own = `${prefix}${into.size}`;
+    into.set(key, own);
+  }
+  if (own !== name) names.set(name.replace(/^@/, ""), own.replace(/^@/, ""));
+}
+
+/** addNumbered for entries that keep their numbered name in `sym`. */
+function addNumberedSymbol<V extends { sym: string }>(
+  into: Map<string, V>,
+  key: string,
+  entry: V,
+  prefix: string,
+  names: Map<string, string>,
+): void {
+  let own = into.get(key);
+  if (own === undefined) {
+    own = { ...entry, sym: `${prefix}${into.size}` };
+    into.set(key, own);
+  }
+  if (own.sym !== entry.sym) names.set(entry.sym, own.sym);
+}
+
+registerReplay("jsIcSite", (emitter) => emitter.jsIcSite());
+registerReplay("dynReadIcSite", (emitter) => emitter.dynReadIcSite());
+registerReplay("speculativeLoopSite", (emitter) => emitter.speculativeLoopSite());
+for (const op of [
+  "dyn.collectionDynOps",
+  "dyn.dynMatchHelper",
+  "dyn.jsonSchema",
+  "dyn.recordNameTable",
+  "dyn.jsonParseHelper",
+  "dyn.dynCheckHelper",
+  "dyn.toDynHelper",
+  "dyn.promiseDynAdapterHelper",
+  "dyn.dynFuncThunkHelper",
+  "dyn.dynFuncBoxHelper",
+  "dyn.dynFuncAdapterHelper",
+  "dyn.dynToStrHelper",
+  "dyn.dynIterNHelper",
+  "dyn.dynDestrCheckHelper",
+  "dyn.dynKeyGetHelper",
+  "dyn.dynComputedKeyGetHelper",
+  "dyn.caughtToDynHelper",
+  "dyn.messageListenerHelper",
+  "dyn.messageReaderHelper",
+])
+  registerReplay(op, (emitter, args) => emitter.dyn.replayHelper(op, args));
+for (const op of [
+  "walkers.jsonWriteHelper",
+  "walkers.recordFieldWriter",
+  "walkers.unionJoinHelper",
+])
+  registerReplay(op, (emitter, args) => emitter.walkers.replayHelper(op, args));
+for (const op of ["publish.walker", "publish.refusal"])
+  registerReplay(op, (emitter, args) => emitter.publishWalkers.replayHelper(op, args));

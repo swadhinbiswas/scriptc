@@ -1,15 +1,6 @@
-dynamic-import/main.ts:13:9 - error SC1090: dynamic import() of computed specifiers (the module graph embeds at build time — the specifier must be a string literal) are not supported yet
+dynamic-import/main.ts:13:9 - error SC1090: dynamic import() of computed specifiers (the module graph resolves at build time — the specifier must be a string literal) are not supported yet
 
   12 |   const name = "greeter" + tag();
   13 |   await import(name);
      |         ^~~~~~~~~~~~
   14 |   await import("./helper.js");
-
-dynamic-import/main.ts:15:9 - error SC2030: cannot embed npm package code: 'http2' is a Node builtin the island does not provide a shim for
-
-  14 |   await import("./helper.js");
-  15 |   await import("http2");
-     |         ^~~~~~~~~~~~~~~
-  16 | }
-
-  hint: the package's runtime JS is embedded at build time and executed in the island; packages that reach outside the shimmed builtins (events, path, fs, os, process, util, buffer, stream, crypto, zlib, url, assert, and the rest of `scriptc coverage`'s shimmed table — http/https clients and net/tls load too; http2 and worker_threads are the notable absences) do not run yet

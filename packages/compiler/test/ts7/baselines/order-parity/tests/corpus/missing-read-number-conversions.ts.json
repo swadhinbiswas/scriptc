@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/missing-read-number-conversions.ts"
+ ],
+ "diags": []
+}

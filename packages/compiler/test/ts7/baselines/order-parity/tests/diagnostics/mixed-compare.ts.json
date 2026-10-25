@@ -1,0 +1,25 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/mixed-compare.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "This comparison appears to be unintentional because the types 'true' and 'false' have no overlap.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/mixed-compare.ts",
+    "start": 70,
+    "end": 84
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Operator '<' cannot be applied to types 'string' and 'number'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/mixed-compare.ts",
+    "start": 122,
+    "end": 127
+   }
+  }
+ ]
+}

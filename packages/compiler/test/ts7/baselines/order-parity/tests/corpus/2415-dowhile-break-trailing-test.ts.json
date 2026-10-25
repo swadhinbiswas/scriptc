@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2415-dowhile-break-trailing-test.ts"
+ ],
+ "diags": []
+}

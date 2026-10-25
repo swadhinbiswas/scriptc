@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/caught-class-identity.ts"
+ ],
+ "diags": []
+}

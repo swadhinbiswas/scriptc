@@ -1,28 +1,46 @@
 import { everyModuleNode, everyStmtList, transformStmtList } from "../ir/traverse.js";
 import type { LlvmUnsupportedError } from "./llvm/emitter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
-import { moduleUsesFetch, moduleEmbedsBuiltin, type IrModule, type SrcLoc } from "../ir/ir.js";
+import { type IrModule, type SrcLoc } from "../ir/ir.js";
+import {
+  DH_LIB_FNS,
+  PKI_LIB_FNS,
+  moduleUsesFetch,
+  moduleUsesWebCryptoAsymmetric,
+} from "../ir/runtime-features.js";
 
 /** Reflection tables expose methods that the program never calls. On WASI,
  * keep their host-only implementations as explicit runtime refusals. Typed
  * calls, escaped callables, constructors, and exported roots still retain
  * the ordinary target diagnostic. ABI types remain checked by the gate. */
 export function fenceSpeculativeWasiFunctions(mod: IrModule): void {
-  for (const fn of mod.functions) fn.body = transformStmtList(fn.body, { stmt: (statement) => statement,
-    expr: (expr) => {
-      if (expr.kind !== "libCall") return expr;
-      const portable = expr.fn === "fetch.abortControllerNew" ? "abort.controllerNew"
-        : expr.fn === "fetch.abortTimeout" ? "abort.timeout"
-        : expr.fn === "fetch.abortNow" ? "abort.now"
-        : expr.fn === "fetch.abortAny" ? "abort.any" : null;
-      return portable ? { ...expr, fn: portable } : expr;
-    },
-  });
+  for (const fn of mod.functions)
+    fn.body = transformStmtList(fn.body, {
+      stmt: (statement) => statement,
+      expr: (expr) => {
+        if (expr.kind !== "libCall") return expr;
+        const portable =
+          expr.fn === "fetch.abortControllerNew"
+            ? "abort.controllerNew"
+            : expr.fn === "fetch.abortTimeout"
+              ? "abort.timeout"
+              : expr.fn === "fetch.abortNow"
+                ? "abort.now"
+                : expr.fn === "fetch.abortAny"
+                  ? "abort.any"
+                  : null;
+        return portable ? { ...expr, fn: portable } : expr;
+      },
+    });
   if (!mod.functions.some((fn) => fn.speculativeDispatch)) return;
   const functions = new Map(mod.functions.map((fn) => [fn.name, fn]));
   const classes = new Map((mod.classes ?? []).map((info) => [info.name, info]));
   const descends = (name: string, base: string): boolean => {
-    for (let info = classes.get(name); info; info = info.base ? classes.get(info.base) : undefined) {
+    for (
+      let info = classes.get(name);
+      info;
+      info = info.base ? classes.get(info.base) : undefined
+    ) {
       if (info.name === base) return true;
     }
     return false;
@@ -35,27 +53,51 @@ export function fenceSpeculativeWasiFunctions(mod: IrModule): void {
     mandatory.add(name);
     const fn = functions.get(name);
     if (!fn || fn.speculativeDispatch) continue;
-    everyStmtList(fn.body, { stmt: () => true, expr: (expr) => {
-      if (expr.kind === "call") queue.push(expr.callee);
-      if (expr.kind === "closure") queue.push(expr.fnName);
-      if (expr.kind === "new") queue.push(`%${expr.className}.constructor`);
-      if (expr.kind === "newValue" && expr.callee.type.kind === "classval") {
-        const base = expr.callee.type.className;
-        for (const info of classes.values()) if (descends(info.name, base)) queue.push(`%${info.name}.constructor`);
-      }
-      if (expr.kind === "virtualCall") {
-        for (const info of classes.values()) if (descends(info.name, expr.className)) queue.push(`%${info.name}.${expr.method}`);
-      }
-      return true;
-    } });
+    everyStmtList(fn.body, {
+      stmt: () => true,
+      expr: (expr) => {
+        if (expr.kind === "call") queue.push(expr.callee);
+        if (expr.kind === "closure") queue.push(expr.fnName);
+        if (expr.kind === "new") queue.push(`%${expr.className}.constructor`);
+        if (expr.kind === "newValue" && expr.callee.type.kind === "classval") {
+          const base = expr.callee.type.className;
+          for (const info of classes.values())
+            if (descends(info.name, base)) queue.push(`%${info.name}.constructor`);
+        }
+        if (expr.kind === "virtualCall") {
+          for (const info of classes.values())
+            if (descends(info.name, expr.className)) queue.push(`%${info.name}.${expr.method}`);
+        }
+        return true;
+      },
+    });
   }
   for (const fn of mod.functions) {
     if (mandatory.has(fn.name) || fn.speculativeDispatch) continue;
-    const unavailable = moduleWasiUnavailableSurface({ irVersion: mod.irVersion, sourceFile: mod.sourceFile,
-      functions: [fn], classes: [], records: [], unions: [], globals: [], entry: fn.name });
+    const unavailable = moduleWasiUnavailableSurface({
+      irVersion: mod.irVersion,
+      sourceFile: mod.sourceFile,
+      functions: [fn],
+      classes: [],
+      records: [],
+      unions: [],
+      globals: [],
+      entry: fn.name,
+    });
     if (!unavailable) continue;
-    fn.body = [{ kind: "runtimeFence", code: "SC3002", message: `wasm32-wasi target does not support ${unavailable.surface}`, loc: unavailable.loc }];
-    const parameters = new Set([...fn.params, ...(fn.captures ?? []), ...(fn.classCaptures ?? [])].map((param) => param.localId));
+    fn.body = [
+      {
+        kind: "runtimeFence",
+        code: "SC3002",
+        message: `wasm32-wasi target does not support ${unavailable.surface}`,
+        loc: unavailable.loc,
+      },
+    ];
+    const parameters = new Set(
+      [...fn.params, ...(fn.captures ?? []), ...(fn.classCaptures ?? [])].map(
+        (param) => param.localId,
+      ),
+    );
     fn.locals = fn.locals.filter((local) => parameters.has(local.id));
   }
 }
@@ -84,12 +126,23 @@ export function targetRefusalDiag(target: string, surface: string, loc: SrcLoc):
   };
 }
 
-/** APIs that require host capabilities absent from portable WASI Preview 1.
- * These are target diagnostics, not backend-tier gaps: the same language IR
- * (including async, generators, and the dynamic island) is otherwise valid.
- * Keep the fine-grained walk first so diagnostics point at the API use; the
- * embedded-module checks are the entry-anchored safety net for island code. */
-export function moduleWasiUnavailableSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
+/** node:os and process host facts WASI Preview 1 has no interface for. */
+const WASI_UNAVAILABLE_HOST_FACTS: ReadonlyMap<string, string> = new Map([
+  ["os.cpusTake", "CPU enumeration (WASI Preview 1 has no processor API)"],
+  ["os.hostname", "the host name (WASI Preview 1 has no host-name API)"],
+  ["os.freemem", "system memory statistics (WASI Preview 1 has no memory API)"],
+  ["os.loadavg", "system load averages (WASI Preview 1 has no load API)"],
+  ["os.uptime", "system uptime (WASI Preview 1 has no boot-time API)"],
+  ["os.getPriority", "process scheduling priority (WASI Preview 1 has no priority API)"],
+  ["os.setPriority", "process scheduling priority (WASI Preview 1 has no priority API)"],
+  ["process.memoryUsageTake", "process memory statistics (WASI Preview 1 has no memory API)"],
+  ["process.rss", "process memory statistics (WASI Preview 1 has no memory API)"],
+  ["process.ppid", "the parent process id (WASI Preview 1 has no process API)"],
+]);
+
+export function moduleWasiUnavailableSurface(
+  mod: IrModule,
+): { surface: string; loc: SrcLoc } | null {
   const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
   const prefixes: readonly (readonly [string, string])[] = [
     ["cp.", "child processes (WASI Preview 1 has no process-spawning API)"],
@@ -135,13 +188,79 @@ export function moduleWasiUnavailableSurface(mod: IrModule): { surface: string; 
     expr: (node) => {
       if (node.kind !== "libCall") return true;
       const loc = node.loc;
-      if (node.fn === "process.kill" || node.fn === "process.killNum" ||
-          node.fn === "process.onSignal" || node.fn === "process.offSignal") {
+      if (
+        node.fn === "process.kill" ||
+        node.fn === "process.killNum" ||
+        node.fn === "process.onSignal" ||
+        node.fn === "process.offSignal"
+      ) {
         found = { surface: "OS signals (WASI Preview 1 has no signal API)", loc };
         return false;
       }
+      if (node.fn.startsWith("wasm.")) {
+        found = {
+          surface:
+            "the WebAssembly API (a wasm32-wasi program cannot load translated modules into its own linear memory yet)",
+          loc,
+        };
+        return false;
+      }
+      if (node.fn === "crypto.cipherNew") {
+        found = {
+          surface:
+            "symmetric ciphers (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (
+        node.fn === "webcrypto.encrypt" ||
+        node.fn === "webcrypto.decrypt" ||
+        node.fn === "webcrypto.wrapKey" ||
+        node.fn === "webcrypto.unwrapKey"
+      ) {
+        found = {
+          surface:
+            "WebCrypto encrypt, decrypt, wrapKey and unwrapKey (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (node.fn === "crypto.ecdhNew" || node.fn === "crypto.ecdhConvertKey") {
+        found = {
+          surface: "ECDH (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (DH_LIB_FNS.has(node.fn)) {
+        found = {
+          surface:
+            node.fn === "crypto.dhNew" || node.fn === "crypto.dhGroupNew"
+              ? "DiffieHellman (the wasm32-wasi runtime does not include the mbedTLS library)"
+              : "checkPrime and generatePrime (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (PKI_LIB_FNS.has(node.fn)) {
+        found = {
+          surface:
+            "asymmetric keys and signatures (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
       if (node.fn === "os.networkInterfaces") {
-        found = { surface: "network-interface enumeration (WASI Preview 1 has no interface API)", loc };
+        found = {
+          surface: "network-interface enumeration (WASI Preview 1 has no interface API)",
+          loc,
+        };
+        return false;
+      }
+      const hostFact = WASI_UNAVAILABLE_HOST_FACTS.get(node.fn);
+      if (hostFact !== undefined) {
+        found = { surface: hostFact, loc };
         return false;
       }
       for (const [prefix, surface] of prefixes) {
@@ -158,10 +277,12 @@ export function moduleWasiUnavailableSurface(mod: IrModule): { surface: string; 
   if (moduleUsesFetch(mod)) {
     return { surface: "network-backed fetch (WASI Preview 1 has no socket API)", loc: entryLoc };
   }
-  for (const builtin of ["node:http", "node:https", "node:net", "node:tls"]) {
-    if (moduleEmbedsBuiltin(mod, builtin)) {
-      return { surface: `${builtin} networking (WASI Preview 1 has no socket API)`, loc: entryLoc };
-    }
+  if (moduleUsesWebCryptoAsymmetric(mod)) {
+    return {
+      surface:
+        "WebCrypto ECDSA and RSA (the wasm32-wasi runtime does not include the mbedTLS library)",
+      loc: entryLoc,
+    };
   }
   return null;
 }

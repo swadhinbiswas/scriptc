@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5910-set-prototype-of-primitive-object-kinds.ts"
+ ],
+ "diags": []
+}

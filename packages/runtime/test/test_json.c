@@ -71,6 +71,192 @@ static void typed_view_failure_tests(void) {
   scr_str_release(source);
 }
 
+/* Live array capsules with bound element hooks answer per-element queries
+ * from the native array; only holes, out-of-range reads, and rejected
+ * values may fall back to materializing the whole array. */
+static size_t live_array_materializations;
+static ScrDyn *live_array_materialize(void *value) {
+  live_array_materializations++;
+  ScrArr *arr = value;
+  ScrDyn *view = scr_dyn_new_arr();
+  for (size_t i = 0; i < arr->len; i++) {
+    if (scr_arr_state(arr, (double)i) == (double)SCR_ARR_VALUE)
+      scr_dyn_arr_push(view, scr_dyn_new_num(scr_arr_get_f64(arr, (double)i)));
+    else scr_dyn_arr_push_hole(view);
+  }
+  return view;
+}
+static ScrDyn *live_array_get(void *arr, double index) {
+  return scr_dyn_new_num(scr_arr_get_f64(arr, index));
+}
+static bool live_array_set(void *arr, double index, const ScrDyn *value) {
+  if (value->kind != SCR_DYN_NUM) return false;
+  scr_arr_set_f64(arr, index, value->v.num);
+  return true;
+}
+static const ScrDynTypedArrayOps live_array_ops = { live_array_get, live_array_set };
+
+static void live_array_ref_tests(void) {
+  ScrArr *arr = scr_arr_new(SCR_ELEM_F64, 4);
+  for (int i = 0; i < 4; i++) scr_arr_push_f64(arr, i * 10);
+  scr_arr_delete(arr, 2);
+  ScrDyn *capsule = scr_dyn_new_typed_ref(arr, scr_arr_retain_v, scr_arr_release_v,
+      "array<f64>", 10, live_array_materialize, NULL);
+  scr_dyn_typed_ref_bind_array(capsule, &live_array_ops);
+  live_array_materializations = 0;
+
+  ScrStr *length = S("length"), *one = S("1"), *two = S("2"), *four = S("4"), *five = S("5"), *lead = S("01");
+  ScrDyn *got = scr_dyn_typed_ref_key_get(capsule, length);
+  check(got && got->kind == SCR_DYN_NUM && got->v.num == 4, "live array length");
+  scr_dyn_release(got);
+  got = scr_dyn_typed_ref_key_get(capsule, one);
+  check(got && got->kind == SCR_DYN_NUM && got->v.num == 10, "live array element");
+  scr_dyn_release(got);
+  check(!scr_dyn_typed_ref_key_get(capsule, two), "live array hole needs the view");
+  check(!scr_dyn_typed_ref_key_get(capsule, four), "live array past length needs the view");
+  check(!scr_dyn_typed_ref_key_get(capsule, lead), "noncanonical index needs the view");
+  check(scr_dyn_has_key(capsule, one) && scr_dyn_has_own(capsule, one) && scr_dyn_has_own(capsule, length),
+      "live array own presence");
+  check(!scr_dyn_has_own(capsule, two) && !scr_dyn_has_own(capsule, four), "live array own absence");
+  check(live_array_materializations == 0, "live array reads never materialize");
+
+  ScrDyn *value = scr_dyn_new_num(7);
+  scr_dyn_key_set(capsule, one, value);
+  scr_dyn_key_set(capsule, two, value);
+  scr_dyn_key_set(capsule, four, value);
+  scr_dyn_release(value);
+  check(arr->len == 5 && scr_arr_get_f64(arr, 1) == 7 && scr_arr_get_f64(arr, 2) == 7 &&
+      scr_arr_get_f64(arr, 4) == 7, "live array writes and appends land natively");
+  check(live_array_materializations == 0, "live array writes never materialize");
+
+  ScrDyn *text = scr_dyn_new_str(one);
+  scr_dyn_key_set(capsule, one, text);
+  scr_dyn_release(text);
+  check(live_array_materializations == 1 && scr_arr_get_f64(arr, 1) == 7,
+      "rejected value takes the snapshot path without a native write");
+  ScrStr *seven = S("7");
+  value = scr_dyn_new_num(1);
+  scr_dyn_key_set(capsule, seven, value);
+  scr_dyn_release(value);
+  check(live_array_materializations == 2 && arr->len == 5, "growth past length takes the snapshot path");
+  check(!scr_dyn_has_key(capsule, five) && live_array_materializations == 3,
+      "absent index consults the view");
+  check(!scr_exc_pending(), "live array fallbacks raise nothing without a commit");
+
+  scr_str_release(length); scr_str_release(one); scr_str_release(two);
+  scr_str_release(four); scr_str_release(five); scr_str_release(seven); scr_str_release(lead);
+  scr_dyn_release(capsule);
+  scr_arr_release(arr);
+}
+
+/* Live record capsules with bound field hooks answer reads, presence and
+ * key walks from the native record; once a write creates the cached view,
+ * every query goes through that view (which may hold added keys). */
+typedef struct LiveRecord {
+  size_t rc;
+  double x;
+  ScrStr *label; /* NULL: the optional field is absent */
+} LiveRecord;
+static size_t live_record_materializations;
+static void *live_record_retain(void *value) { ((LiveRecord *)value)->rc++; return value; }
+static void live_record_release(void *value) {
+  LiveRecord *rec = value;
+  if (--rec->rc) return;
+  if (rec->label) scr_str_release(rec->label);
+  free(rec);
+}
+static ScrDyn *live_record_materialize(void *value) {
+  live_record_materializations++;
+  LiveRecord *rec = value;
+  ScrDyn *view = scr_dyn_new_obj();
+  scr_dyn_obj_set(view, "x", 1, scr_dyn_new_num(rec->x));
+  if (rec->label) scr_dyn_obj_set(view, "label", 5, scr_dyn_new_str(rec->label));
+  return view;
+}
+static bool live_record_has(void *value, size_t index) {
+  return index == 0 || ((LiveRecord *)value)->label != NULL;
+}
+static ScrDyn *live_record_get(void *value, size_t index) {
+  LiveRecord *rec = value;
+  return index == 0 ? scr_dyn_new_num(rec->x) : scr_dyn_new_str(rec->label);
+}
+
+static bool dyn_keys_are(const ScrDyn *keys, const char *const *want, size_t n) {
+  if (!keys || keys->kind != SCR_DYN_ARR || keys->v.arr.len != n) return false;
+  for (size_t i = 0; i < n; i++) {
+    const ScrDyn *key = keys->v.arr.items[i];
+    if (key->kind != SCR_DYN_STR || !str_is(key->v.str, want[i])) return false;
+  }
+  return true;
+}
+
+static void live_record_ref_tests(void) {
+  ScrStr *x = S("x"), *label = S("label"), *extra = S("extra"), *missing = S("missing");
+  ScrStr *names[] = { x, label };
+  const ScrDynTypedRecordOps ops = { 2, names, live_record_has, live_record_get };
+  LiveRecord *rec = calloc(1, sizeof *rec);
+  rec->rc = 1;
+  rec->x = 3;
+  ScrDyn *capsule = scr_dyn_new_typed_ref(rec, live_record_retain, live_record_release,
+      "record:t", 8, live_record_materialize, NULL);
+  scr_dyn_typed_ref_bind_record(capsule, &ops);
+  live_record_materializations = 0;
+
+  ScrDyn *got = scr_dyn_typed_ref_key_get(capsule, x);
+  check(got && got->kind == SCR_DYN_NUM && got->v.num == 3, "live record field");
+  scr_dyn_release(got);
+  check(!scr_dyn_typed_ref_key_get(capsule, label), "absent optional field needs the view");
+  check(!scr_dyn_typed_ref_key_get(capsule, missing), "unknown name needs the view");
+  check(scr_dyn_has_key(capsule, x) && scr_dyn_has_own(capsule, x), "live record own presence");
+  check(!scr_dyn_has_own(capsule, label) && !scr_dyn_has_own(capsule, missing),
+      "live record own absence");
+  check(scr_dyn_ref_typeof_is(capsule, "object") && !scr_dyn_ref_is_array(capsule),
+      "live record is a plain object");
+  const char *const only_x[] = { "x" };
+  ScrDyn *keys = scr_dyn_for_in_keys(capsule);
+  check(dyn_keys_are(keys, only_x, 1), "for-in skips the absent field");
+  scr_dyn_release(keys);
+  rec->label = S("p");
+  const char *const both[] = { "x", "label" };
+  keys = scr_dyn_obj_keys(capsule);
+  check(dyn_keys_are(keys, both, 2), "keys follow the live record");
+  scr_dyn_release(keys);
+  ScrDyn *entries = scr_dyn_obj_entries(capsule);
+  check(entries && entries->v.arr.len == 2 &&
+      entries->v.arr.items[1]->v.arr.items[1]->kind == SCR_DYN_STR &&
+      str_is(entries->v.arr.items[1]->v.arr.items[1]->v.str, "p"), "entries read live fields");
+  scr_dyn_release(entries);
+  ScrDyn *copy = scr_dyn_new_obj();
+  ScrDyn *copied = scr_dyn_copy_data_properties(copy, capsule);
+  check(copied == copy && copy->v.obj.len == 2, "spread copies present fields");
+  scr_dyn_release(copied);
+  scr_dyn_release(copy);
+  ScrDyn *excluded = scr_dyn_new_arr();
+  scr_dyn_arr_push(excluded, scr_dyn_new_str(x));
+  ScrDyn *rest = scr_dyn_object_rest(capsule, excluded);
+  check(rest && rest->v.obj.len == 1 && scr_dyn_obj_get(rest, "label", 5), "rest skips excluded fields");
+  scr_dyn_release(rest);
+  scr_dyn_release(excluded);
+  check(live_record_materializations == 0, "live record reads never materialize");
+
+  ScrDyn *value = scr_dyn_new_num(1);
+  scr_dyn_key_set(capsule, extra, value);
+  scr_dyn_release(value);
+  check(live_record_materializations == 1, "an added key creates the view");
+  const char *const with_extra[] = { "x", "label", "extra" };
+  keys = scr_dyn_for_in_keys(capsule);
+  check(dyn_keys_are(keys, with_extra, 3), "the view keeps the added key");
+  scr_dyn_release(keys);
+  got = scr_dyn_typed_ref_key_get(capsule, x);
+  check(!got, "a viewed record reads through the view");
+  check(scr_dyn_has_own(capsule, extra), "presence reads the view");
+  check(!scr_exc_pending(), "live record queries raise nothing");
+
+  scr_str_release(x); scr_str_release(label); scr_str_release(extra); scr_str_release(missing);
+  scr_dyn_release(capsule);
+  live_record_release(rec);
+}
+
 /* Parse `text`, expect success, return the checked-dynamic tree (+1). */
 static ScrDyn *parse_ok(const char *text, const char *name) {
   ScrStr *t = S(text);
@@ -365,9 +551,120 @@ static void test_class_values(void) {
   scr_str_release(name);
 }
 
+/* The class-view copy (scr_dyn_copy_property_descriptors) gives each
+ * property of the bag the attributes, value or accessors, and own-key
+ * position that defining it from its own descriptor would. */
+static ScrDyn *define_from(ScrDyn *target, const char *key, ScrDyn *value, bool writable,
+                           bool enumerable, bool configurable) {
+  ScrDyn *descriptor = scr_dyn_new_obj();
+  scr_dyn_obj_set(descriptor, "value", 5, value);
+  scr_dyn_obj_set(descriptor, "writable", 8, scr_dyn_new_bool(writable));
+  scr_dyn_obj_set(descriptor, "enumerable", 10, scr_dyn_new_bool(enumerable));
+  scr_dyn_obj_set(descriptor, "configurable", 12, scr_dyn_new_bool(configurable));
+  ScrStr *name = S(key);
+  ScrDyn *k = scr_dyn_new_str(name);
+  ScrDyn *result = scr_dyn_define_property(target, k, descriptor);
+  scr_dyn_release(k);
+  scr_str_release(name);
+  scr_dyn_release(descriptor);
+  return result;
+}
+
+static const ScrDynEntry *entry_of(const ScrDyn *obj, const char *key) {
+  for (size_t i = 0; i < obj->v.obj.len; i++)
+    if (obj->v.obj.entries[i].key_len == strlen(key) &&
+        memcmp(obj->v.obj.entries[i].key, key, strlen(key)) == 0)
+      return &obj->v.obj.entries[i];
+  return NULL;
+}
+
+static void test_copy_property_descriptors(void) {
+  ScrDyn *bag = scr_dyn_new_obj();
+  ScrDyn *getter = scr_dyn_new_obj();
+  scr_dyn_release(define_from(bag, "label", scr_dyn_new_num(1), true, true, true));
+  scr_dyn_release(define_from(bag, "hidden", scr_dyn_new_num(2), false, false, true));
+  scr_dyn_obj_set(bag, "7", 1, scr_dyn_new_num(7));
+  scr_dyn_obj_set(bag, "3", 1, scr_dyn_new_num(3));
+  /* An accessor entry (the getter object stands in for its function). */
+  scr_dyn_obj_set(bag, "computed", 8, scr_dyn_retain(scr_dyn_undefined()));
+  ScrDynEntry *accessor = (ScrDynEntry *)entry_of(bag, "computed");
+  accessor->accessor = true;
+  accessor->getter = scr_dyn_retain(getter);
+  accessor->writable = false;
+  accessor->enumerable = false;
+  accessor->configurable = false;
+
+  ScrDyn *view = scr_dyn_new_obj();
+  scr_dyn_release(scr_dyn_copy_property_descriptors(view, bag));
+  check(!scr_exc_pending() && view->v.obj.len == 5, "copy keeps every bag property");
+  ScrDyn *keys = scr_dyn_obj_own_keys(view);
+  const char *order[] = {"3", "7", "label", "hidden", "computed"};
+  bool ordered = keys->v.arr.len == 5;
+  for (size_t i = 0; ordered && i < 5; i++) ordered = str_is(keys->v.arr.items[i]->v.str, order[i]);
+  check(ordered, "copy keeps the bag's own-key order");
+  scr_dyn_release(keys);
+  const ScrDynEntry *hidden = entry_of(view, "hidden");
+  check(hidden && !hidden->accessor && hidden->value->v.num == 2 && !hidden->writable &&
+            !hidden->enumerable && hidden->configurable,
+        "copy keeps data attributes");
+  const ScrDynEntry *copied = entry_of(view, "computed");
+  check(copied && copied->accessor && copied->getter == getter && !copied->setter &&
+            !copied->writable && !copied->enumerable && !copied->configurable &&
+            copied->value->kind == SCR_DYN_UNDEF,
+        "copy keeps an accessor without calling it");
+
+  /* A property the target already has is redefined like defineProperty. */
+  ScrDyn *existing = scr_dyn_new_obj();
+  scr_dyn_obj_set(existing, "label", 5, scr_dyn_new_num(9));
+  scr_dyn_release(scr_dyn_copy_property_descriptors(existing, bag));
+  const ScrDynEntry *label = entry_of(existing, "label");
+  check(!scr_exc_pending() && existing->v.obj.len == 5 && existing->v.obj.entries[0].key_len == 5 &&
+            label->value->v.num == 1,
+        "copy redefines an existing property in place");
+
+  /* A target that takes no new properties throws as defineProperty does. */
+  ScrDyn *closed = scr_dyn_new_obj();
+  scr_dyn_release(scr_dyn_prevent_extensions(closed));
+  ScrDyn *refused = scr_dyn_copy_property_descriptors(closed, bag);
+  check(!refused && scr_exc_pending() && closed->v.obj.len == 0, "copy onto a non-extensible object throws");
+  scr_exc_clear();
+
+  scr_dyn_release(closed);
+  scr_dyn_release(existing);
+  scr_dyn_release(view);
+  scr_dyn_release(bag);
+  scr_dyn_release(getter);
+}
+
+static void test_primitive_owners(void) {
+  ScrDyn *values[] = {scr_dyn_new_null(), scr_dyn_new_bool(false), scr_dyn_new_bool(true)};
+  const char *texts[] = {"null", "false", "true"};
+  for (size_t i = 0; i < 3; i++) {
+    ScrDyn *parsed = parse_ok(texts[i], "primitive parses");
+    check(parsed == values[i] && parsed->rc == SIZE_MAX, "primitive parser shares immortal owner");
+    ScrDyn *array = scr_dyn_new_arr();
+    scr_dyn_arr_push(array, parsed);
+    scr_dyn_arr_push(array, scr_dyn_retain(values[i]));
+    /* The cycle tracer must skip immortal children before reading a header. */
+    scr_dyn_arr_push(array, scr_dyn_retain(array));
+    scr_dyn_release(array);
+    scr_collect_cycles();
+    check(scr_dyn_retain(values[i]) == values[i], "primitive survives container collection");
+    scr_dyn_release(values[i]);
+    check(values[i]->rc == SIZE_MAX, "primitive ownership transfers preserve immortality");
+    scr_dyn_release(scr_dyn_prevent_extensions(values[i]));
+    scr_dyn_release(scr_dyn_seal(values[i]));
+    check(!values[i]->non_extensible && !values[i]->prototype && !values[i]->symbol_properties,
+          "primitive reflection leaves shared nodes unchanged");
+  }
+  check(!scr_dyn_strict_eq(values[1], values[2]), "boolean singleton values remain distinct");
+}
+
 int main(void) {
   test_class_values();
   scr_init();
+  test_primitive_owners();
+  test_copy_property_descriptors();
 
   /* ── primitives ─────────────────────────────────────────────────── */
   ScrDyn *d = parse_ok("null", "parse null");
@@ -407,18 +704,21 @@ int main(void) {
   check(dyn_str_is(d, "\xF0\x9F\x98\x80"), "surrogate pair combines");
   scr_dyn_release(d);
 
-  /* Lone surrogates become U+FFFD (house policy: strings stay well-formed
-   * UTF-8; JS would keep the lone surrogate — documented divergence). */
+  /* Lone surrogates stay lone, as WTF-8, like JS. */
   d = parse_ok("\"x\\uD800y\"", "parse lone high surrogate");
-  check(dyn_str_is(d, "x\xEF\xBF\xBDy"), "lone high surrogate -> U+FFFD");
+  check(dyn_str_is(d, "x\xED\xA0\x80y"), "lone high surrogate kept");
   scr_dyn_release(d);
   d = parse_ok("\"\\uDC00\"", "parse lone low surrogate");
-  check(dyn_str_is(d, "\xEF\xBF\xBD"), "lone low surrogate -> U+FFFD");
+  check(dyn_str_is(d, "\xED\xB0\x80"), "lone low surrogate kept");
   scr_dyn_release(d);
-  /* High surrogate followed by a non-surrogate escape: U+FFFD, then the
-   * escape parses normally. */
+  /* High surrogate followed by a non-surrogate escape: the lone high, then
+   * the escape parses normally. */
   d = parse_ok("\"\\uD800\\u0041\"", "high surrogate then BMP escape");
-  check(dyn_str_is(d, "\xEF\xBF\xBD" "A"), "U+FFFD then A");
+  check(dyn_str_is(d, "\xED\xA0\x80" "A"), "lone high then A");
+  scr_dyn_release(d);
+  /* A raw lone high surrogate before an escaped low one forms the pair. */
+  d = parse_ok("\"\xED\xA0\xBD\\uDE00\"", "raw high then escaped low");
+  check(dyn_str_is(d, "\xF0\x9F\x98\x80"), "halves form the pair");
   scr_dyn_release(d);
 
   /* Raw UTF-8 passes through. */
@@ -535,6 +835,8 @@ int main(void) {
 
   json_callback_tests();
   typed_view_failure_tests();
+  live_array_ref_tests();
+  live_record_ref_tests();
 
   printf("%d/%d checks passed\n", checks - failures, checks);
   return failures == 0 ? 0 : 1;

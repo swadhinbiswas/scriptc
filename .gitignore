@@ -2,12 +2,20 @@ node_modules/
 .pnpm-store/
 # test-fixture packages are TEST DATA, committed on purpose
 !tests/diagnostics/npm-imports/node_modules/
+!tests/diagnostics/npm-program-type-error/node_modules/
+!tests/diagnostics/retired-engine-import-refusal/node_modules/
 !tests/fixtures/commander-calc/node_modules/
 !tests/fixtures/npm/node_modules/
 !tests/corpus/*/node_modules/
 !tests/fixtures/npm-static/node_modules/
+!tests/coverage-fixtures/wasm/node_modules/
+!tests/coverage-fixtures/node-islands*/node_modules/
+!tests/coverage-fixtures/dynamic-tier/package/node_modules/
 !tests/fixtures/npm-static/nested/inner/node_modules/
+!tests/fixtures/npm-static/node_modules/*/node_modules/
 !tests/fixtures/npm/store/*/node_modules/
+!tests/fixtures/npm/node_modules/*/node_modules/
+!tests/fixtures/npm/workspace/*/node_modules/
 !tests/fixtures/npm/cases/*/node_modules/
 !tests/library-mode/*/node_modules/
 !tests/fixtures/provenance/node_modules/
@@ -25,17 +33,19 @@ output/
 /packages/runtime-*/artifacts/
 /packages/runtime-*/runtime-pack.json
 /packages/runtime-*/.runtime-pack-*
-!tests/fixtures/fetch/node_modules/eventsource-parser/dist/
 !tests/fixtures/npm/node_modules/*/dist/
+!tests/fixtures/npm/node_modules/@*/*/dist/
 !tests/fixtures/npm/workspace/*/dist/
 !tests/fixtures/npm/cases/workspace-copied/members/*/dist/
 !tests/fixtures/npm/cases/workspace-copied/node_modules/*/dist/
 !tests/fixtures/provenance/node_modules/*/dist/
+!tests/fixtures/npm-static/node_modules/*/dist/
+!tests/corpus/*/node_modules/*/dist/
 .scriptc/
 *.log
 .DS_Store
 packages/runtime/test/build/
-# lazily built engine archives for --dynamic (see packages/runtime/vendor/README.md)
+# Cached build-time evaluator archives (see packages/runtime/vendor/README.md)
 packages/runtime/vendor/.cache/
 # fs corpus scratch directories (created in the test cwd, removed on clean runs)
 tmp-*/
@@ -44,3 +54,6 @@ tmp-*/
 .env.local
 .env*
 .env*.local
+# the vendored fs-extra corpus package: its lib/output module and jsonfile's own universalify
+!tests/corpus/fs-extra-package/node_modules/fs-extra/lib/output/
+!tests/corpus/fs-extra-package/node_modules/jsonfile/node_modules/

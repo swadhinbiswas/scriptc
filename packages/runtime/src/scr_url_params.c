@@ -132,7 +132,18 @@ void *scr_sp_retain_v(void *p) { return scr_sp_retain(p); }
 void scr_sp_release_v(void *p) { scr_sp_release(p); }
 
 /* Takes ownership of both strings. */
+/* Names and values are USVStrings: a lone surrogate is stored as U+FFFD.
+ * Consumes s; returns the stored +1 reference. */
+static ScrStr *sp_usv(ScrStr *s) {
+  if (!scr_str_has_surrogate(s)) return s;
+  ScrStr *usv = scr_str_to_well_formed(s);
+  scr_str_release(s);
+  return usv;
+}
+
 static void sp_push(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
+  name = sp_usv(name);
+  value = sp_usv(value);
   if (sp->len == sp->cap) {
     sp->cap *= 2;
     ScrStr **gn = realloc(sp->names, sp->cap * sizeof(ScrStr *));
@@ -320,13 +331,15 @@ ScrSearchParams *scr_sp_new(void) { return sp_alloc(); }
 
 ScrSearchParams *scr_sp_parse(ScrStr *init) {
   ScrSearchParams *sp = sp_alloc();
-  const char *s = init->data;
+  char *owned;
+  const char *s = scr_str_utf8(init, &owned);
   size_t len = init->len;
   if (len > 0 && s[0] == '?') {
     s++;
     len--;
   }
   sp_parse_into(sp, s, len);
+  scr_str_utf8_end(owned);
   return sp;
 }
 
@@ -395,8 +408,17 @@ void scr_sp_append(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
   sp_sync_owner(sp);
 }
 
-static bool sp_str_eq(const ScrStr *a, const ScrStr *b) {
-  return a->len == b->len && memcmp(a->data, b->data, a->len) == 0;
+/* A stored USV string against an argument, which is compared as its USV
+ * conversion (same length: U+FFFD replaces each lone surrogate). */
+static bool sp_str_eq(const ScrStr *stored, const ScrStr *arg) {
+  if (stored->len != arg->len) return false;
+  if (memcmp(stored->data, arg->data, arg->len) == 0) return true;
+  if (!scr_str_has_surrogate(arg)) return false;
+  char *owned;
+  const char *usv = scr_str_utf8(arg, &owned);
+  bool equal = memcmp(stored->data, usv, arg->len) == 0;
+  scr_str_utf8_end(owned);
+  return equal;
 }
 
 void scr_sp_set(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
@@ -407,7 +429,7 @@ void scr_sp_set(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
       if (!replaced) {
         replaced = true;
         scr_str_release(sp->vals[i]);
-        sp->vals[i] = scr_str_retain(value);
+        sp->vals[i] = sp_usv(scr_str_retain(value));
         sp->names[w] = sp->names[i];
         sp->vals[w] = sp->vals[i];
         w++;

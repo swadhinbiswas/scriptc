@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/symbol-class-fields/counter.cjs",
+  "<repo>/tests/corpus/symbol-class-fields/main.cjs"
+ ],
+ "diags": []
+}

@@ -19,21 +19,25 @@ const dyn = (): IrExpr => ({ kind: "dynFrom", value: str("value"), type: DYN, lo
 
 function libCallModule(fn: IrLibFn, args: IrExpr[], type: IrType): IrModule {
   return {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: loc.file,
     entry: "__main",
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: VOID,
-      locals: [],
-      body: [{
-        kind: "exprStmt",
-        expr: { kind: "libCall", fn, args, type, loc },
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: VOID,
+        locals: [],
+        body: [
+          {
+            kind: "exprStmt",
+            expr: { kind: "libCall", fn, args, type, loc },
+            loc,
+          },
+        ],
         loc,
-      }],
-      loc,
-    }],
+      },
+    ],
   };
 }
 

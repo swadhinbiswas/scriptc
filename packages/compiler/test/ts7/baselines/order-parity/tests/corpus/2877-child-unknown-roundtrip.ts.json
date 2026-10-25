@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2877-child-unknown-roundtrip.ts"
+ ],
+ "diags": []
+}

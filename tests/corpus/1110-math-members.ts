@@ -1,4 +1,3 @@
-// @dynamic
 // Math members execute in the island engine; results exit as ordinary
 // static numbers. Members with exact IEEE results print directly. The
 // transcendentals round through toFixed(9): the engine uses the system

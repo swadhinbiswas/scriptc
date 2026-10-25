@@ -1,26 +1,28 @@
-/* npm imports under --dynamic: every fixture program under
- * tests/fixtures/npm/cases (plus the commander acceptance fixture) runs
- * under Node AND as a scriptc-compiled binary; stdout must match
- * byte-for-byte and exit codes must agree — the differential contract,
- * extended with argv (CLI packages parse process.argv).
+/* npm packages compiled natively: every program under tests/fixtures/npm/cases
+ * (plus the commander fixtures in npm-cases.ts) builds with the default
+ * static npm compile and runs against Node. A case matches Node (stdout and
+ * exit status for every argv list, stderr when it opts in with
+ * `// @stderr`) unless KNOWN records how it differs:
  *
- * The fixture node_modules are COMMITTED TEST DATA (hand-made minimal
- * packages exercising ESM/CJS/dual/scoped/JSON resolution, and a pinned
- * real commander for the acceptance CLI). Binaries embed the package
- * sources at build time — nothing here reads node_modules at runtime.
+ * - build: the compile refuses it with this diagnostic code;
+ * - run: it compiles, and the program's output names this diagnostic code
+ *   (a refusal deferred to the operation that reached it), for every argv
+ *   list or for the listed `argvs`, while the other lists match Node;
+ * - divergence: it runs but does not match Node yet. These run as expected
+ *   failures, so a fix that makes one match fails here until KNOWN drops it.
  *
- * SCRIPTC_SAN=1 rebuilds everything with ASan + the runtime RC audit; the
- * island's counting allocator asserts zero live engine allocations at
- * teardown.
+ * The fixture node_modules are committed test data. Binaries compile the
+ * package sources at build time and read nothing from node_modules at run
+ * time.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { globSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { globSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
-import { npmCases } from "./npm-cases.js";
+import { npmCases, type NpmCase } from "./npm-cases.js";
 import { shardSelect, shardSuffix } from "./shard.js";
 
 const execFileAsync = promisify(execFile);
@@ -29,11 +31,107 @@ const fixturesRoot = join(repoRoot, "tests/fixtures");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 
-// The case table lives in npm-cases.ts: the Linux lane runs the identical
-// cases (same entries, same argv lists) inside its container. The shard
-// split (SCRIPTC_TEST_SHARD, CI's matrix) is applied HERE, not in the
-// table, so that lane keeps its full list.
+type Known = { build: string } | { run: string; argvs?: string[][] } | { divergence: string };
+
+const KNOWN: Record<string, Known> = {
+  "any-chaining": { build: "SC2003" },
+  "assert-shims": { run: "SC1043" },
+  "buffer-shims": { run: "SC2020" },
+  "bytes-exit": { build: "SC2004" },
+  "cjs-esm-named": { run: "SC1090" },
+  "cjs-lexer-aligned": { run: "SC1090" },
+  "commander-calc": { run: "SC1090", argvs: [["--help"]] },
+  "commander-calc-async": { run: "SC1090", argvs: [["--help"]] },
+  "create-require": { run: "SC1090" },
+  "dotfolder": { run: "SC1090" },
+  "dual-package-kinds": { build: "SC2013" },
+  "dynamic-import": { build: "SC2012" },
+  "dynamic-import-local": { build: "SC2012" },
+  "esbuild-require": { build: "SC2013" },
+  "esm-missing-default": { build: "SC1090" },
+  "esm-missing-export": { build: "SC1090" },
+  "fetch-destructure": { run: "SC1031" },
+  "fs-shims": { run: "SC1101" },
+  "import-refusal": { build: "SC2020" },
+  "island-registry": { build: "SC2011" },
+  "island-timers": {
+    divergence:
+      "Timeout handles are numbers (typeof) and lose their ref flag once fired or cleared",
+  },
+  "island-web-plumbing": { run: "SC2020" },
+  "lazy-traps": { build: "SC2013" },
+  "misc-shims": { run: "SC2020" },
+  "namespace": { build: "SC1013" },
+  "node24-async-events": { run: "SC2020" },
+  "node24-commonjs-metadata": { run: "SC2020" },
+  "node24-crypto-kdf": { run: "SC2020" },
+  "node24-deep-equality": { run: "SC2020" },
+  "node24-diagnostics-async": { run: "SC1090" },
+  "node24-diagnostics-tracing": { run: "SC1090" },
+  "node24-env": { run: "SC1090" },
+  "node24-esm-metadata": { run: "SC1090" },
+  "node24-event-emitter": { run: "SC2020" },
+  "node24-file-url-conversion": { build: "SC1090" },
+  "node24-fs-descriptors": { run: "SC2020" },
+  "node24-mime": { run: "SC2020" },
+  "node24-mime-errors": { run: "SC1090" },
+  "node24-no-error-assertions": { run: "SC2020" },
+  "node24-parseargs": { run: "SC1090" },
+  "node24-promise-timers": { run: "SC2020" },
+  "node24-string-decoder": { run: "SC2020" },
+  "node24-style-text": { run: "SC2020" },
+  "node24-system-errors": { run: "SC1090" },
+  "node24-text-encoding": { run: "SC2020" },
+  "node24-text-utilities": { run: "SC2020" },
+  "node24-timers-unref": { run: "SC2020" },
+  "node24-url-factories": { run: "SC2020" },
+  "node24-url-mutation": { run: "SC1090" },
+  "node24-util-adapters": { run: "Object.create with this value is not supported yet" },
+  "node24-util-types": { run: "SC1090" },
+  "node24-web-stream-encoding": { run: "SC1090" },
+  "node24-web-stream-errors": { run: "SC1090" },
+  "node24-web-stream-lifecycle": { run: "SC1090" },
+  "node24-web-stream-pipe-abort": { run: "SC2020" },
+  "node24-web-stream-pipe-errors": { run: "SC1090" },
+  "node24-web-stream-pipes": { run: "SC1090" },
+  "node24-web-stream-queues": { run: "SC1090" },
+  "node24-web-stream-readable-lifecycle": { run: "SC2020" },
+  "node24-web-stream-readers": { run: "SC1090" },
+  "node24-web-stream-tee": { run: "SC2020" },
+  "node24-web-stream-transforms": { run: "SC1090" },
+  "package-imports": { build: "SC2013" },
+  "promise-bridge": { build: "SC1090" },
+  "self-name": { build: "SC2013" },
+  "stream-shims": { run: "SC2020" },
+  "util-shims": { run: "SC2020" },
+  // The package redeclares the var it exported: Node copies the first value.
+  "var-export-redeclared": { run: "SC1090" },
+  "web-streams": { run: "SC1090" },
+  "workspace-copied": { build: "SC2013" },
+  "workspace-unclean": { build: "SC2013" },
+};
+
 const cases = shardSelect(npmCases(fixturesRoot), (c) => c.name);
+
+/** Per-case timeouts past the default 120 s: the undici cases compile the
+ * built-in undici implementation's module graph, the zod 3 cases (zod3,
+ * zod3-adoption, zod3-boundary, zod3-infer) compile zod 3's 3,700-line
+ * types module, and the zod 4 cases (zod4-boundary, zod4-record,
+ * hono-zod-validator, hono-zod-default-hook)
+ * compile zod 4's core, classic API and locales. A sanitized build of any
+ * of them takes minutes on a CI runner. */
+const TIMEOUTS: Record<string, number> = {
+  "hono-zod-default-hook": 900_000,
+  "hono-zod-validator": 900_000,
+  undici5: 600_000,
+  undici7: 600_000,
+  "zod4-boundary": 900_000,
+  "zod4-record": 900_000,
+  zod3: 600_000,
+  "zod3-adoption": 600_000,
+  "zod3-boundary": 600_000,
+  "zod3-infer": 600_000,
+};
 
 interface RunResult {
   stdout: Buffer;
@@ -45,157 +143,119 @@ function programStderr(stderr: Buffer): Buffer {
   if (!sanitize) return stderr;
   // Linux ASan emits this instrumentation warning at the first fiber swap.
   // Latin-1 preserves every other byte, including non-UTF-8 program output.
-  return Buffer.from(stderr.toString("latin1").replace(
-    /^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext functions and may produce false positives in some cases!\n/gm,
-    "",
-  ), "latin1");
+  return Buffer.from(
+    stderr
+      .toString("latin1")
+      .replace(
+        /^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext functions and may produce false positives in some cases!\n/gm,
+        "",
+      ),
+    "latin1",
+  );
 }
 
-async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
+async function runBinary(cmd: string, args: string[], cwd: string): Promise<RunResult> {
   try {
-    // stdin closes immediately (differential.test.ts's contract): fixture
-    // programs may read fd 0 to EOF (process.stdin is a real Readable in
-    // the island now), and a default open pipe would hang both lanes.
-    const pending = execFileAsync(cmd, args, { encoding: "buffer" });
+    // stdin closes immediately, as in differential.test.ts: a program that
+    // reads fd 0 to EOF must not hang on an open pipe.
+    const pending = execFileAsync(cmd, args, { cwd, encoding: "buffer" });
     pending.child.stdin?.end();
     const { stdout, stderr } = await pending;
     return { stdout, stderr, exitCode: 0 };
   } catch (err) {
-    const e = err as { code?: unknown; stdout?: Buffer; stderr?: Buffer };
-    if (typeof e.code !== "number" || !Buffer.isBuffer(e.stdout) || !Buffer.isBuffer(e.stderr)) throw err;
-    return { stdout: e.stdout, stderr: e.stderr, exitCode: e.code };
+    const e = err as { code?: unknown; signal?: unknown; stdout?: Buffer; stderr?: Buffer };
+    if (!Buffer.isBuffer(e.stdout) || !Buffer.isBuffer(e.stderr)) throw err;
+    const exitCode = typeof e.code === "number" ? e.code : -1;
+    if (exitCode === -1 && typeof e.signal !== "string") throw err;
+    return { stdout: e.stdout, stderr: e.stderr, exitCode };
   }
 }
 
-/** Compile once per (entry, lane); the cache key hashes the program AND
- * the fixture packages so edits to either rebuild. */
-async function build(entry: string): Promise<string> {
+type Built = { ok: true; binary: string } | { ok: false; codes: string[]; text: string };
+
+/** Compile once per (entry, lane); the cache key hashes the program and the
+ * fixture packages so edits to either rebuild. */
+async function build(entry: string): Promise<Built> {
   const hash = createHash("sha256");
   const inputs = [
     entry,
-    ...globSync(join(fixturesRoot, "**/node_modules/**/*.{js,mjs,cjs,json,d.ts,node}")).sort(),
-  ];
+    ...globSync(join(dirname(entry), "*.{ts,mts,cts,js,mjs,cjs,json}")),
+    ...globSync(join(fixturesRoot, "npm/node_modules/**/*.{js,mjs,cjs,json,d.ts,node}")),
+  ].sort();
   for (const f of inputs) hash.update(f).update(readFileSync(f));
-  const key = hash.update(sanitize ? "san" : "plain").digest("hex").slice(0, 16);
+  const key = hash
+    .update(sanitize ? "san" : "plain")
+    .digest("hex")
+    .slice(0, 16);
   const outDir = join(cacheDir, `npm-${key}`);
   mkdirSync(outDir, { recursive: true });
-  // Deliberately NO backend pin: this suite rides the release default.
-  // Embedded npm tables are production LLVM surface; this differential
-  // keeps package resolution, compressed source storage, and island/runtime
-  // boundaries covered through the backend that ships.
-  const result = await compile(entry, {
-    outPath: join(outDir, "program"),
-    outDir,
-    sanitize,
-    dynamic: true,
-  });
-  if (!result.ok) {
-    throw new Error(
-      "npm fixture failed to compile:\n" +
-        result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
-    );
-  }
-  return result.binaryPath;
+  const result = await compile(entry, { outPath: join(outDir, "program"), outDir, sanitize });
+  if (result.ok) return { ok: true, binary: result.binaryPath };
+  return {
+    ok: false,
+    codes: result.diagnostics.map((d) => d.code),
+    text: result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+  };
 }
 
-describe(`typed-callback boundary (scriptc-only${sanitize ? ", sanitized" : ""})`, () => {
-  test("DNS promises imports load and network queries reject at the call", async () => {
-    const binary = await build(join(fixturesRoot, "npm/divergent/dns-promises.ts"));
-    const res = await runBinary(binary, []);
-    expect(res.stdout.toString("utf8")).toBe(
-      "lookup:ENOTFOUND:lookup:node:dns 'lookup' is not supported in the scriptc island yet\n" +
-        "resolve4:ENOTFOUND:resolve4:node:dns 'resolve4' is not supported in the scriptc island yet\n",
-    );
-    expect(res.exitCode).toBe(0);
-  }, 120_000);
+async function expectMatchesNode(c: NpmCase, binary: string): Promise<void> {
+  const cwd = dirname(c.entry);
+  for (const argv of c.argvs ?? [[]]) {
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary(process.execPath, [c.entry, ...argv], cwd),
+      runBinary(binary, argv, cwd),
+    ]);
+    const label = argv.join(" ");
+    if (!nodeRes.stdout.equals(nativeRes.stdout)) {
+      expect(nativeRes.stdout.toString("utf8"), label).toBe(nodeRes.stdout.toString("utf8"));
+      expect.unreachable("stdout differed at byte level but not after utf8 decode");
+    }
+    expect(nativeRes.exitCode, label).toBe(nodeRes.exitCode);
+    if (c.compareStderr) expect(programStderr(nativeRes.stderr), label).toEqual(nodeRes.stderr);
+  }
+}
 
-  // The one deliberate DIVERGENCE at the typed-callback boundary: a package
-  // argument the declared param type refuses becomes a TypeError thrown
-  // back into the island before the body runs (Node would run the body
-  // with the lie) — so this program is asserted directly, never
-  // differentially. SEMANTICS.md documents it with the dyn→static edges.
-  test("a lying engine argument throws a TypeError into the package", async () => {
-    const binary = await build(join(fixturesRoot, "npm/divergent/main.ts"));
-    const res = await runBinary(binary, []);
-    expect(res.stdout.toString("utf8")).toBe(
-      "caught:true:expected number, got string\n" +
-        "caught:true:expected object at $, got number\n",
-    );
-    expect(res.exitCode).toBe(0);
-  }, 120_000);
-
-  // The lazy-builtin trap (the divergent third of the lazy edge semantics
-  // lazy-traps pins differentially): a require() of an unshimmed Node
-  // BUILTIN — esbundled's __require("net") — builds fine (the lazy edge
-  // embeds pointing at the refused node: key) and throws the island's own
-  // error AT THE CALL. Node would LOAD core net here, so this program
-  // is asserted directly, never differentially.
-  test("require of an unshimmed builtin throws the island's lazy error at the call", async () => {
-    const binary = await build(join(fixturesRoot, "npm/divergent/lazybuiltin.ts"));
-    const res = await runBinary(binary, []);
-    expect(res.stdout.toString("utf8")).toBe(
-      "the island does not provide the 'node:http2' builtin\n",
-    );
-    expect(res.exitCode).toBe(0);
-  }, 120_000);
-
-  // The native-addon trap (the .node sibling of the lazy-builtin trap):
-  // a napi-style package's require of its .node binding embeds a throwing
-  // ERR_DLOPEN_FAILED stub, never the addon's machine code. Node dlopens
-  // the garbage fixture and fails with a PLATFORM-worded message, so the
-  // shape probes would agree differentially but the message probe cannot —
-  // asserted directly. Pins: the code, the retry (a throwing module leaves
-  // no cache entry), ".node" in the require extension candidates, and the
-  // island's exact message.
-  test("require of a .node native addon throws ERR_DLOPEN_FAILED at the call", async () => {
-    const binary = await build(join(fixturesRoot, "npm/divergent/nativeaddon.ts"));
-    const res = await runBinary(binary, []);
-    const addonKey = realpathSync(join(fixturesRoot, "npm/node_modules/nativezoo/addon.node"));
-    expect(res.stdout.toString("utf8")).toBe(
-      "caught:true:ERR_DLOPEN_FAILED\n" +
-        "caught:true:ERR_DLOPEN_FAILED\n" +
-        "caught:true:ERR_DLOPEN_FAILED\n" +
-        `Cannot load native addon '${addonKey}': scriptc binaries cannot load .node addons (the island has no process.dlopen)\n`,
-    );
-    expect(res.exitCode).toBe(0);
-  }, 120_000);
-
-  // The island's WebAssembly is a THROWING STUB (SEMANTICS.md): Node has a
-  // real wasm engine, so this surface is asserted directly, never
-  // differentially. The promise-shaped members REJECT with the clear
-  // message (the real API's shape — invalid bytes reject, never throw
-  // synchronously — so top-level `WebAssembly.compile(...)` module
-  // evaluation stays lazy exactly as under Node: es-module-lexer's
-  // `export const init`, undici's lazyllhttp), the error classes are real
-  // Error subclasses (Emscripten's abort path constructs a working
-  // RuntimeError), and validate() answers false.
-  test("WebAssembly is a rejecting stub with real error classes", async () => {
-    const binary = await build(join(fixturesRoot, "npm/divergent/wasm.ts"));
-    const res = await runBinary(binary, []);
-    expect(res.stdout.toString("utf8")).toBe(
-      "WebAssembly.instantiate is not supported in scriptc binaries (the embedded engine has no wasm runtime)\n" +
-        "true|RuntimeError|Aborted(Error: boom)\n" +
-        "false\n",
-    );
-    expect(res.exitCode).toBe(0);
-  }, 120_000);
+test("every KNOWN entry names a case", () => {
+  const names = new Set(npmCases(fixturesRoot).map((c) => c.name));
+  expect(Object.keys(KNOWN).filter((name) => !names.has(name))).toEqual([]);
 });
 
-describe(`npm differential (${cases.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
-  test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
-    const binary = await build(c.entry);
-    for (const argv of c.argvs ?? [[]]) {
-      const [nodeRes, nativeRes] = await Promise.all([
-        runBinary("node", [c.entry, ...argv]),
-        runBinary(binary, argv),
-      ]);
-      const label = argv.join(" ");
-      if (!nodeRes.stdout.equals(nativeRes.stdout)) {
-        expect(nativeRes.stdout.toString("utf8"), label).toBe(nodeRes.stdout.toString("utf8"));
-        expect.unreachable("stdout differed at byte level but not after utf8 decode");
-      }
-      expect(nativeRes.exitCode, label).toBe(nodeRes.exitCode);
-      if (c.compareStderr) expect(programStderr(nativeRes.stderr), label).toEqual(nodeRes.stderr);
+describe(`npm native (${cases.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
+  for (const c of cases) {
+    const known = KNOWN[c.name];
+    if (known !== undefined && "divergence" in known) {
+      test.fails(`${c.name} (diverges: ${known.divergence})`, async () => {
+        const built = await build(c.entry);
+        if (!built.ok) throw new Error(built.text);
+        await expectMatchesNode(c, built.binary);
+      }, 120_000);
+      continue;
     }
-  }, 120_000);
+    test(
+      c.name,
+      async () => {
+        const built = await build(c.entry);
+        if (known !== undefined && "build" in known) {
+          expect(built.ok, "the compile refuses the program").toBe(false);
+          if (!built.ok) expect(built.codes, built.text).toContain(known.build);
+          return;
+        }
+        if (!built.ok) throw new Error(`npm fixture failed to compile:\n${built.text}`);
+        if (known !== undefined && "run" in known) {
+          for (const argv of known.argvs ?? c.argvs ?? [[]]) {
+            const res = await runBinary(built.binary, argv, dirname(c.entry));
+            const output = res.stdout.toString("utf8") + res.stderr.toString("utf8");
+            expect(output, `${argv.join(" ")}: the deferred refusal`).toContain(known.run);
+          }
+          if (known.argvs === undefined) return;
+          const refused = new Set(known.argvs.map((argv) => JSON.stringify(argv)));
+          const argvs = (c.argvs ?? [[]]).filter((argv) => !refused.has(JSON.stringify(argv)));
+          await expectMatchesNode({ ...c, argvs }, built.binary);
+          return;
+        }
+        await expectMatchesNode(c, built.binary);
+      },
+      TIMEOUTS[c.name] ?? 120_000,
+    );
+  }
 });

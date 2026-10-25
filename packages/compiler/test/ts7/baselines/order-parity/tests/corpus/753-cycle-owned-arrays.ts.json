@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/753-cycle-owned-arrays.ts"
+ ],
+ "diags": []
+}

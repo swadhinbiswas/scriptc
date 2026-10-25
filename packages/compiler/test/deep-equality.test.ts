@@ -9,7 +9,9 @@ test("native deep equality keeps opaque values and accessors explicitly refused"
   const dir = mkdtempSync(join(tmpdir(), "scriptc-deep-equality-"));
   try {
     const entry = join(dir, "main.cjs");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
 const { isDeepStrictEqual: equal } = require("node:util");
 function attempt(a, b) {
   try { console.log(equal(a, b)); }
@@ -24,8 +26,13 @@ attempt({ get value() { return 1; } }, { value: 1 });
 const ctor = () => 1;
 attempt({ constructor: ctor }, { constructor: ctor });
 console.log("after");
-`);
-    const result = await compile(entry, { dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1", outDir: dir, outPath: join(dir, "program") });
+`,
+    );
+    const result = await compile(entry, {
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+      outDir: dir,
+      outPath: join(dir, "program"),
+    });
     expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
     if (!result.ok) return;
     const child = spawnSync(result.binaryPath, [], { encoding: "utf8" });
@@ -33,11 +40,13 @@ console.log("after");
     expect(child.stderr).toBe("");
     expect(child.stdout).toBe(
       "TypeError SC2020 util.isDeepStrictEqual over opaque native references is not supported yet\n" +
-      "TypeError SC2020 util.isDeepStrictEqual over native handles is not supported yet\n" +
-      "TypeError SC2020 util.isDeepStrictEqual over native handles is not supported yet\n" +
-      "TypeError SC2020 util.isDeepStrictEqual over native Error values is not supported yet\n" +
-      "TypeError SC2020 util.isDeepStrictEqual over native accessor properties is not supported yet\n" +
-      "TypeError SC2020 util.isDeepStrictEqual over native own constructor functions is not supported yet\nafter\n",
+        "TypeError SC2020 util.isDeepStrictEqual over native handles is not supported yet\n" +
+        "TypeError SC2020 util.isDeepStrictEqual over native handles is not supported yet\n" +
+        "TypeError SC2020 util.isDeepStrictEqual over native Error values is not supported yet\n" +
+        "TypeError SC2020 util.isDeepStrictEqual over native accessor properties is not supported yet\n" +
+        "TypeError SC2020 util.isDeepStrictEqual over native own constructor functions is not supported yet\nafter\n",
     );
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

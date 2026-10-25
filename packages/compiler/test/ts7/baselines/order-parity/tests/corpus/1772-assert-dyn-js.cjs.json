@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1772-assert-dyn-js.cjs"
+ ],
+ "diags": []
+}

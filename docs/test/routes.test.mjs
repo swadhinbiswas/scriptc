@@ -12,6 +12,17 @@ const get = (path, headers = {}) => fetch(new URL(path, base), {
   headers: { "user-agent": "Mozilla/5.0", accept: "text/html", ...headers },
 });
 const decode = (text) => text.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+/** A page's MDX with its `<include>` partials inlined. */
+const pageSource = async (file) => {
+  const url = new URL(`../content/docs/${file}.mdx`, import.meta.url);
+  const source = await readFile(url, "utf8");
+  const parts = [];
+  for (const line of source.split("\n")) {
+    const include = line.match(/^<include>([^<]+\.mdx)<\/include>$/);
+    parts.push(include ? await readFile(new URL(include[1], url), "utf8") : line);
+  }
+  return parts.join("\n");
+};
 const meta = (html, key) => decode(html.match(new RegExp(`<meta (?:name|property)="${key}" content="([^"]*)"`))?.[1] ?? "");
 
 for (const { href, title, headings } of pages) {
@@ -32,6 +43,8 @@ for (const { href, title, headings } of pages) {
 
 test("previous docs URLs redirect permanently and preserve query parameters", async () => {
   for (const { legacy, href } of pages) {
+    // Pages added after the migration have no previous URL.
+    if (legacy === undefined) continue;
     const response = await get(`${legacy}?mode=static`);
     assert.equal(response.status, 308, legacy);
     const destination = new URL(response.headers.get("location"), base);
@@ -49,7 +62,7 @@ test("Markdown twins preserve examples and declare the HTML canonical URL", asyn
     assert.ok(response.headers.get("link")?.includes(`<${siteUrl}${href}>; rel="canonical"`));
     const markdown = await response.text();
     const file = href === "/docs" ? "index" : href.slice("/docs/".length);
-    const source = await readFile(new URL(`../content/docs/${file}.mdx`, import.meta.url), "utf8");
+    const source = await pageSource(file);
     for (const fence of source.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)) {
       assert.ok(markdown.includes(fence[1].trimEnd()), `${file} lost a code example`);
     }
@@ -61,13 +74,13 @@ test("Markdown twins preserve examples and declare the HTML canonical URL", asyn
 });
 
 test("literal HTML tables and definition lists remain readable", async () => {
-  const intro = await (await get("/docs")).text();
-  assert.match(intro, /<table[ >]/);
+  const coverage = await (await get("/docs/coverage")).text();
+  assert.match(coverage, /<table[ >]/);
   const cli = await (await get("/docs/cli")).text();
   assert.match(cli, /<dl[ >]/);
   assert.match(cli, /<dt[ >]/);
   const markdown = await (await get("/docs/cli.md")).text();
-  assert.ok(markdown.includes("--dynamic"));
+  assert.ok(!markdown.includes("--dynamic"));
   assert.ok(markdown.includes("--external-types"));
 });
 
@@ -121,7 +134,7 @@ test("internal documentation links and their fragments resolve", async () => {
   for (const { href } of pages) anchors.set(href, await (await get(href)).text());
   for (const { href } of pages) {
     const file = href === "/docs" ? "index" : href.slice("/docs/".length);
-    const source = await readFile(new URL(`../content/docs/${file}.mdx`, import.meta.url), "utf8");
+    const source = await pageSource(file);
     for (const [, path, fragment] of source.matchAll(/\]\((\/docs(?:\/[\w-]+)?)(?:#([\w-]+))?\)/g)) {
       assert.ok(anchors.has(path), `${href} links to missing page ${path}`);
       if (fragment) assert.ok(anchors.get(path).includes(`id="${fragment}"`), `${href} links to missing fragment ${path}#${fragment}`);
@@ -138,8 +151,11 @@ test("compatibility page and data endpoints keep their existing contracts", asyn
   const response = await get("/compatibility/data");
   assert.equal(response.status, 200);
   const dataset = await response.json();
-  const metadata = JSON.parse(await readFile(new URL("../src/generated/node-v24-compatibility-meta.json", import.meta.url), "utf8"));
-  assert.equal(dataset.rows.length, metadata.rowCount);
+  const artifact = JSON.parse(await readFile(new URL("../src/generated/node-v24-compatibility.json", import.meta.url), "utf8"));
+  assert.equal(dataset.rows.length, artifact.rows.length);
+  // The row count next.config.mjs derives reaches the page (React separates
+  // adjacent text nodes with empty comments).
+  assert.ok(html.replaceAll("<!-- -->", "").includes(`Loading ${artifact.rows.length.toLocaleString()} Node.js API rows`));
   assert.equal((await get("/node-compatibility")).status, 308);
   assert.equal((await get("/node-compatibility/data")).status, 308);
 });

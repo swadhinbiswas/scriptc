@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/510-array-map-filter-foreach.ts"
+ ],
+ "diags": []
+}

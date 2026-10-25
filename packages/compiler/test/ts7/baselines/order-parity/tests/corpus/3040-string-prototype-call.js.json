@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3040-string-prototype-call.js"
+ ],
+ "diags": []
+}

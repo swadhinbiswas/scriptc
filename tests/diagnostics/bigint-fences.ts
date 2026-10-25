@@ -2,6 +2,7 @@
 // explicit refusals until their own coherent families land.
 const typed = new BigInt64Array(4);
 const dynamicValue: unknown = 1n;
+// BigInt keys now compile beside the remaining representation fences.
 const keyed = new Map<bigint, string>();
 keyed.set(1n, "one");
 console.log(JSON.stringify(1n));

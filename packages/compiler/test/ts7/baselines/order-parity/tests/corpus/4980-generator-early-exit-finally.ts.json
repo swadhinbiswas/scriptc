@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4980-generator-early-exit-finally.ts"
+ ],
+ "diags": []
+}

@@ -15,7 +15,7 @@ members.has(wide);
 const seededMembers = new Set<Key>([wide]);
 console.log(seededMembers);
 
-// An identity-key union must consist entirely of identity-bearing arms.
+// Mixed and nullable key unions preserve each arm's value or identity.
 const mixed = new Map<Key | string, number>();
 const nullable = new Set<Key | undefined>();
 console.log(mixed, nullable);

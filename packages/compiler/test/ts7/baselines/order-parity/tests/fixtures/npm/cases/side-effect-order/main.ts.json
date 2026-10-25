@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/side-effect-order/mid.ts",
+  "<repo>/tests/fixtures/npm/cases/side-effect-order/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/deferred-class-binding/crate.ts",
+  "<repo>/tests/diagnostics/deferred-class-binding/main.ts"
+ ],
+ "diags": []
+}

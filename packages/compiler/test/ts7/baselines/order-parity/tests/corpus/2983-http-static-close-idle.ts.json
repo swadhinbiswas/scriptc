@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2983-http-static-close-idle.ts"
+ ],
+ "diags": []
+}

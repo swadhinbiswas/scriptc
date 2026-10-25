@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2967-numeric-array-read-lifetime.ts"
+ ],
+ "diags": []
+}

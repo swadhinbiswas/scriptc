@@ -1,0 +1,53 @@
+intern-table-fences.ts:8:47 - error SC1090: InternTable names other than string literals are not supported yet
+
+  7 | const name = "dynamic";
+  8 | const named = new InternTable<string, number>(name);
+    |                                               ^~~~
+  9 | const first = new InternTable<string, number>("fences.shared");
+
+  hint: name the table with a string literal: every thread that opens the name shares the table
+
+intern-table-fences.ts:10:16 - error SC1090: opening InternTable "fences.shared" with different type arguments than its first construction is not supported yet
+
+   9 | const first = new InternTable<string, number>("fences.shared");
+  10 | const second = new InternTable<string, string>("fences.shared");
+     |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  11 | const mixed = new InternTable<string | number, number>("fences.mixed");
+
+  hint: every construction of one table name must use the same key and value types
+
+intern-table-fences.ts:11:15 - error SC1090: 'string | number' as an InternTable key type is not supported yet
+
+  10 | const second = new InternTable<string, string>("fences.shared");
+  11 | const mixed = new InternTable<string | number, number>("fences.mixed");
+     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  12 | const callbacks = new InternTable<string, () => number>("fences.callbacks");
+
+  hint: use string or number keys, or arrays of numbers or of strings
+
+intern-table-fences.ts:12:19 - error SC1090: '() => number' as an InternTable value type is not supported yet
+
+  11 | const mixed = new InternTable<string | number, number>("fences.mixed");
+  12 | const callbacks = new InternTable<string, () => number>("fences.callbacks");
+     |                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  13 | const ctor = InternTable;
+
+  hint: store numbers, booleans, strings, bigints, arrays, Maps, Sets, objects and class instances
+
+intern-table-fences.ts:13:14 - error SC2020: 'InternTable (@scriptc/experimental) as a value' is part of the standard library types but has no scriptc lowering yet
+
+  12 | const callbacks = new InternTable<string, () => number>("fences.callbacks");
+  13 | const ctor = InternTable;
+     |              ^~~~~~~~~~~
+  14 | const getter = first.get;
+
+  hint: open tables with new InternTable("name")
+
+intern-table-fences.ts:14:16 - error SC2020: 'InternTable.get (@scriptc/experimental) as a value' is part of the standard library types but has no scriptc lowering yet
+
+  13 | const ctor = InternTable;
+  14 | const getter = first.get;
+     |                ^~~~~~~~~
+  15 | console.log(named, first, second, mixed, callbacks, ctor, getter);
+
+  hint: call table.get(...) directly

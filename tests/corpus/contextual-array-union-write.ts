@@ -22,17 +22,17 @@ console.log(valueOf(reversed));
 // callback parameter narrowed by one of its nested discriminants.
 const location: SrcLoc = { file: "fixture.ts", start: 0, end: 1 };
 const booleanType: IrType = { kind: "bool" };
-const jsType: IrType = { kind: "jsval" };
+const stringType: IrType = { kind: "string" };
 const dynType: IrType = { kind: "dyn" };
 const expressions: IrExpr[] = [
   { kind: "boolLit", value: true, type: booleanType, loc: location },
-  { kind: "jsOp", op: "undefLit", args: [], type: jsType, loc: location },
+  { kind: "strLit", value: "native", type: stringType, loc: location },
 ];
 expressions.forEach((value, index) => {
-  if (value.type.kind === "jsval") {
-    expressions[index] = { kind: "dynFromJsval", value, type: dynType, loc: value.loc };
+  if (value.type.kind === "string") {
+    expressions[index] = { kind: "dynFrom", value, type: dynType, loc: value.loc };
   } else {
-    expressions[index] = { kind: "jsMarshal", value, type: jsType, loc: value.loc };
+    expressions[index] = { kind: "logical", op: "&&", left: value, right: value, type: booleanType, loc: value.loc };
   }
 });
 console.log(expressions.map((value) => value.kind).join(","));
@@ -43,10 +43,9 @@ const logical = expressions.reduce<IrExpr>((left, right) => ({
 console.log(logical.kind, logical.kind === "logical" && logical.left.kind);
 const getters = [{ name: "one", fn: initial }, { name: "two", fn: initial }];
 const withGetters = getters.reduceRight<IrExpr>((value, getter) => ({
-  kind: "jsOp", op: "defineGetter", args: [
-    value,
-    { kind: "jsMarshal", value: { kind: "strLit", value: getter.name, type: { kind: "string" }, loc: location }, type: jsType, loc: location },
-    getter.fn,
-  ], type: jsType, loc: location,
+  kind: "recordLit", fields: [
+    { name: getter.name, value },
+    { name: "getter", value: getter.fn },
+  ], type: { kind: "record", shapeId: "fixture" }, loc: location,
 }), initial);
-console.log(withGetters.kind, withGetters.kind === "jsOp" && withGetters.args.length);
+console.log(withGetters.kind, withGetters.kind === "recordLit" && withGetters.fields.length);

@@ -5,24 +5,33 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { analyze, compile } from "../src/index.js";
 
-const temp = (): string => mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-json-callback-"));
+const temp = (): string =>
+  mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-json-callback-"));
 
 // Unsupported forms must be named; accepting a third argument but never
-// supplying context.source would silently change data recovery code.
+// supplying context.source would change data recovery code without a
+// diagnostic.
 test.each([
-  ["replacer property list", `JSON.stringify({ n: 1 }, ["n"]);`, "JSON replacer"],
   ["reviver context", `JSON.parse("1", (key, value, context) => context.source);`, "JSON reviver"],
   ["reviver rest context", `JSON.parse("1", (...args) => args.length);`, "JSON reviver"],
-  ["reviver arguments context", `JSON.parse("1", function () { return arguments[2].source; });`, "JSON reviver"],
+  [
+    "reviver arguments context",
+    `JSON.parse("1", function () { return arguments[2].source; });`,
+    "JSON reviver",
+  ],
 ] as const)("JSON callback boundary: %s", (_name, source, message) => {
   const dir = temp();
   try {
     const entry = join(dir, "main.js");
     writeFileSync(entry, source);
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
-    expect([...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some((d) => d.code === "SC2020" && d.message.includes(message)),
-      JSON.stringify(coverage.diagnostics)).toBe(true);
+    expect(
+      [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some(
+        (d) => d.code === "SC2020" && d.message.includes(message),
+      ),
+      JSON.stringify(coverage.diagnostics),
+    ).toBe(true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -33,7 +42,9 @@ for (const backend of ["llvm"] as const) {
     const dir = temp();
     try {
       const entry = join(dir, "main.ts");
-      writeFileSync(entry, `
+      writeFileSync(
+        entry,
+        `
         export {};
         // Dense dyn arrays must not misrepresent a deleted element as a
         // present undefined. The runtime explicitly refuses that form.
@@ -76,21 +87,35 @@ for (const backend of ["llvm"] as const) {
         }
         const recovered = JSON.parse('{"n":1}', (_key: string, value: unknown) => value) as { n: number };
         console.log(recovered.n);
-      `);
+      `,
+      );
       const built = await compile(entry, {
-        outDir: dir, outPath: join(dir, process.platform === "win32" ? "program.exe" : "program"),
-        backend, dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1",
+        outDir: dir,
+        outPath: join(dir, process.platform === "win32" ? "program.exe" : "program"),
+        backend,
+        sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
-      if (!built.ok) throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      if (!built.ok)
+        throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
       expect(built.backend).toBe(backend);
       const result = spawnSync(built.binaryPath, [], { timeout: 30_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, result.stderr.toString()).toBe(0);
-      expect(result.stdout.toString()).toBe([
-        "JSON.parse reviver deleting array elements is not supported yet",
-        "true", "true", "true", "true", "true undefined", "true", "true", "1", "",
-      ].join("\n"));
+      expect(result.stdout.toString()).toBe(
+        [
+          "JSON.parse reviver deleting array elements is not supported yet",
+          "true",
+          "true",
+          "true",
+          "true",
+          "true undefined",
+          "true",
+          "true",
+          "1",
+          "",
+        ].join("\n"),
+      );
       expect(result.stderr.toString()).toBe("");
     } finally {
       rmSync(dir, { recursive: true, force: true });

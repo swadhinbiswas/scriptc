@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5278-host-null-bytes.cjs"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5127-frame-loop-bindings.ts"
+ ],
+ "diags": []
+}

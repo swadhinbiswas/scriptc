@@ -38,7 +38,19 @@ const TOP_LEVEL_ORDER: readonly string[] = [
 ];
 
 const HASH_RE = /^[0-9a-f]{16}$/;
-const TYPEREF_KINDS = new Set(["bool", "f64", "i64", "bytes", "void", "optional", "slice", "node", "value", "enum", "union"]);
+const TYPEREF_KINDS = new Set([
+  "bool",
+  "f64",
+  "i64",
+  "bytes",
+  "void",
+  "optional",
+  "slice",
+  "node",
+  "value",
+  "enum",
+  "union",
+]);
 const FUNCTION_CHANNELS = ["command_msg", "frame_msg", "key_msg", "pinch_msg"];
 
 function isDict(v: unknown): v is Dict {
@@ -58,10 +70,11 @@ export function validateSidecar(doc: unknown): string[] {
   /* ── V1: required fields, format, top-level key order ─────────────── */
   const keys = Object.keys(doc);
   for (const k of TOP_LEVEL_ORDER) {
-    if (!(Object.hasOwn(doc, k))) bad("V1", `required field '${k}' is missing`);
+    if (!Object.hasOwn(doc, k)) bad("V1", `required field '${k}' is missing`);
   }
   for (const k of keys) {
-    if (!(TOP_LEVEL_ORDER as readonly string[]).includes(k)) bad("V1", `unknown top-level field '${k}' (emit only format-1 fields)`);
+    if (!(TOP_LEVEL_ORDER as readonly string[]).includes(k))
+      bad("V1", `unknown top-level field '${k}' (emit only format-1 fields)`);
   }
   const present = TOP_LEVEL_ORDER.filter((k) => Object.hasOwn(doc, k));
   const actual = keys.filter((k) => (TOP_LEVEL_ORDER as readonly string[]).includes(k));
@@ -70,15 +83,25 @@ export function validateSidecar(doc: unknown): string[] {
   }
   if (doc["format"] !== 1) bad("V1", `format must be 1, found ${JSON.stringify(doc["format"])}`);
   for (const k of ["wire_version", "abi_version"]) {
-    if (typeof doc[k] !== "number" || !Number.isInteger(doc[k])) bad("V1", `'${k}' must be an integer`);
+    if (typeof doc[k] !== "number" || !Number.isInteger(doc[k]))
+      bad("V1", `'${k}' must be an integer`);
   }
   for (const k of ["compiler_version", "entry", "model"]) {
     if (typeof doc[k] !== "string" || doc[k] === "") bad("V1", `'${k}' must be a non-empty string`);
   }
-  for (const k of ["init_returns_cmd", "update_returns_cmd", "has_subscriptions", "deterministic", "async_free"]) {
+  for (const k of [
+    "init_returns_cmd",
+    "update_returns_cmd",
+    "has_subscriptions",
+    "deterministic",
+    "async_free",
+  ]) {
     if (typeof doc[k] !== "boolean") bad("V1", `'${k}' must be a boolean`);
   }
-  if (typeof doc["entry"] === "string" && (doc["entry"].includes("\\") || doc["entry"].startsWith("/"))) {
+  if (
+    typeof doc["entry"] === "string" &&
+    (doc["entry"].includes("\\") || doc["entry"].startsWith("/"))
+  ) {
     bad("V1", "'entry' must be a compilation-root-relative POSIX path");
   }
 
@@ -91,7 +114,12 @@ export function validateSidecar(doc: unknown): string[] {
 
   /* ── the type table (shape first — later rules walk it) ───────────── */
   const types = doc["types"];
-  if (!isDict(types) || !Array.isArray(types["structs"]) || !Array.isArray(types["enums"]) || !Array.isArray(types["unions"])) {
+  if (
+    !isDict(types) ||
+    !Array.isArray(types["structs"]) ||
+    !Array.isArray(types["enums"]) ||
+    !Array.isArray(types["unions"])
+  ) {
     bad("V1", "'types' must carry the three arrays structs/enums/unions");
     return out;
   }
@@ -104,7 +132,10 @@ export function validateSidecar(doc: unknown): string[] {
       return null;
     }
     if (structs.has(name) || enums.has(name) || unions.has(name)) {
-      bad("V3", `type name '${name}' appears twice — structs, enums, and unions share one namespace`);
+      bad(
+        "V3",
+        `type name '${name}' appears twice — structs, enums, and unions share one namespace`,
+      );
       return null;
     }
     return name;
@@ -130,7 +161,12 @@ export function validateSidecar(doc: unknown): string[] {
   const edges = new Map<string, Set<string>>(); // for V5
   const i64Slots: string[] = []; // for V10 (slice elements exempt)
 
-  const walkRef = (ref: unknown, where: string, owner: string | null, slotPath: string | null): void => {
+  const walkRef = (
+    ref: unknown,
+    where: string,
+    owner: string | null,
+    slotPath: string | null,
+  ): void => {
     if (!isDict(ref) || typeof ref["kind"] !== "string") {
       bad("V4", `${where} is not a TypeRef object`);
       return;
@@ -163,7 +199,10 @@ export function validateSidecar(doc: unknown): string[] {
         }
         const table = kind === "enum" ? enums : kind === "union" ? unions : structs;
         if (!table.has(name)) {
-          bad("V4", `${where} references '${name}', which is not a ${kind === "node" || kind === "value" ? "struct" : kind} in the type table`);
+          bad(
+            "V4",
+            `${where} references '${name}', which is not a ${kind === "node" || kind === "value" ? "struct" : kind} in the type table`,
+          );
           return;
         }
         reachable.add(name);
@@ -211,7 +250,8 @@ export function validateSidecar(doc: unknown): string[] {
       bad("V1", `enum '${name}' has no string member array`);
       continue;
     }
-    if (new Set(members as string[]).size !== members.length) bad("V3", `enum '${name}' repeats a member`);
+    if (new Set(members as string[]).size !== members.length)
+      bad("V3", `enum '${name}' repeats a member`);
   }
   for (const [name, u] of unions) {
     const arms = u["arms"];
@@ -252,7 +292,12 @@ export function validateSidecar(doc: unknown): string[] {
     bad("V1", "'model_helpers' must be an array");
   } else {
     helpers.forEach((h, i) => {
-      if (!isDict(h) || typeof h["name"] !== "string" || typeof h["arena"] !== "boolean" || !Array.isArray(h["params"])) {
+      if (
+        !isDict(h) ||
+        typeof h["name"] !== "string" ||
+        typeof h["arena"] !== "boolean" ||
+        !Array.isArray(h["params"])
+      ) {
         bad("V1", `model_helpers[${i}] is malformed (name/params/returns/arena)`);
         return;
       }
@@ -269,12 +314,18 @@ export function validateSidecar(doc: unknown): string[] {
   const msg = doc["msg"];
   const armDescriptors = new Map<string, Dict>();
   let msgName = "Msg";
-  if (!isDict(msg) || typeof msg["name"] !== "string" || !Array.isArray(msg["arms"]) || !Array.isArray(msg["unbound"])) {
+  if (
+    !isDict(msg) ||
+    typeof msg["name"] !== "string" ||
+    !Array.isArray(msg["arms"]) ||
+    !Array.isArray(msg["unbound"])
+  ) {
     bad("V1", "'msg' must carry name, arms, and unbound");
   } else {
     msgName = msg["name"];
     const arms = msg["arms"] as unknown[];
-    if (arms.length > 256) bad("V6", `msg declares ${arms.length} arms — tags ride a u8, so at most 256 are permitted`);
+    if (arms.length > 256)
+      bad("V6", `msg declares ${arms.length} arms — tags ride a u8, so at most 256 are permitted`);
     for (const a of arms) {
       if (!isDict(a) || typeof a["name"] !== "string" || !isDict(a["payload"])) {
         bad("V1", "msg carries a malformed arm");
@@ -298,8 +349,17 @@ export function validateSidecar(doc: unknown): string[] {
         case "number_bytes": {
           const nf = d["number_field"];
           const bf = d["bytes_field"];
-          if (typeof nf !== "string" || typeof bf !== "string" || nf === "" || bf === "" || nf === bf) {
-            bad("V7", `msg arm '${armName}': number_bytes needs distinct, non-empty number_field and bytes_field`);
+          if (
+            typeof nf !== "string" ||
+            typeof bf !== "string" ||
+            nf === "" ||
+            bf === "" ||
+            nf === bf
+          ) {
+            bad(
+              "V7",
+              `msg arm '${armName}': number_bytes needs distinct, non-empty number_field and bytes_field`,
+            );
           }
           if (d["number_class"] !== "f64" && d["number_class"] !== "i64") {
             bad("V7", `msg arm '${armName}': number_bytes class must be "f64" or "i64"`);
@@ -314,7 +374,10 @@ export function validateSidecar(doc: unknown): string[] {
           const name = d["name"];
           const table = d["kind"] === "record" ? structs : d["kind"] === "union" ? unions : enums;
           if (typeof name !== "string" || !table.has(name)) {
-            bad("V4", `msg arm '${armName}': ${String(d["kind"])} payload does not resolve to a matching table entry`);
+            bad(
+              "V4",
+              `msg arm '${armName}': ${String(d["kind"])} payload does not resolve to a matching table entry`,
+            );
           } else {
             reachable.add(name);
           }
@@ -326,13 +389,22 @@ export function validateSidecar(doc: unknown): string[] {
           // slot (optional<i64>); slices still clear the path in walkRef
           // because format 1 has no slice-element slot grammar.
           walkRef(t, `msg arm '${armName}' scalar payload`, null, `${msgName}.${armName}`);
-          if (isDict(t) && (t["kind"] === "node" || t["kind"] === "value" || t["kind"] === "void")) {
-            bad("V7", `msg arm '${armName}': scalar descriptors carry a non-record, non-void TypeRef`);
+          if (
+            isDict(t) &&
+            (t["kind"] === "node" || t["kind"] === "value" || t["kind"] === "void")
+          ) {
+            bad(
+              "V7",
+              `msg arm '${armName}': scalar descriptors carry a non-record, non-void TypeRef`,
+            );
           }
           break;
         }
         default:
-          bad("V7", `msg arm '${armName}' carries unknown payload descriptor kind '${String(d["kind"])}'`);
+          bad(
+            "V7",
+            `msg arm '${armName}' carries unknown payload descriptor kind '${String(d["kind"])}'`,
+          );
       }
     }
   }
@@ -362,7 +434,10 @@ export function validateSidecar(doc: unknown): string[] {
   } else {
     for (const name of modelUnbound as string[]) {
       if (!modelFields.has(name) && !helperNames.has(name)) {
-        bad("V8", `model_unbound names '${name}', which is neither a model field nor a helper entry`);
+        bad(
+          "V8",
+          `model_unbound names '${name}', which is neither a model field nor a helper entry`,
+        );
       }
     }
   }
@@ -377,7 +452,12 @@ export function validateSidecar(doc: unknown): string[] {
   /* ── abi shape (V11's document half) ──────────────────────────────── */
   const abi = doc["abi"];
   const exportSet = new Set<string>();
-  if (!isDict(abi) || typeof abi["prefix"] !== "string" || !Array.isArray(abi["exports"]) || typeof abi["snapshot_format"] !== "number") {
+  if (
+    !isDict(abi) ||
+    typeof abi["prefix"] !== "string" ||
+    !Array.isArray(abi["exports"]) ||
+    typeof abi["snapshot_format"] !== "number"
+  ) {
     bad("V1", "'abi' must carry prefix, exports, and snapshot_format");
   } else {
     for (const s of abi["exports"] as unknown[]) {
@@ -402,7 +482,10 @@ export function validateSidecar(doc: unknown): string[] {
         continue;
       }
       if (v !== exportSet.has(ch)) {
-        bad("V9", `channels.${ch} is ${v} but the suffix '${ch}' is ${v ? "absent from" : "present in"} abi.exports`);
+        bad(
+          "V9",
+          `channels.${ch} is ${v} but the suffix '${ch}' is ${v ? "absent from" : "present in"} abi.exports`,
+        );
       }
     }
     for (const ch of ["appearance_msg", "chrome_msg"]) {
@@ -415,8 +498,16 @@ export function validateSidecar(doc: unknown): string[] {
       const d = armDescriptors.get(v);
       if (d === undefined) {
         bad("V9", `channels.${ch} names '${v}', which is not an arm of msg`);
-      } else if (d["kind"] !== "record" && d["kind"] !== "union" && d["kind"] !== "enum" && d["kind"] !== "scalar") {
-        bad("V9", `channels.${ch} names arm '${v}', whose descriptor is not of the named-type family`);
+      } else if (
+        d["kind"] !== "record" &&
+        d["kind"] !== "union" &&
+        d["kind"] !== "enum" &&
+        d["kind"] !== "scalar"
+      ) {
+        bad(
+          "V9",
+          `channels.${ch} names arm '${v}', whose descriptor is not of the named-type family`,
+        );
       }
     }
     const envMsgs = channels["env_msgs"];
@@ -429,13 +520,17 @@ export function validateSidecar(doc: unknown): string[] {
           bad("V1", "channels.env_msgs carries a malformed entry");
           continue;
         }
-        if (seenEnv.has(e["env"])) bad("V9", `channels.env_msgs repeats environment variable '${e["env"]}'`);
+        if (seenEnv.has(e["env"]))
+          bad("V9", `channels.env_msgs repeats environment variable '${e["env"]}'`);
         seenEnv.add(e["env"]);
         const d = armDescriptors.get(e["msg"]);
         if (d === undefined) {
           bad("V9", `channels.env_msgs targets '${e["msg"]}', which is not an arm of msg`);
         } else if (d["kind"] !== "bytes") {
-          bad("V9", `channels.env_msgs targets arm '${e["msg"]}', whose descriptor is not {"kind": "bytes"}`);
+          bad(
+            "V9",
+            `channels.env_msgs targets arm '${e["msg"]}', whose descriptor is not {"kind": "bytes"}`,
+          );
         }
       }
     }
@@ -460,7 +555,10 @@ export function validateSidecar(doc: unknown): string[] {
     }
     for (const name of [...structs.keys(), ...enums.keys(), ...unions.keys()]) {
       if (!reachable.has(name)) {
-        bad("V4", `table entry '${name}' is unreachable from model, msg, model_helpers, and channels`);
+        bad(
+          "V4",
+          `table entry '${name}' is unreachable from model, msg, model_helpers, and channels`,
+        );
       }
     }
   }
@@ -472,7 +570,11 @@ export function validateSidecar(doc: unknown): string[] {
   } else {
     const declared = new Set<string>();
     for (const e of integerSlots as unknown[]) {
-      if (!isDict(e) || typeof e["slot"] !== "string" || (e["class"] !== "i64" && e["class"] !== "u64")) {
+      if (
+        !isDict(e) ||
+        typeof e["slot"] !== "string" ||
+        (e["class"] !== "i64" && e["class"] !== "u64")
+      ) {
         bad("V1", "integer_slots carries a malformed entry");
         continue;
       }
@@ -481,10 +583,12 @@ export function validateSidecar(doc: unknown): string[] {
     }
     const spelled = new Set(i64Slots);
     for (const slot of spelled) {
-      if (!declared.has(slot)) bad("V10", `'${slot}' is spelled i64 but has no integer_slots entry`);
+      if (!declared.has(slot))
+        bad("V10", `'${slot}' is spelled i64 but has no integer_slots entry`);
     }
     for (const slot of declared) {
-      if (!spelled.has(slot)) bad("V10", `integer_slots entry '${slot}' resolves to no slot spelled i64`);
+      if (!spelled.has(slot))
+        bad("V10", `integer_slots entry '${slot}' resolves to no slot spelled i64`);
     }
   }
 

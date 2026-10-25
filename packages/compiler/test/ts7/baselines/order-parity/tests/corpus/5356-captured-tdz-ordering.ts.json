@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5356-captured-tdz-ordering.ts"
+ ],
+ "diags": []
+}

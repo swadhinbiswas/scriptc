@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2982-string-position-coercion-order.js"
+ ],
+ "diags": []
+}

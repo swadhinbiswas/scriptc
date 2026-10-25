@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1944-class-values-modules/lib.ts",
+  "<repo>/tests/corpus/1944-class-values-modules/main.ts"
+ ],
+ "diags": []
+}

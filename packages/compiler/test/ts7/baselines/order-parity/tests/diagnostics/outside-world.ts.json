@@ -1,0 +1,25 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/outside-world.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Cannot find name 'document'. Do you need to change your target library? Try changing the 'lib' compiler option to include 'dom'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/outside-world.ts",
+    "start": 622,
+    "end": 630
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "Cannot find name 'WebSocket'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/outside-world.ts",
+    "start": 647,
+    "end": 656
+   }
+  }
+ ]
+}

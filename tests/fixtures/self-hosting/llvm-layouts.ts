@@ -3,9 +3,18 @@ import { deserializeModule } from "../../../packages/compiler/src/ir/serialize.j
 import { computeTraced } from "../../../packages/compiler/src/backend/cycle-analysis.js";
 import { buildClassGraph, classFieldIndex, type ClassHost } from "../../../packages/compiler/src/backend/llvm/classes.js";
 import { emitLlvmLayouts } from "../../../packages/compiler/src/backend/llvm/layouts.js";
+import { FIRST_EMITTED_CYC_KIND } from "../../../packages/compiler/src/backend/llvm/alloc.js";
 import { LlvmDebugInfo } from "../../../packages/compiler/src/backend/llvm/debug-info.js";
 import { LlWalkers, type WalkerHost } from "../../../packages/compiler/src/backend/llvm/walkers.js";
 import { BlockBuilder } from "../../../packages/compiler/src/backend/llvm/blocks.js";
+import { NULLABLE_ABSENT, NullableUnions } from "../../../packages/compiler/src/backend/llvm/nullable-unions.js";
+import { emitFieldAbsentTest } from "../../../packages/compiler/src/backend/llvm/common.js";
+import { undefinedArmTag } from "../../../packages/compiler/src/ir/analysis.js";
+import { analyzeInt32Slots } from "../../../packages/compiler/src/ir/int32-slots.js";
+import { analyzeCallLifetimes } from "../../../packages/compiler/src/backend/llvm/call-lifetimes.js";
+import { NullableRefFields } from "../../../packages/compiler/src/backend/llvm/nullable-fields.js";
+import { InlineUnionFields } from "../../../packages/compiler/src/backend/llvm/inline-unions.js";
+import { VirtualBorrows } from "../../../packages/compiler/src/backend/llvm/virtual-borrows.js";
 import { f64Lit } from "../../../packages/compiler/src/backend/llvm/common.js";
 import { mangleClassObj } from "../../../packages/compiler/src/backend/mangle.js";
 import { type IrType } from "../../../packages/compiler/src/ir/ir.js";
@@ -16,7 +25,6 @@ interface Request {
   classObjects: string[];
   sources: { file: string; text: string }[];
   writers?: IrType[];
-  textUnions?: string[];
   joinUnions?: string[];
   indent?: boolean;
 }
@@ -26,11 +34,19 @@ try {
   const request = JSON.parse(readFileSync(process.argv[3]!, "utf8")) as Request;
   const declarations = new Set<string>();
   const strings: string[] = [];
+  const mapOps: string[] = [];
   const literals: string[] = [];
   const units: { union: string; tag: number }[] = [];
   let needsOom = false;
   let needsBadTag = false;
+  let cycKinds = 0;
   const traced = computeTraced(mod);
+  const nullableUnions = new NullableUnions(mod);
+  const unionsById = new Map((mod.unions ?? []).map((union) => [union.id, union]));
+  // Mirrors the emitter: scalar-union fields store their tag and bits inline.
+  const inlineUnions = new InlineUnionFields(nullableUnions.boxedUnions(unionsById), mod.classes ?? []);
+  let needsUnionNone = false;
+  let virtualBorrows: VirtualBorrows | undefined;
   const host: ClassHost & WalkerHost = {
     declare: (decl) => { declarations.add(decl); },
     needOom: () => { needsOom = true; },
@@ -41,12 +57,20 @@ try {
       return `@native_literal_${index}`;
     },
     sizeType: request.bits === 32 ? "i32" : "i64",
-    cycleColorOffset: request.bits === 32 ? 12 : 16,
+    cycleBufOffset: 4,
+    // Collector statistics indices, numbered as LlEmitter numbers them.
+    nextCycKind: () => FIRST_EMITTED_CYC_KIND + cycKinds++,
     tracedShapes: traced.shapes,
     tracedUnions: traced.unions,
     recordsById: new Map((mod.records ?? []).map((record) => [record.id, record])),
-    unionsById: new Map((mod.unions ?? []).map((union) => [union.id, union])),
+    // emitLlvmModule enables the inline allocator for 64-bit host targets.
+    inlineAlloc: request.bits === 64,
+    unionsById,
+    nullableUnions,
+    inlineUnions,
+    unionNoneRef: () => { needsUnionNone = true; return "@sc_union_none"; },
     recordCloneShapes: new Set(request.clones),
+    rcHelpers: null,
     unitInstanceRef: (union, tag) => {
       let index = units.findIndex((unit) => unit.union === union && unit.tag === tag);
       if (index === -1) {
@@ -55,21 +79,54 @@ try {
       }
       return `@native_unit_${index}`;
     },
+    // Mirrors the emitter: a nullable slot's ABSENT state is the sentinel.
+    fieldAbsentTestIn: (B, value, unionId) => {
+      if (!nullableUnions.has(unionId)) return emitFieldAbsentTest(B, value, undefinedArmTag({ kind: "union", unionId }, unionsById));
+      const absent = B.tmp();
+      B.line(`${absent} = icmp eq ptr ${value}, ${NULLABLE_ABSENT}`);
+      return absent;
+    },
+    // Mirrors the emitter: borrowing vtable slots store the borrowing body.
+    virtualEntry: (implFn) => virtualBorrows!.entry(implFn),
     cstr: (text) => {
       let index = strings.indexOf(text);
       if (index === -1) { index = strings.length; strings.push(text); }
       return `@native_string_${index}`;
     },
+    mapOps: (operands) => {
+      if (operands.every((op) => op === "null")) return "null";
+      const body = operands.join(", ");
+      let index = mapOps.indexOf(body);
+      if (index === -1) { index = mapOps.length; mapOps.push(body); }
+      return `@native_map_ops_${index}`;
+    },
   };
   const functions = new Map(mod.functions.map((fn) => [fn.name, fn]));
   const graph = buildClassGraph(mod, functions);
-  const classObjects = new Map(request.classObjects.map((name) => [name, { nameSym: `@name_${mangleClassObj(name)}` }]));
+  const nullableFields = new NullableRefFields(mod.classes ?? [], nullableUnions.boxedUnions(unionsById));
+  const records = new Map((mod.records ?? []).map((record) => [record.id, record]));
+  const lifetimes = analyzeCallLifetimes(
+    functions,
+    (className, field) => nullableFields.get(className, field) !== null,
+    new Map(),
+    new Set(),
+    {
+      record: (shapeId, field) => {
+        const type = records.get(shapeId)?.fields.find((f) => f.name === field)?.type;
+        return type !== undefined && inlineUnions.record(type);
+      },
+      classField: (className, field) => inlineUnions.classField(className, field),
+    },
+  );
+  virtualBorrows = new VirtualBorrows(mod, graph, functions, lifetimes.borrowed);
+  const classObjects: Map<string, { nameSym: string; baseNameSym: string | null }> = new Map();
+  for (const name of request.classObjects) classObjects.set(name, { nameSym: `@name_${mangleClassObj(name)}`, baseNameSym: null });
   const typeName = (type: IrType): string => type.kind === "void" ? "void" : type.kind === "f64" || type.kind === "date" ? "double" : type.kind === "bool" ? "i1" : "ptr";
-  const layouts = emitLlvmLayouts(host, mod, graph, classObjects, functions, typeName);
+  // Mirrors the emitter: whole-program int32 fields store the exact i32.
+  const layouts = emitLlvmLayouts(host, mod, graph, classObjects, functions, typeName, undefined, analyzeInt32Slots(mod));
   const walkers = new LlWalkers(host);
   const helpers: string[] = [];
   for (const type of request.writers ?? []) helpers.push(walkers.jsonWriteHelper(type));
-  for (const union of request.textUnions ?? []) helpers.push(walkers.unionToStrHelper(union));
   for (const union of request.joinUnions ?? []) helpers.push(walkers.unionJoinHelper(union));
   if (request.indent) helpers.push(walkers.jsonIndentHelper());
   const classes = [...graph.values()].map((meta) => ({
@@ -99,7 +156,7 @@ try {
     blocks.line("unreachable text must be dropped");
   });
   blocks.terminate("ret void");
-  console.log(JSON.stringify({ layouts, classes, declarations: [...declarations], strings, literals, units, needsOom, needsBadTag, helpers, walkers: walkers.defs, bindings, debug: debug.render(), block: blocks.render() }));
+  console.log(JSON.stringify({ layouts, classes, declarations: [...declarations], strings, mapOps, literals, units, needsOom, needsBadTag, needsUnionNone, helpers, walkers: walkers.defs, bindings, debug: debug.render(), block: blocks.render() }));
 } catch (error) {
   if (error instanceof Error) console.log(error.name + ": " + error.message);
   else console.log("unexpected thrown value");

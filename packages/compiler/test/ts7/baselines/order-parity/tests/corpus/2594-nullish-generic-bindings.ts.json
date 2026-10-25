@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2594-nullish-generic-bindings.ts"
+ ],
+ "diags": []
+}

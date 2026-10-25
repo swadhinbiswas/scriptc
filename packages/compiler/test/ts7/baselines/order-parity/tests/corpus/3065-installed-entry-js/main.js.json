@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3065-installed-entry-js/value.js",
+  "<repo>/tests/corpus/3065-installed-entry-js/lib/index.js",
+  "<repo>/tests/corpus/3065-installed-entry-js/main.js"
+ ],
+ "diags": []
+}

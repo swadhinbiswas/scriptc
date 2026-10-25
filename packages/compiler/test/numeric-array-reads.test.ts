@@ -10,22 +10,29 @@ test("ordinary numeric-array arithmetic uses one lookup per read without boxing"
   try {
     const entry = join(dir, "main.ts");
     const outPath = join(dir, "main.ir.json");
-    await writeFile(entry, [
-      "function blend(a: number[], i: number, j: number): number {",
-      "  return a[i] + (a[j] - a[i]) * 0.5;",
-      "}",
-      "console.log(blend([1, 3], 0, 1));",
-      "",
-    ].join("\n"));
+    await writeFile(
+      entry,
+      [
+        "function blend(a: number[], i: number, j: number): number {",
+        "  return a[i] + (a[j] - a[i]) * 0.5;",
+        "}",
+        "console.log(blend([1, 3], 0, 1));",
+        "",
+      ].join("\n"),
+    );
     const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
-    if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const mod = deserializeModule(await readFile(outPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);
     const visited = new Set<string>();
     let arrayReads = 0;
     function visit(value: unknown): void {
       if (value === null || typeof value !== "object") return;
-      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
       const node = value as { kind?: string; callee?: string; method?: string };
       expect(node.kind).not.toBe("unionWrap");
       expect(node.kind).not.toBe("arrayState");

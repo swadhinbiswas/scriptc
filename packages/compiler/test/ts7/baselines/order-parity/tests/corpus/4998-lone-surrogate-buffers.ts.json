@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4998-lone-surrogate-buffers.ts"
+ ],
+ "diags": []
+}

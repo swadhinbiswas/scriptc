@@ -12,7 +12,10 @@ test("owned enums exactly match the pinned SDK, including duplicate reverse name
   for (const [name, value] of Object.entries(generated)) {
     if (typeof value === "function") continue;
     const basename = name[0]!.toLowerCase() + name.slice(1);
-    const upstream = require(join(packageRoot, "dist/enums", `${basename}.js`)) as Record<string, unknown>;
+    const upstream = require(join(packageRoot, "dist/enums", `${basename}.js`)) as Record<
+      string,
+      unknown
+    >;
     expect(value, name).toEqual(upstream[name]);
   }
 });
@@ -38,11 +41,17 @@ test("runtime name lookups preserve aliases and missing values", () => {
 
 test("frontend enums and wire discriminants remain in the same TypeScript world", () => {
   for (const [wire, frontend] of [
-    [AstKind, generated.SyntaxKind], [AstNodeFlags, generated.NodeFlags], [AstModifierFlags, generated.ModifierFlags],
-    [semantic.SemanticTypeFlags, generated.TypeFlags], [semantic.SemanticObjectFlags, generated.ObjectFlags],
-    [semantic.SemanticSymbolFlags, generated.SymbolFlags], [semantic.SemanticSignatureFlags, generated.SignatureFlags],
-    [semantic.SemanticSignatureKind, generated.SignatureKind], [semantic.SemanticTypePredicateKind, generated.TypePredicateKind],
+    [AstKind, generated.SyntaxKind],
+    [AstNodeFlags, generated.NodeFlags],
+    [AstModifierFlags, generated.ModifierFlags],
+    [semantic.SemanticTypeFlags, generated.TypeFlags],
+    [semantic.SemanticObjectFlags, generated.ObjectFlags],
+    [semantic.SemanticSymbolFlags, generated.SymbolFlags],
+    [semantic.SemanticSignatureFlags, generated.SignatureFlags],
+    [semantic.SemanticSignatureKind, generated.SignatureKind],
+    [semantic.SemanticTypePredicateKind, generated.TypePredicateKind],
   ] as const) {
-    for (const [name, value] of Object.entries(wire)) expect((frontend as Record<string, string | number>)[name], name).toBe(value);
+    for (const [name, value] of Object.entries(wire))
+      expect((frontend as Record<string, string | number>)[name], name).toBe(value);
   }
 });

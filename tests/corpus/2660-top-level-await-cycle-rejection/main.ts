@@ -1,4 +1,3 @@
-// @dynamic
 try {
   await import("./a.ts");
   console.log("outer ok");

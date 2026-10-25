@@ -19,7 +19,8 @@ const repoRoot = join(fileURLToPath(import.meta.url), "../../..");
 const san = process.argv.includes("--san");
 const keepLlvmache = process.argv.includes("--keep-llvmache");
 // Must match vitest.config.ts's default.
-const cacheDir = process.env.SCRIPTC_CACHE_DIR ?? join(repoRoot, "node_modules/.cache/scriptc-tests/cas");
+const cacheDir =
+  process.env.SCRIPTC_CACHE_DIR ?? join(repoRoot, "node_modules/.cache/scriptc-tests/cas");
 const outDir = mkdtempSync(join(tmpdir(), "scr-cache-identity-"));
 
 function runSuite(label, extraEnv) {
@@ -31,7 +32,14 @@ function runSuite(label, extraEnv) {
   const t0 = Date.now();
   const res = spawnSync(
     "pnpm",
-    ["exec", "vitest", "run", "--reporter=dot", "--reporter=json", `--outputFile.json=${outputFile}`],
+    [
+      "exec",
+      "vitest",
+      "run",
+      "--reporter=dot",
+      "--reporter=json",
+      `--outputFile.json=${outputFile}`,
+    ],
     { cwd: repoRoot, env, stdio: ["ignore", "inherit", "inherit"] },
   );
   const seconds = (Date.now() - t0) / 1000;
@@ -68,7 +76,9 @@ const cached = runSuite("cached", {});
 
 console.log(`\n=== timing (${san ? "SCRIPTC_SAN=1 lane" : "plain lane"}) ===`);
 for (const pass of [uncached, populate, cached]) {
-  console.log(`${pass.label.padEnd(9)} ${pass.seconds.toFixed(1).padStart(8)}s   ${counts(pass.json)}`);
+  console.log(
+    `${pass.label.padEnd(9)} ${pass.seconds.toFixed(1).padStart(8)}s   ${counts(pass.json)}`,
+  );
 }
 
 const a = resultLines(uncached.json);
@@ -80,7 +90,9 @@ const onlyCached = b.filter((l) => !aSet.has(l));
 
 console.log(`\n=== identity: cached vs uncached ===`);
 if (onlyUncached.length === 0 && onlyCached.length === 0) {
-  console.log(`IDENTICAL: ${a.length} test results match exactly (names, statuses, failure output)`);
+  console.log(
+    `IDENTICAL: ${a.length} test results match exactly (names, statuses, failure output)`,
+  );
   process.exit(0);
 }
 console.log(`DIFFER: ${onlyUncached.length} only-in-uncached, ${onlyCached.length} only-in-cached`);

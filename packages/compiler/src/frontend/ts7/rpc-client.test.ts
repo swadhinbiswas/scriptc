@@ -14,20 +14,24 @@ function scripted(frames: number[][]) {
   let position = 0;
   let closes = 0;
   const output: number[] = [];
-  const client = new Ts7RpcClient(new Ts7Wire({
-    read(buffer, offset, length) {
-      const count = Math.min(length, input.length - position, 3);
-      buffer.set(input.subarray(position, position + count), offset);
-      position += count;
-      return count;
-    },
-    write(buffer, offset, length) {
-      const count = Math.min(length, 2);
-      output.push(...buffer.subarray(offset, offset + count));
-      return count;
-    },
-    close() { closes++; },
-  }));
+  const client = new Ts7RpcClient(
+    new Ts7Wire({
+      read(buffer, offset, length) {
+        const count = Math.min(length, input.length - position, 3);
+        buffer.set(input.subarray(position, position + count), offset);
+        position += count;
+        return count;
+      },
+      write(buffer, offset, length) {
+        const count = Math.min(length, 2);
+        output.push(...buffer.subarray(offset, offset + count));
+        return count;
+      },
+      close() {
+        closes++;
+      },
+    }),
+  );
   return { client, output, closes: () => closes };
 }
 
@@ -48,10 +52,17 @@ test("serves interleaved callbacks before returning the requested response", () 
   expect(io.client.requestText("echo", "next")).toBe("next");
   expect(calls).toEqual(['"/a.ts"']);
   expect(io.output).toEqual([
-    ...frame(1, "parse", "input"), ...frame(2, "readFile", '{"content":""}'),
-    ...frame(2, "exists", "false"), ...frame(1, "echo", "next"),
+    ...frame(1, "parse", "input"),
+    ...frame(2, "readFile", '{"content":""}'),
+    ...frame(2, "exists", "false"),
+    ...frame(1, "echo", "next"),
   ]);
-  expect(io.client.timing()).toEqual({ requests: 2, bytesSent: 9, bytesReceived: 10, callbacks: 2 });
+  expect(io.client.timing()).toEqual({
+    requests: 2,
+    bytesSent: 9,
+    bytesReceived: 10,
+    callbacks: 2,
+  });
   io.client.close();
   io.client.close();
   expect(io.closes()).toBe(1);
@@ -81,24 +92,38 @@ test.each([4, 5])("mismatched method on response kind %i poisons the channel", (
 test("unknown callbacks send an error and close instead of waiting forever", () => {
   const io = scripted([frame(6, "missing", "null")]);
   expect(() => io.client.requestText("parse", "{}")).toThrow("unknown callback: missing");
-  expect(io.output).toEqual([...frame(1, "parse", "{}"), ...frame(3, "missing", "unknown callback: missing")]);
+  expect(io.output).toEqual([
+    ...frame(1, "parse", "{}"),
+    ...frame(3, "missing", "unknown callback: missing"),
+  ]);
   expect(io.closes()).toBe(1);
 });
 
-test.each([new Error("disk failure"), "disk failure"])("throwing callbacks send a server error", (error) => {
-  const io = scripted([frame(6, "readFile", '"/a"')]);
-  io.client.registerCallback("readFile", () => { throw error; });
-  expect(() => io.client.requestText("parse", "{}")).toThrow("callback readFile failed: disk failure");
-  expect(io.output).toEqual([...frame(1, "parse", "{}"), ...frame(3, "readFile", "disk failure")]);
-  expect(io.closes()).toBe(1);
-});
+test.each([new Error("disk failure"), "disk failure"])(
+  "throwing callbacks send a server error",
+  (error) => {
+    const io = scripted([frame(6, "readFile", '"/a"')]);
+    io.client.registerCallback("readFile", () => {
+      throw error;
+    });
+    expect(() => io.client.requestText("parse", "{}")).toThrow(
+      "callback readFile failed: disk failure",
+    );
+    expect(io.output).toEqual([
+      ...frame(1, "parse", "{}"),
+      ...frame(3, "readFile", "disk failure"),
+    ]);
+    expect(io.closes()).toBe(1);
+  },
+);
 
 test("reentrant requests fail before sending a nested request", () => {
   const io = scripted([frame(6, "nested", "null")]);
   io.client.registerCallback("nested", () => io.client.requestText("inner", "null"));
   expect(() => io.client.requestText("outer", "null")).toThrow("reentrant requests");
   expect(io.output).toEqual([
-    ...frame(1, "outer", "null"), ...frame(3, "nested", "TypeScript API protocol: reentrant requests are not supported"),
+    ...frame(1, "outer", "null"),
+    ...frame(3, "nested", "TypeScript API protocol: reentrant requests are not supported"),
   ]);
   expect(io.closes()).toBe(1);
 });

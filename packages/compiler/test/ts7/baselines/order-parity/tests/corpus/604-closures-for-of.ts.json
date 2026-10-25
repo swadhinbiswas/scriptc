@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/604-closures-for-of.ts"
+ ],
+ "diags": []
+}

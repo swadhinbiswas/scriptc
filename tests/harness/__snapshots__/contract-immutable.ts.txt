@@ -1,0 +1,44 @@
+contract-immutable.ts:9:5 - error SC7004: 'this.count++' writes to a value that may be Immutable ('this' may be an Immutable value passed to 'Counter.bump' at contract-immutable.ts:30:1)
+
+   8 |   bump(): void {
+   9 |     this.count++;
+     |     ^~~~~~~~~~~~
+  10 |   }
+
+  hint: Immutable values cannot be written through any reference; copy the value before changing it
+
+contract-immutable.ts:16:35 - error SC7004: the value stored into 'VIEW' (Immutable) may be referenced elsewhere: 'shared' is not a fresh literal, construction or factory result
+
+  15 | const shared = [1, 2, 3];
+  16 | const VIEW: Immutable<number[]> = shared;
+     |                                   ^~~~~~
+  17 | 
+
+  hint: build the value in place (a literal, `new`, or a function that returns what it builds), so no mutable reference to it remains
+
+contract-immutable.ts:23:3 - error SC7004: 'config.name = "y"' writes to a value that may be Immutable ('config' may be an Immutable value passed to 'rename' at contract-immutable.ts:31:1)
+
+  22 | function rename(config: { name: string }): void {
+  23 |   config.name = "y";
+     |   ^~~~~~~~~~~~~~~~~
+  24 | }
+
+  hint: Immutable values cannot be written through any reference; copy the value before changing it
+
+contract-immutable.ts:27:3 - error SC7004: 'rows[0]!.push(4)' writes to a value that may be Immutable ('rows' may be an Immutable value passed to 'grow' at contract-immutable.ts:32:1)
+
+  26 | function grow(rows: number[][]): void {
+  27 |   rows[0]!.push(4);
+     |   ^~~~~~~~~~~~~~~~
+  28 | }
+
+  hint: Immutable values cannot be written through any reference; copy the value before changing it
+
+contract-immutable.ts:45:37 - error SC7004: the value stored into 'FILLED' (Immutable) may be referenced elsewhere: 'fill(-1)' is not a fresh literal, construction or factory result
+
+  44 | 
+  45 | const FILLED: Immutable<number[]> = fill(-1);
+     |                                     ^~~~~~~~
+  46 | console.log(FILLED.length);
+
+  hint: build the value in place (a literal, `new`, or a function that returns what it builds), so no mutable reference to it remains

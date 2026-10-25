@@ -1,4 +1,3 @@
-// @dynamic
 // Closures capturing `any` (island-handle) variables: the capture box
 // carries the handle with its own retain/release — reads see the live
 // value, mutation through the box is visible everywhere (the shared-box

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/missing-read-lambda-results.ts"
+ ],
+ "diags": []
+}

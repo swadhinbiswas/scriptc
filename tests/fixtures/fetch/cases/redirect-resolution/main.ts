@@ -1,5 +1,4 @@
-// @dynamic
-// Redirect URL resolution must remain byte-identical in the island-backed
+// Redirect URL resolution must remain byte-identical in the native
 // transport: fragments preserve the current resource, while backslashes in
 // special URLs behave as forward slashes.
 async function main(baseUrl: string, redirectKey: string): Promise<void> {

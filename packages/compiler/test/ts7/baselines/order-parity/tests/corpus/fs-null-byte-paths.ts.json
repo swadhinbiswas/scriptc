@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/fs-null-byte-paths.ts"
+ ],
+ "diags": []
+}

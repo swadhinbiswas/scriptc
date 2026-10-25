@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2948-child-fork-eof-callback/main.ts"
+ ],
+ "diags": []
+}

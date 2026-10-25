@@ -1,4 +1,3 @@
-// @dynamic
 // The island-backed string surface: case mapping, split into a STATIC
 // string[] flowing into intrinsic array ops, padding, string-pattern
 // replacement, trimming, and in-range at().

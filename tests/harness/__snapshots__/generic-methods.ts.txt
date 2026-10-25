@@ -26,55 +26,20 @@ generic-methods.ts:42:18 - error SC1090: references to 'this' in object literal 
      |                  ^~~~
   43 |     return x;
 
-generic-methods.ts:52:10 - error SC1090: object-literal generic methods declared inside functions (the compiled instantiations of 'm' are module functions and cannot capture the enclosing frame — declare the object at module scope) are not supported yet
+generic-methods.ts:56:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
 
-  51 |   const local = { m<T>(x: T): T { return x; } };
-  52 |   return local.m(3);
-     |          ^~~~~~~~~~
-  53 | }
-
-generic-methods.ts:60:13 - error SC1090: reaching the object-literal generic method 'm' through this receiver (resolution is static, so the receiver must be a never-reassigned binding initialized with the defining literal) is not supported yet
-
-  59 | let rebindable = { m<T>(x: T): T { return x; } };
-  60 | console.log(rebindable.m(4));
-     |             ^~~~~~~~~~~~~~~
-  61 | rebindable = { m<T>(x: T): T { return x; } };
-
-generic-methods.ts:68:13 - error SC1090: calls of the generic method 'm' through this receiver (the interface declaration is signature-only and generic methods dispatch statically, so the receiver's runtime class must be provable — bind the receiver to a const initialized with its 'new' expression, e.g. 'const r: HasGeneric = new C(...)') is not supported yet
-
-  67 | const viaInterface: HasGeneric = { m<T>(x: T): T { return x; } };
-  68 | console.log(viaInterface.m(5));
-     |             ^~~~~~~~~~~~~~~~~
-  69 | 
-
-generic-methods.ts:78:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
-
-  77 | }
-  78 | const bound = new Inst().g;
+  55 | }
+  56 | const bound = new Inst().g;
      |       ^~~~~
-  79 | const util = { id<T>(x: T): T { return x; } };
+  57 | const util = { id<T>(x: T): T { return x; } };
 
   hint: annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly
 
-generic-methods.ts:78:15 - error SC1090: values of builtin or unspecialized generic methods are not supported yet
+generic-methods.ts:58:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
 
-  77 | }
-  78 | const bound = new Inst().g;
-     |               ^~~~~~~~~~~~
-  79 | const util = { id<T>(x: T): T { return x; } };
-
-generic-methods.ts:80:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
-
-  79 | const util = { id<T>(x: T): T { return x; } };
-  80 | const unpinned = util.id;
+  57 | const util = { id<T>(x: T): T { return x; } };
+  58 | const unpinned = util.id;
      |       ^~~~~~~~
-  81 | 
+  59 | 
 
   hint: annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly
-
-generic-methods.ts:80:18 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = id' — instantiate explicitly ('id<number>'), or call 'id' directly) is not supported yet
-
-  79 | const util = { id<T>(x: T): T { return x; } };
-  80 | const unpinned = util.id;
-     |                  ^~~~~~~
-  81 | 

@@ -12,24 +12,6 @@ node-fallback-fence.ts:30:28 - error SC2020: 'timers/promises.setInterval with 3
   29 | const raw = readFileSync("/etc/hosts").toString(tty ? "hex" : "latin1"); // runtime BufferEncoding selection lowers too
   30 | const intervalWithSignal = promiseInterval(1, "tick", {}); // AbortSignal options stay fenced
      |                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  31 | // The computed encoding is now part of the static Buffer surface. The
+  31 | const sleepWithSignal = promiseSleep(1, "tick", { signal: AbortSignal.timeout(5) }); // resolve values and AbortSignal options lower
 
   hint: the lowered form is setInterval(delay, value) with an explicit yielded value; AbortSignal options are not supported yet
-
-node-fallback-fence.ts:35:36 - error SC2020: 'deflateSync with these options' is part of the standard library types but has no scriptc lowering yet
-
-  34 | import { brotliCompressSync, deflateSync } from "node:zlib";
-  35 | const packed = deflateSync("data", { level: 9, strategy: 1 }); // strategy remains fenced
-     |                                    ^~~~~~~~~~~~~~~~~~~~~~~~~
-  36 | const brotli = brotliCompressSync(Buffer.from("data")); // outside the lowered family: fenced
-
-  hint: the static compression options form is { level: <integer literal from -1 through 9> }
-
-node-fallback-fence.ts:36:16 - error SC2020: 'zlib.brotliCompressSync' is part of the standard library types but has no scriptc lowering yet
-
-  35 | const packed = deflateSync("data", { level: 9, strategy: 1 }); // strategy remains fenced
-  36 | const brotli = brotliCompressSync(Buffer.from("data")); // outside the lowered family: fenced
-     |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  37 | // The remaining imports continue the declared-but-not-lowered surface.
-
-  hint: the default-options deflate/inflate, raw, gzip/gunzip, and unzip sync/callback forms plus crc32 are the lowered zlib surface

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2434-deferred-init-fields.ts"
+ ],
+ "diags": []
+}

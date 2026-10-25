@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2901-bigint-core.ts"
+ ],
+ "diags": []
+}

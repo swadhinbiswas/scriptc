@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/union-optional-semantic-identity.ts"
+ ],
+ "diags": []
+}

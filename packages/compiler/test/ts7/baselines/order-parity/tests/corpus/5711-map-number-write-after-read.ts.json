@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5711-map-number-write-after-read.ts"
+ ],
+ "diags": []
+}

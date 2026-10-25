@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5171-lone-surrogate-replace-seams.ts"
+ ],
+ "diags": []
+}

@@ -6,9 +6,10 @@
  * program, FFI inputs, runtime objects/archives, and system libraries meet
  * the platform linker.
  */
+import type { NativeOptimization } from "./optimization.js";
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
-import type { NativeArtifactDependency } from "./native-toolchain.js";
+import type { NativeArtifactDependency } from "./native/contracts.js";
 import { needsDarwinDebugSymbols } from "./debug-symbols.js";
 import { loadRuntimePack, type RuntimePackSelection } from "./runtime-pack.js";
 import { executableLinkInputs } from "./link-plan-core.js";
@@ -32,25 +33,35 @@ export interface NativeLinkPlan {
 export async function createNativeLinkPlan(options: {
   target: NativeTargetSpec;
   programObject: string;
+  programPartitions?: readonly string[];
   outPath: string;
   features: NativeLinkFeatures;
   ffi: FfiProfile | null;
-  optimization: "release" | "dev";
+  optimization: NativeOptimization;
   strip?: boolean;
   windowsSubsystem?: WindowsSubsystem;
+  profileGenerate?: boolean;
   programObjectDependencies?: readonly NativeArtifactDependency[];
   env?: NodeJS.ProcessEnv;
   resolver?: (specifier: string) => string;
 }): Promise<NativeLinkPlan> {
-  if (options.ffi?.frameworks?.length && options.target.platform !== "darwin") throw new Error("FFI frameworks require a Darwin target");
+  if (options.ffi?.frameworks?.length && options.target.platform !== "darwin")
+    throw new Error("FFI frameworks require a Darwin target");
   const runtimePack = await loadRuntimePack(options);
   return {
     target: options.target,
-    darwinDebugSymbols: needsDarwinDebugSymbols(options.target.platform, options.optimization, options.strip),
+    darwinDebugSymbols: needsDarwinDebugSymbols(
+      options.target.platform,
+      options.optimization,
+      options.strip,
+    ),
     outputPath: options.outPath,
     ...executableLinkInputs({
       target: options.target,
       programObject: options.programObject,
+      ...(options.programPartitions === undefined
+        ? {}
+        : { programPartitions: options.programPartitions }),
       ffiLibraries: options.ffi?.libraries ?? [],
       ffiSystemLibraries: options.ffi?.systemLibraries ?? [],
       ffiFrameworks: options.ffi?.frameworks ?? [],
@@ -59,12 +70,12 @@ export async function createNativeLinkPlan(options: {
       runtimeSystemLibraries: runtimePack.systemLibraries,
       optimization: options.optimization,
       ...(options.strip === undefined ? {} : { strip: options.strip }),
-      ...(options.windowsSubsystem === undefined ? {} : { windowsSubsystem: options.windowsSubsystem }),
+      ...(options.windowsSubsystem === undefined
+        ? {}
+        : { windowsSubsystem: options.windowsSubsystem }),
+      ...(options.profileGenerate === true ? { profileGenerate: true } : {}),
     }),
-    dependencyPaths: [
-      ...runtimePack.dependencyPaths,
-      ...(options.ffi?.libraries ?? []),
-    ],
+    dependencyPaths: [...runtimePack.dependencyPaths, ...(options.ffi?.libraries ?? [])],
     programObjectDependencies: [...(options.programObjectDependencies ?? [])],
     runtimePack,
   };

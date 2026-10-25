@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4455-live-view-reads-without-stores.ts"
+ ],
+ "diags": []
+}

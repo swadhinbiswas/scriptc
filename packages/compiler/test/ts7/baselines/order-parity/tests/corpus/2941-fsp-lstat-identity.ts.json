@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2941-fsp-lstat-identity.ts"
+ ],
+ "diags": []
+}

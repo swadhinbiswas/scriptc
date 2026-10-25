@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4043-nonnull-missing-element.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,75 @@
+# Runtime benchmarks
+
+Application-shaped workloads for measuring the speed of compiled executables. Each workload is deterministic, generates its own input (or reads a generated file), and prints a summary that must match Node.js byte-for-byte before it is timed.
+
+| Workload | Category | Exercises |
+| --- | --- | --- |
+| `alloc-trees` | cpu | allocation-heavy trees, immutable object-spread updates |
+| `ast-interp` | cpu | tokenizer, recursive-descent parser, class dispatch |
+| `async-pipeline` | cpu | `async`/`await`, `Promise.all` fan-out |
+| `atomics-contended` | cpu | four worker threads updating `SharedArrayBuffer` counters with `Atomics`: one shared counter, one counter per worker, a `compareExchange` loop, and `Atomics.wait`/`notify` handoffs |
+| `channel-messages` | cpu | 200,000 MessageChannel messages in one thread, half numbers and half small objects, all posted before the port delivers any |
+| `csv-numbers` | cpu | `split`, `Number`, `parseInt`, `toFixed` |
+| `date-math` | cpu | schedules built with Date setters (local and UTC), weekday and month-end rules through the getters, Dates sorted by time value |
+| `cyclic-graphs` | cpu | object graphs with back references built and dropped: trees with parent and sibling links, rings of records sharing a long-lived registry, closures capturing their owner |
+| `dictionary-walks` | cpu | `Record<string, number>` dictionaries walked with for-in and `Object.keys`/`values`/`entries` while entries are added, updated and deleted |
+| `dynamic-methods` | cpu | untyped JavaScript calling builtin methods on values it does not type: string `slice`/`indexOf`/`toUpperCase`/`padStart`, array `push`/`pop`/`includes`, `Map` and `Set`, and an object's own methods |
+| `dynamic-properties` | cpu | untyped JavaScript reading and writing properties of values it does not type: records built by object literals in two key orders, nested records, and instances of a class and its subclass |
+| `functional-pipeline` | cpu | `filter`/`map`/`reduce`/`flatMap` chains, closures, small records |
+| `intern-table`, `intern-table-map`, `intern-table-1`, `intern-table-map-1` | cpu | worker threads interning the same type-like objects under string keys and records under number keys, then hits and misses: one shared `InternTable` per kind of key, or a module-level `Map` per thread (the `-map` entries), with 8 threads or 1 (the `-1` entries); under Node.js every thread has its own tables |
+| `json-records` | cpu | `JSON.stringify`, typed `JSON.parse`, Map aggregation |
+| `json-unions` | cpu | `JSON.parse` into discriminated unions: an event log with eight kinds and nested expression trees with nine, evaluated after the cast |
+| `keyed-option-writes` | cpu | class methods whose names are also keys of option records written through element accesses: `enabled[name] = true` over a union of literal names and `totals["count"] = n` |
+| `line-reader` | cpu | `readline` over a file stream: 'line' events for a 67 MB access log (every 50th line not ASCII), with a status count, a path tally and byte totals |
+| `log-lines` | cpu | 200k immediate `console.log`/`process.stdout.write` lines into the runner's pipe |
+| `log-summary`, `inventory-report` | cpu | the multi-module applications from `benchmarks/builds`, on 300k-line inputs |
+| `number-maps` | cpu | number-keyed Map/Set: a dense-id table, sparse ids in many small maps, get/has/set mixes |
+| `numeric-kernels` | cpu | sieve, hashing, `number[][]` matmul, `Float64Array` |
+| `optional-fields` | cpu | records and class instances with `number \| undefined` and other scalar-union fields |
+| `published-graphs` | cpu | syntax trees with parent links and a symbol table, published with `@scriptc/threads` and then read |
+| `record-boundaries` | cpu | records built from unchecked array reads passed to and returned from annotated functions |
+| `records-sort` | cpu | comparator sorts, group-by, `reduce`/`filter` |
+| `regex-logs` | cpu | regex `exec` with groups, `test`, global `replace` |
+| `regex-replacers` | cpu | regex `replace`/`replaceAll` with inline callbacks whose parameters have no annotations: dictionary placeholders, snake_case to camelCase, date reordering, optional captures, capitalization, and a string search that reads the offset |
+| `region-builds` | cpu | a watch-mode build loop over `LifetimeRegion`: each build binds a program in a new region and releases the previous one, which a cache keeps referenced for two builds |
+| `template-render` | cpu | template literals, escaping, `map`/`join` |
+| `throw-chains` | cpu | exceptions caught 2, 5 and 20 recursive calls above the throw, through direct calls and through a callback, and a backtracking parser that throws on a failed alternative |
+| `thread-slots`, `thread-slots-cache` | cpu | worker threads reading one published type graph from an `InternTable` and keeping per-thread state for each type they visit: a `ThreadSlots` family, or a direct-mapped cache by id in front of a `Map` by id (the `-cache` entry); under Node.js both are per thread |
+| `typed-array-kernels` | cpu | element-wise loops that run to one typed array's length and index others at the same position: `Float64Array` axpy, `Float32Array` blend, `Uint8Array` mask, wrapping `Int32Array` add, `Uint8ClampedArray` brighten, RGBA to gray, a row-major `Float32Array` matrix-vector product, and `reduce`/`some`/`map` callbacks |
+| `typed-array-scan`, `typed-array-scan-workers` | cpu | element-by-element scan loops over `Uint8Array`, `Uint16Array`, `Int32Array` and `Float64Array`; the second entry is a worker-enabled executable (it can start a worker), so each access also checks for shared storage |
+| `unicode-lexer` | cpu | a hand-written lexer over a 2.7M-unit bundled module whose comments and strings are in several languages: `charCodeAt` scans, line starts |
+| `union-node-sets` | cpu | syntax-tree passes over a discriminated union of object literals: a `Set` of visited nodes, a `Map` from node to value, conversions to a sub-union of leaves |
+| `validate-errors` | cpu | throw/catch on a fraction of inputs, small call chains |
+| `value-objects` | cpu | small immutable records and class instances: vector helpers, method chains, particle updates |
+| `value-records` | cpu | records that hold strings, spread state updates and destructured tuples: token helpers, an immutable reducer, tuple returns |
+| `word-graph` | cpu | string-keyed Map/Set, BFS |
+| `worker-messages` | cpu | message round trips between the main thread and one worker: each posts a number and the other answers it, so every round trip is two messages and two wakeups of a waiting thread |
+| `cli-config` | startup | a `deploy-plan` CLI: read a ~110 KB JSON manifest, validate, interpolate env values, order 80 services into dependency waves, print a summary |
+| `http-api` | server | a `node:http` JSON API: routing, query parsing, a seeded catalog, per-cart state, typed JSON bodies, `ETag`/`If-None-Match`, auth and request-id headers |
+
+Compare two checkouts (each with a built CLI and native artifacts for the host):
+
+```console
+$ pnpm bench:runtime --baseline=../scriptc-main --candidate=. --runs=15 --json=result.json
+```
+
+Without `--baseline`, the runner reports absolute medians. Baseline and candidate launches are interleaved, and each workload reports the median ratio with a bootstrap 95% confidence interval. `faster`/`slower` verdicts require the whole interval on one side of 1.0. A per-host lock serializes the timed phase so concurrent runs on one machine do not distort each other. Executables that time out or diverge from Node are reported, never timed. Use `--workloads=cli-config,http-api` to run a subset.
+
+Node is timed in the same interleaved loop and every row reports candidate/Node; the summary prints the overall geomean and, when several categories ran, the geomean per category (`cpu`, `startup`, `server`). Node runs each `.ts` entry directly, so its times include type stripping and ESM detection, as a user running the TypeScript source would see.
+
+## Workload kinds
+
+Each workload is a JSON file in `workloads/`, named after the workload, that holds its `entry`, `args` and options; adding a workload adds its file and its row in the table above, kept in category and then name order. Workloads are process workloads unless they set `kind`.
+
+Process workloads time whole launches (wall time, startup included). An optional `launches` count makes each sample the median of that many sequential launches; `cli-config` uses 20 so that a startup-dominated command (a few milliseconds compiled, tens of milliseconds under Node) is measured with low noise. Its table row is labeled `(per launch)`. On a heavily loaded macOS host, whole batches of launches can run several times slower (samples become bimodal), so judge startup changes on the Linux lane or a quiet machine.
+
+Server workloads (`"kind": "server"`) run a listening program and a load client:
+
+- The server binds `127.0.0.1` on port 0 and reports `PORT <n>` on stderr, the same protocol as `tests/harness/server.test.ts`.
+- The runner then starts the workload's `client` script under the runner's Node. `clients/http-load.mjs` is the client for every server, Node and compiled alike, so the numbers differ only by server. It drives keep-alive HTTP/1.1 connections over loopback with one request in flight per connection (closed loop, no pipelining), spread across worker threads so that the client has CPU headroom.
+- Each connection issues a fixed, seeded request sequence; mutable server state is partitioned per connection, so every response is a pure function of the connection and request index regardless of interleaving. A session runs an untimed warmup phase (which also opens the connections), a barrier, then the measured phase, and finally `POST /shutdown`, after which the server prints its totals and exits.
+- Correctness compares four legs against Node byte-for-byte: server stdout, server stderr without the `PORT` line, server exit status, and client stdout (request and status counts plus a SHA-256 digest over every response's status, `content-type`, `cache-control`, `etag`, `x-request-id`, and body). Framing (`content-length` or chunked) and `date` are not compared.
+- The timed sample is the measured-phase wall time for the fixed request count, so the main table, ratios, and confidence intervals read exactly like other rows (lower is better); the row is labeled `(server)`. A second table reports median requests per second, p50/p90/p99 latency, client CPU cores used during the measured phase, and peak RSS for Node and each contender. Client cores near the client's thread count mean the client, not the server, limits throughput.
+- Server sessions already warm up in-process, so the runner uses at most one extra warmup session per contender.
+
+`http-api` uses 64 connections, 2 client threads, 4,000 warmup and 40,000 measured requests (about one second per session).

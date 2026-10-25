@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3075-recursive-contextual-literals.ts"
+ ],
+ "diags": []
+}

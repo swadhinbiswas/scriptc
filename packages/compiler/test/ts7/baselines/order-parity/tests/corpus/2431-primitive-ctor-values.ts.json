@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2431-primitive-ctor-values.ts"
+ ],
+ "diags": []
+}

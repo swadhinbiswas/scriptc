@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4906-bigint-small-value-trees.ts"
+ ],
+ "diags": []
+}

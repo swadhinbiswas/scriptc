@@ -9,23 +9,35 @@ test("Map iterator construction refuses different reference layouts", () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-map-iterator-layout-"));
   try {
     const entry = join(dir, "main.ts");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
       const records = new Map<string, { id: number; label: string }>();
       console.log(new Map<string, { id: number }>(records.entries()).size);
-    `);
-    const { coverage } = analyze(entry, { dynamic: false });
+    `,
+    );
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
-    expect(coverage.diagnostics).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "SC2020", message: expect.stringContaining("new Map(entries)") }),
-    ]));
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    expect(coverage.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "SC2020",
+          message: expect.stringContaining("new Map(entries)"),
+        }),
+      ]),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("array and Map consumers validate hidden reference layouts before exposing values", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-collection-layout-"));
   try {
     const entry = join(dir, "main.ts");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
       interface Key { id: number }
       const wide = { id: 1, label: "original" };
       const source = new Map<string, typeof wide>([["key", wide]]);
@@ -47,14 +59,20 @@ test("array and Map consumers validate hidden reference layouts before exposing 
         console.log("map", error instanceof TypeError, String(error).includes("original layout"));
       }
       console.log("source", source.get("key") === wide, wide.label, calls);
-    `);
+    `,
+    );
     const result = await compile(entry, {
-      dynamic: false, optimization: "dev", sanitize: process.env["SCRIPTC_SAN"] === "1",
-      outDir: dir, outPath: join(dir, process.platform === "win32" ? "test.exe" : "test"),
+      optimization: "dev",
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+      outDir: dir,
+      outPath: join(dir, process.platform === "win32" ? "test.exe" : "test"),
     });
-    if (!result.ok) throw new Error(result.diagnostics.map(diagnostic => diagnostic.message).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
     expect(execFileSync(result.binaryPath, { encoding: "utf8", timeout: 10_000 })).toBe(
       "array true true\nmapper true true\nunused true true\nmap true true\nsource true original 0\n",
     );
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

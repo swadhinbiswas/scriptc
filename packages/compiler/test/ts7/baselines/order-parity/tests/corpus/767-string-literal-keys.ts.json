@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/767-string-literal-keys.ts"
+ ],
+ "diags": []
+}

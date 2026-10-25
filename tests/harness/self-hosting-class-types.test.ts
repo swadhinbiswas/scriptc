@@ -8,11 +8,16 @@ import { compileInChild } from "./self-hosting-compiler-process.js";
 test("native class type cleanup updates shared IR without dynamic snapshots", async () => {
   const root = join(import.meta.dirname, "../..");
   const entry = join(root, "tests/fixtures/self-hosting/class-types.ts");
-  const directory = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-class-types-"));
+  const directory = mkdtempSync(
+    join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-class-types-"),
+  );
   try {
-    const built = await compileInChild(entry, { outDir: directory,
+    const built = await compileInChild(entry, {
+      outDir: directory,
       outPath: join(directory, "class-types" + (process.platform === "win32" ? ".exe" : "")),
-      optimization: "dev", dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1" });
+      optimization: "dev",
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+    });
     if (!built.ok) throw new Error(JSON.stringify(built.diagnostics));
     const options = { cwd: root, encoding: "utf8" as const, timeout: 30_000 };
     const oracle = spawnSync(process.execPath, ["--import", "tsx", entry], options);
@@ -27,5 +32,7 @@ test("native class type cleanup updates shared IR without dynamic snapshots", as
     expect(native.stdout).toMatch(/^f64 f64\n/);
     expect(native.stdout).toContain("false 1024\ntrue true true false\n");
     expect(native.stdout).toMatch(/object object f64\nf64\n$/);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }, 300_000);

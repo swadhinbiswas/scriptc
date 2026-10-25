@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4596-error-subclass-int-fields.ts"
+ ],
+ "diags": []
+}

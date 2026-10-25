@@ -1,0 +1,16 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/strictness/json-any-broken/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Type 'string' is not assignable to type 'number'.",
+   "loc": {
+    "file": "<repo>/tests/fixtures/strictness/json-any-broken/main.ts",
+    "start": 324,
+    "end": 325
+   }
+  }
+ ]
+}

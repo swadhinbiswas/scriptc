@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2858-import-meta-resolve/main.mjs"
+ ],
+ "diags": []
+}

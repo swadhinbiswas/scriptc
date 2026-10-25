@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/typed-collection-views/use.mjs",
+  "<repo>/tests/corpus/typed-collection-views/main.ts"
+ ],
+ "diags": []
+}

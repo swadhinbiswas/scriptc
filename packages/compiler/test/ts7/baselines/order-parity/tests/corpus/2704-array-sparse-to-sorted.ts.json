@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2704-array-sparse-to-sorted.ts"
+ ],
+ "diags": []
+}

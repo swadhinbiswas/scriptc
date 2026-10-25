@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5204-typed-array-sort-comparators.ts"
+ ],
+ "diags": []
+}

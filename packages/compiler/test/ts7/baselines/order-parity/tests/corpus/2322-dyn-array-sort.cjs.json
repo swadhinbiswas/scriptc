@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2322-dyn-array-sort.cjs"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5315-map-iterate-after-front-deletes.ts"
+ ],
+ "diags": []
+}

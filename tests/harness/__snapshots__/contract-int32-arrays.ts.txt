@@ -1,0 +1,71 @@
+contract-int32-arrays.ts:8:49 - error SC7002: the element stored into 'dst' is not provably an int32: 'src[i] / 2' (the array can reach 'counts', declared Int32[])
+
+  7 | function halveInto(dst: number[], src: Int32[]): void {
+  8 |   for (let i = 0; i < src.length; i++) dst[i] = src[i] / 2;
+    |                                                 ^~~~~~~~~~
+  9 | }
+
+  hint: make the int32 conversion explicit, for example '(src[i] / 2) | 0', so Node stores the same value
+
+contract-int32-arrays.ts:11:30 - error SC7002: the array literal element '0.5' is not provably an int32 (the array can reach 'ids', declared Int32[])
+
+  10 | 
+  11 | const fractions: number[] = [0.5, 1];
+     |                              ^~~
+  12 | const ids: Int32[] = fractions;
+
+  hint: make the int32 conversion explicit, for example '0.5 | 0', so Node stores the same value
+
+contract-int32-arrays.ts:15:12 - error SC7002: the element stored into 'alias' is not provably an int32: '2.5' (the array can reach 'counts', declared Int32[])
+
+  14 | const alias: number[] = counts;
+  15 | alias.push(2.5);
+     |            ^~~
+  16 | counts.fill(Math.PI);
+
+  hint: make the int32 conversion explicit, for example '2.5 | 0', so Node stores the same value
+
+contract-int32-arrays.ts:16:13 - error SC7002: the element stored into 'counts' is not provably an int32: 'Math.PI' (the array can reach 'counts', declared Int32[])
+
+  15 | alias.push(2.5);
+  16 | counts.fill(Math.PI);
+     |             ^~~~~~~
+  17 | halveInto(counts, ids);
+
+  hint: make the int32 conversion explicit, for example 'Math.PI | 0', so Node stores the same value
+
+contract-int32-arrays.ts:18:44 - error SC7002: the element stored into 'counts.map((x) => x * 2)' is not provably an int32: 'x * 2' (the array can reach 'doubled', declared Int32[])
+
+  17 | halveInto(counts, ids);
+  18 | const doubled: Int32[] = counts.map((x) => x * 2);
+     |                                            ^~~~~
+  19 | const parsed: Int32[] = JSON.parse("[1, 2]");
+
+  hint: make the int32 conversion explicit, for example '(x * 2) | 0', so Node stores the same value
+
+contract-int32-arrays.ts:19:15 - error SC7003: the Int32[] contract on 'parsed' cannot be checked: the array can come from dynamic (any or unknown) code (contract-int32-arrays.ts:19:25), whose element stores scriptc does not see
+
+  18 | const doubled: Int32[] = counts.map((x) => x * 2);
+  19 | const parsed: Int32[] = JSON.parse("[1, 2]");
+     |               ^~~~~
+  20 | const measure = (xs: Int32[]): number => xs.length;
+
+  hint: build the array in typed code (a literal, `new Array(n).fill(0)` or `push`) and pass it along, or remove Int32[]
+
+contract-int32-arrays.ts:20:22 - error SC7003: the Int32[] contract on 'xs' cannot be checked: the array can come from the callers of 'measure', which is used as a value (its callers are not all visible) (contract-int32-arrays.ts:20:17), whose element stores scriptc does not see
+
+  19 | const parsed: Int32[] = JSON.parse("[1, 2]");
+  20 | const measure = (xs: Int32[]): number => xs.length;
+     |                      ^~~~~
+  21 | console.log(ids, counts, doubled, parsed, [counts].map(measure));
+
+  hint: build the array in typed code (a literal, `new Array(n).fill(0)` or `push`) and pass it along, or remove Int32[]
+
+contract-int32-arrays.ts:21:43 - error SC7003: an array that can reach 'counts' (Int32[]) escapes to a call through a function value, where its element stores are not checked: '[counts].map(measure)'
+
+  20 | const measure = (xs: Int32[]): number => xs.length;
+  21 | console.log(ids, counts, doubled, parsed, [counts].map(measure));
+     |                                           ^~~~~~~~~~~~~~~~~~~~~
+  22 | 
+
+  hint: keep Int32[] arrays in typed code, or pass a copy (`[...xs]`) that no Int32[] slot holds

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/class-function-base/base.js",
+  "<repo>/tests/corpus/class-function-base/main.js"
+ ],
+ "diags": []
+}

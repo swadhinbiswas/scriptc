@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2782-array-sparse-callbacks.ts"
+ ],
+ "diags": []
+}

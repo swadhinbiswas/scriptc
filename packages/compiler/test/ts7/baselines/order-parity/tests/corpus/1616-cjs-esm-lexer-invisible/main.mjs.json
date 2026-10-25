@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1616-cjs-esm-lexer-invisible/cjs.cjs",
+  "<repo>/tests/corpus/1616-cjs-esm-lexer-invisible/main.mjs"
+ ],
+ "diags": []
+}

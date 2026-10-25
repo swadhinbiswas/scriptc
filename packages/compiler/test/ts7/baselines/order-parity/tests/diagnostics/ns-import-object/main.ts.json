@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/ns-import-object/lib.ts",
+  "<repo>/tests/diagnostics/ns-import-object/main.ts"
+ ],
+ "diags": []
+}

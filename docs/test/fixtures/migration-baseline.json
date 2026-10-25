@@ -198,6 +198,128 @@
     ]
   },
   {
+    "href": "/docs/threads",
+    "title": "Sharing Data Between Workers",
+    "headings": [
+      {
+        "text": "Example",
+        "id": "example"
+      },
+      {
+        "text": "The publication contract",
+        "id": "the-publication-contract"
+      },
+      {
+        "text": "The write guard",
+        "id": "the-write-guard"
+      },
+      {
+        "text": "How it differs from structured clone",
+        "id": "how-it-differs-from-structured-clone"
+      },
+      {
+        "text": "Frozen plain data",
+        "id": "frozen-plain-data"
+      },
+      {
+        "text": "Cost",
+        "id": "cost"
+      }
+    ]
+  },
+  {
+    "href": "/docs/contracts",
+    "title": "Contract Types",
+    "headings": [
+      {
+        "text": "Example",
+        "id": "example"
+      },
+      {
+        "text": "Where contracts apply",
+        "id": "where-contracts-apply"
+      },
+      {
+        "text": "NoThrow",
+        "id": "nothrow"
+      },
+      {
+        "text": "Int32",
+        "id": "int32"
+      },
+      {
+        "text": "Immutable",
+        "id": "immutable"
+      },
+      {
+        "text": "Diagnostics",
+        "id": "diagnostics"
+      }
+    ]
+  },
+  {
+    "href": "/docs/experimental",
+    "title": "Experimental APIs",
+    "headings": [
+      {
+        "text": "LifetimeRegion",
+        "id": "lifetimeregion"
+      },
+      {
+        "text": "API",
+        "id": "api"
+      },
+      {
+        "text": "When a region is freed",
+        "id": "when-a-region-is-freed"
+      },
+      {
+        "text": "Async work",
+        "id": "async-work"
+      },
+      {
+        "text": "Threads",
+        "id": "threads"
+      },
+      {
+        "text": "Cost",
+        "id": "cost"
+      },
+      {
+        "text": "InternTable",
+        "id": "interntable"
+      },
+      {
+        "text": "Methods",
+        "id": "methods"
+      },
+      {
+        "text": "Thread behavior",
+        "id": "thread-behavior"
+      },
+      {
+        "text": "Memory",
+        "id": "memory"
+      },
+      {
+        "text": "ThreadSlots",
+        "id": "threadslots"
+      },
+      {
+        "text": "Slot methods",
+        "id": "slot-methods"
+      },
+      {
+        "text": "Keys and values",
+        "id": "keys-and-values"
+      },
+      {
+        "text": "Slot cost",
+        "id": "slot-cost"
+      }
+    ]
+  },
+  {
     "legacy": "/wasm",
     "href": "/docs/wasm",
     "title": "WebAssembly Modules",

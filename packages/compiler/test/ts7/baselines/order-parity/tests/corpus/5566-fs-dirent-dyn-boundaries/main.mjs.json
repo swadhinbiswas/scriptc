@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5566-fs-dirent-dyn-boundaries/rows.ts",
+  "<repo>/tests/corpus/5566-fs-dirent-dyn-boundaries/main.mjs"
+ ],
+ "diags": []
+}

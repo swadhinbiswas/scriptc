@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3038-number-scalar-unions.ts"
+ ],
+ "diags": []
+}

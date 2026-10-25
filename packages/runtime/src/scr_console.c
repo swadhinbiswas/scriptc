@@ -11,11 +11,48 @@
 #include <windows.h>
 #endif
 
+/* POSIX executables submit each JavaScript-visible stdout/stderr chunk with
+ * write(2)/writev(2) on the descriptor itself. The C stream layer added a
+ * copy, several stream calls per console line, and — for the unbuffered
+ * stderr stream — one write(2) per argument, separator, and newline. Windows
+ * (CRT text/binary modes, console code pages), WASI, and library artifacts
+ * (whose host owns the process's C streams) keep the C stream path, now fed
+ * one formatted chunk per call. */
+#if !defined(_WIN32) && !defined(__wasi__) && !defined(SCR_LIB)
+#define SCR_STDIO_DIRECT 1
+#include <sys/uio.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <stdio_ext.h> /* __fpending: glibc and musl */
+#endif
+#else
+#define SCR_STDIO_DIRECT 0
+#endif
+
 /* Set by scr_async.c at loop exhaustion; lives here (unconditionally) so
  * binaries that link the console without the async runtime still link, and
  * plain builds satisfy scr_async's reference. */
 static SCR_TL long scr_abandoned_fibers = 0;
 void scr_note_abandoned_fibers(long n) { scr_abandoned_fibers = n; }
+
+bool scr_exit_frees(void) {
+#if defined(SCR_RC_AUDIT) || defined(SCR_LSAN_IMMORTAL)
+  return true;
+#else
+  if (!scr_context_is_main()) {
+#ifdef SCR_WORKERS
+    scr_context_note_script_end();
+#endif
+    return true;
+  }
+  static int forced = -1; /* the main thread reads it, once */
+  if (forced < 0) {
+    const char *value = getenv("SCRIPTC_EXIT_FREE");
+    forced = value != NULL && value[0] == '1';
+  }
+  return forced != 0;
+#endif
+}
 
 #ifndef SCR_LIB
 #ifdef SCR_RC_AUDIT
@@ -25,20 +62,28 @@ extern long scr_map_live_count(void);     /* scr_map.c */
 extern long scr_box_live_count(void);     /* scr_closure.c */
 extern long scr_closure_live_count(void); /* scr_closure.c */
 extern long scr_obj_live_count(void);     /* scr_object.c */
+extern long scr_obj_lifetime_count(void); /* scr_object.c */
 extern long scr_union_live_count(void);   /* scr_union.c */
 extern long scr_dyn_live_count(void);     /* scr_json.c */
 extern long scr_bytes_live_count(void);   /* scr_bytes.c */
-#ifdef SCR_DYNAMIC
-extern long scr_jsval_live_count(void); /* scr_island.c */
-#endif
 
 static void scr_rc_audit_at_exit(void) {
+  scr_buffer_pool_reset(); /* the pool's own slab reference */
   /* Fibers suspended forever at loop exhaustion (awaits nobody resolves —
    * Node exits 0 there too) still hold their stacks and owned values by
    * design; a strict audit would only report that deliberate abandonment. */
   if (scr_abandoned_fibers > 0) {
     fprintf(stderr, "scriptc RC audit skipped: %ld fiber(s) never resumed\n",
             scr_abandoned_fibers);
+    return;
+  }
+  /* ProgramLifetime instances (@scriptc/types) are never freed, and neither
+   * is anything they hold: a strict audit would only report that deliberate
+   * retention. */
+  long lifetime = scr_obj_lifetime_count();
+  if (lifetime > 0) {
+    fprintf(stderr, "scriptc RC audit skipped: %ld program-lifetime object(s) never freed\n",
+            lifetime);
     return;
   }
   long strings = scr_str_live_count();
@@ -50,21 +95,15 @@ static void scr_rc_audit_at_exit(void) {
   long unions = scr_union_live_count();
   long dyns = scr_dyn_live_count();
   long bytes = scr_bytes_live_count();
-#ifdef SCR_DYNAMIC
-  long jsvals = scr_jsval_live_count();
-#else
-  long jsvals = 0;
-#endif
   if (strings != 0 || arrays != 0 || maps != 0 || boxes != 0 || closures != 0 ||
-      objects != 0 || unions != 0 || dyns != 0 || bytes != 0 || jsvals != 0) {
+      objects != 0 || unions != 0 || dyns != 0 || bytes != 0) {
     fflush(stdout);
     fprintf(stderr,
             "scriptc RC AUDIT FAILED: %ld heap string(s), %ld array(s), "
             "%ld map(s), %ld box(es), %ld closure(s), %ld object(s), "
-            "%ld union(s), %ld dyn value(s), %ld bytes value(s), "
-            "%ld island value(s) live at exit\n",
+            "%ld union(s), %ld dyn value(s), %ld bytes value(s) live at exit\n",
             strings, arrays, maps, boxes, closures, objects, unions, dyns,
-            bytes, jsvals);
+            bytes);
     _Exit(99);
   }
 }
@@ -72,7 +111,9 @@ static void scr_rc_audit_at_exit(void) {
 
 static void scr_flush_at_exit(void) { fflush(stdout); }
 
-static void scr_collect_cycles_at_exit(void) { scr_collect_cycles(); }
+static void scr_collect_cycles_at_exit(void) {
+  if (scr_exit_frees()) scr_collect_cycles();
+}
 
 #ifdef _WIN32
 static UINT scr_original_console_output_cp = 0;
@@ -107,9 +148,14 @@ static void scr_enable_utf8_console_output(void) {
 }
 #endif
 
-void scr_runtime_abi_v6(void) {}
+void scr_runtime_abi_v44(void) {}
 
 void scr_init(void) {
+#ifdef SCR_WORKERS
+  /* Generated inline exception polls read the active cell directly. */
+  scr_exc_swap_cell(NULL);
+  if (scr_context_is_main()) {
+#endif
 #ifdef _WIN32
   /* The CRT opens std streams in TEXT mode, which writes \n as \r\n. Node
    * on Windows does NOT translate — console.log emits \n whether stdout is
@@ -133,16 +179,19 @@ void scr_init(void) {
    * stream immediately. */
   static char outbuf[1 << 16];
   setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
+#ifdef SCR_WORKERS
+  }
+#endif
   /* atexit is LIFO; registration order makes exit run: library cleanup
    * (registered later, in scr_lib_init) → cycle collection → RC audit →
    * flush → Windows console-code-page restore. The final collection frees
    * cycles the program dropped, so the audit (and ASan's leak check) see
    * them as freed, not leaked. */
-  atexit(scr_flush_at_exit);
+  scr_atexit(scr_flush_at_exit);
 #ifdef SCR_RC_AUDIT
-  atexit(scr_rc_audit_at_exit);
+  scr_atexit(scr_rc_audit_at_exit);
 #endif
-  atexit(scr_collect_cycles_at_exit);
+  scr_atexit(scr_collect_cycles_at_exit);
 }
 #endif /* !SCR_LIB — a library artifact never touches host stdio modes/buffering and
         * registers no atexit handlers: scr_init and its exit hooks (the
@@ -154,86 +203,256 @@ void scr_init(void) {
  * the stream differs. */
 /* A real definition lets relocatable library links localize this hook;
  * a tentative common symbol stays externally visible on Mach-O. */
-bool (*scr_stdio_write_hook)(int fd, const void *data, size_t len) = NULL;
+SCR_TL bool (*scr_stdio_write_hook)(int fd, const void *data, size_t len, bool wide) = NULL;
+SCR_TL bool (*scr_stdio_capture)(int fd, const void *data, size_t len) = NULL;
 
-static void scr_console_write(FILE *out, size_t n, const ScrLogArg *args) {
-  if (scr_stdio_write_hook) {
-    size_t capacity = 1;
-    for (size_t i = 0; i < n; i++) {
-      size_t length = args[i].tag == SCR_ARG_STR ? args[i].v.s->len : 32;
-      if (length >= SIZE_MAX - capacity) scr_trap("scriptc: console output too large\n");
-      capacity += length + 1;
-    }
-    char *line = malloc(capacity);
-    if (!line) scr_trap("scriptc: out of memory\n");
-    size_t used = 0;
-    for (size_t i = 0; i < n; i++) {
-      if (i) line[used++] = ' ';
-      const ScrLogArg *arg = &args[i];
-      if (arg->tag == SCR_ARG_STR) {
-        memcpy(line + used, arg->v.s->data, arg->v.s->len);
-        used += arg->v.s->len;
-      } else if (arg->tag == SCR_ARG_BOOL) {
-        const char *text = arg->v.b ? "true" : "false";
-        size_t length = arg->v.b ? 4 : 5;
-        memcpy(line + used, text, length);
-        used += length;
-      } else if (arg->v.f == 0 && signbit(arg->v.f)) {
-        memcpy(line + used, "-0", 2);
-        used += 2;
-      } else {
-        used += scr_f64_to_str(arg->v.f, line + used);
-      }
-    }
-    line[used++] = '\n';
-    scr_stdio_write_hook(out == stderr ? 2 : 1, line, used);
-    free(line);
-    /* The global Node console uses ignoreErrors=true for stream writes. */
-    if (scr_exc_pending()) scr_exc_clear();
+SCR_TL bool scr_stdin_fed = false;
+SCR_TL void (*scr_stdin_fed_attach)(void) = NULL;
+SCR_TL bool (*scr_stdin_fed_waiting)(void) = NULL;
+static SCR_TL ScrBytes **scr_stdin_fed_q;
+static SCR_TL size_t scr_stdin_fed_head, scr_stdin_fed_len, scr_stdin_fed_cap;
+static SCR_TL bool scr_stdin_fed_end;
+
+void scr_stdin_fed_push(ScrBytes *chunk) {
+  if (scr_stdin_fed_end) {
+    if (chunk) scr_bytes_release(chunk);
     return;
   }
-  char numbuf[32];
-  for (size_t i = 0; i < n; i++) {
-    if (i > 0) fputc(' ', out);
-    const ScrLogArg *a = &args[i];
-    switch (a->tag) {
-    case SCR_ARG_F64: {
-      /* console.log renders numbers via inspect, which distinguishes -0
-       * (String(-0) is "0", but console.log(-0) prints "-0"). */
-      if (a->v.f == 0 && signbit(a->v.f)) {
-        fputs("-0", out);
-        break;
-      }
-      size_t len = scr_f64_to_str(a->v.f, numbuf);
-      fwrite(numbuf, 1, len, out);
-      break;
+  if (!chunk) {
+    scr_stdin_fed_end = true;
+    return;
+  }
+  if (scr_stdin_fed_head + scr_stdin_fed_len == scr_stdin_fed_cap) {
+    if (scr_stdin_fed_head > 0) {
+      memmove(scr_stdin_fed_q, scr_stdin_fed_q + scr_stdin_fed_head,
+              scr_stdin_fed_len * sizeof *scr_stdin_fed_q);
+      scr_stdin_fed_head = 0;
     }
-    case SCR_ARG_STR:
-      fwrite(a->v.s->data, 1, a->v.s->len, out);
-      break;
-    case SCR_ARG_BOOL:
-      fputs(a->v.b ? "true" : "false", out);
-      break;
+    if (scr_stdin_fed_len == scr_stdin_fed_cap) {
+      scr_stdin_fed_cap = scr_stdin_fed_cap ? scr_stdin_fed_cap * 2 : 8;
+      scr_stdin_fed_q = realloc(scr_stdin_fed_q, scr_stdin_fed_cap * sizeof *scr_stdin_fed_q);
+      if (!scr_stdin_fed_q) scr_trap("scriptc: out of memory\n");
     }
   }
-  fputc('\n', out);
-  /* Console methods submit one formatted chunk to their backing stream.
-   * Keep the C buffer only as a formatter coalescing detail: a caller
-   * observing a live child must see this line before the next JS turn. */
-  fflush(out);
+  scr_stdin_fed_q[scr_stdin_fed_head + scr_stdin_fed_len++] = chunk;
+}
+
+ScrBytes *scr_stdin_fed_take(bool *ended) {
+  if (scr_stdin_fed_len == 0) {
+    *ended = scr_stdin_fed_end;
+    return NULL;
+  }
+  *ended = false;
+  ScrBytes *chunk = scr_stdin_fed_q[scr_stdin_fed_head++];
+  if (--scr_stdin_fed_len == 0) scr_stdin_fed_head = 0;
+  return chunk;
+}
+
+void scr_stdin_fed_clear(void) {
+  for (size_t i = 0; i < scr_stdin_fed_len; i++)
+    scr_bytes_release(scr_stdin_fed_q[scr_stdin_fed_head + i]);
+  free(scr_stdin_fed_q);
+  scr_stdin_fed_q = NULL;
+  scr_stdin_fed_head = scr_stdin_fed_len = scr_stdin_fed_cap = 0;
+  scr_stdin_fed_end = false;
+  scr_stdin_fed = false;
+  scr_stdin_fed_attach = NULL;
+  scr_stdin_fed_waiting = NULL;
+}
+
+/* Lines up to this size render on the C stack (fiber stacks are 256 KiB). */
+#define SCR_CONSOLE_STACK_LINE 2048
+
+#if SCR_STDIO_DIRECT
+/* True when the C stdout buffer holds bytes: runtime-internal output that
+ * went through stdio without flushing. A direct write must submit them
+ * first so stdout keeps source order and merged (2>&1) redirections keep
+ * stdout-before-stderr order. Unknown platforms flush unconditionally. */
+static inline bool scr_stdout_pending(void) {
+#if defined(__linux__)
+  return __fpending(stdout) != 0;
+#elif defined(__APPLE__)
+  return (stdout->_flags & __SWR) && stdout->_bf._base && stdout->_p > stdout->_bf._base;
+#else
+  return true;
+#endif
+}
+
+/* Submit every byte of iov[0..count) to fd. Short writes continue with the
+ * remainder and EINTR retries. Any other failure (EAGAIN on a non-blocking
+ * descriptor, EPIPE, EBADF, ...) returns its errno with the rest of the
+ * chunk dropped — what the C stream flush did before. */
+static int scr_fd_writev_all(int fd, struct iovec *iov, int count) {
+  while (count > 0 && iov->iov_len == 0) iov++, count--;
+  while (count > 0) {
+    ssize_t written = count == 1 ? write(fd, iov->iov_base, iov->iov_len) : writev(fd, iov, count);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return errno ? errno : EIO;
+    }
+    if (written == 0) return EIO;
+    size_t left = (size_t)written;
+    while (count > 0 && left >= iov->iov_len) left -= iov->iov_len, iov++, count--;
+    if (count > 0) {
+      iov->iov_base = (char *)iov->iov_base + left;
+      iov->iov_len -= left;
+    }
+  }
+  return 0;
+}
+
+/* Worker executables run several runtime threads that all write to the
+ * process descriptors. Hold the matching C stream's lock (recursive, so the
+ * pending-stdout flush inside is fine) around each direct submission, so a
+ * chunk that needs several write(2) calls, and the stdout flush that precedes
+ * it, cannot interleave with another thread's output. */
+static inline FILE *scr_fd_stream_lock(int fd) {
+#ifdef SCR_WORKERS
+  FILE *stream = fd == 2 ? stderr : stdout;
+  flockfile(stream);
+  return stream;
+#else
+  (void)fd;
+  return NULL;
+#endif
+}
+
+static inline void scr_fd_stream_unlock(FILE *stream) {
+#ifdef SCR_WORKERS
+  funlockfile(stream);
+#else
+  (void)stream;
+#endif
+}
+#endif
+
+/* Render args into line (capacity from scr_console_capacity): space-joined
+ * with a trailing newline. Returns the byte count. Tags may carry
+ * SCR_ARG_GLUE, so every kind test masks with SCR_ARG_KIND: a glued string
+ * part must reserve its full length, exactly as scr_console_render copies
+ * it. */
+static size_t scr_console_capacity(size_t n, const ScrLogArg *args) {
+  size_t capacity = 1;
+  for (size_t i = 0; i < n; i++) {
+    size_t length = (args[i].tag & SCR_ARG_KIND) == SCR_ARG_STR ? args[i].v.s->len : 32;
+    if (length >= SIZE_MAX - capacity) scr_trap("scriptc: console output too large\n");
+    capacity += length + 1;
+  }
+  return capacity;
+}
+
+/* *wide records a string argument that may hold a lone surrogate (only
+ * once one may exist). Glued parts of one concatenation that complete a
+ * surrogate pair across their seam render as the paired character. */
+static size_t scr_console_render(char *line, size_t n, const ScrLogArg *args, bool *wide) {
+  size_t used = 0;
+  bool lone = scr_wtf8_any(), joins = false, maybe = false;
+  for (size_t i = 0; i < n; i++) {
+    const ScrLogArg *arg = &args[i];
+    if (i && !(arg->tag & SCR_ARG_GLUE)) line[used++] = ' ';
+    int kind = arg->tag & SCR_ARG_KIND;
+    if (kind == SCR_ARG_STR) {
+      if (lone && !arg->v.s->ascii) {
+        maybe = true;
+        joins |= scr_wtf8_joins(line, used, arg->v.s->data, arg->v.s->len);
+      }
+      memcpy(line + used, arg->v.s->data, arg->v.s->len);
+      used += arg->v.s->len;
+    } else if (kind == SCR_ARG_BOOL) {
+      const char *text = arg->v.b ? "true" : "false";
+      size_t length = arg->v.b ? 4 : 5;
+      memcpy(line + used, text, length);
+      used += length;
+    } else if (kind == SCR_ARG_F64 && arg->v.f == 0 && signbit(arg->v.f)) {
+      /* console.log renders numbers via inspect, which distinguishes -0
+       * (String(-0) is "0", but console.log(-0) prints "-0"). A number
+       * inside a concatenation (SCR_ARG_NUM) keeps String()'s "0". */
+      memcpy(line + used, "-0", 2);
+      used += 2;
+    } else {
+      used += scr_f64_to_str(arg->v.f, line + used);
+    }
+  }
+  if (joins) used = scr_wtf8_fuse(line, used);
+  line[used++] = '\n';
+  *wide = maybe;
+  return used;
+}
+
+/* The global console's group indentation: console.group installs its
+ * indenting rewrite (scr_console_native.c) while a group is open, so
+ * programs without groups carry none of it. Console instances never use
+ * it. */
+SCR_TL char *(*scr_console_indenter)(const char *line, size_t *used) = NULL;
+
+/* Console methods submit one formatted chunk to their backing stream before
+ * returning, as Node's console does: a caller observing a live child sees
+ * this line before the next JS turn. Errors are ignored (the global Node
+ * console uses ignoreErrors=true for stream writes). */
+static void scr_console_write(int fd, size_t n, const ScrLogArg *args, bool global) {
+#if SCR_STDIO_DIRECT
+  /* A large single string goes out without a copy: string + newline in one
+   * vectored write. */
+  if (!scr_stdio_write_hook && !scr_stdio_capture && !(global && scr_console_indenter) && n == 1 &&
+      (args[0].tag & SCR_ARG_KIND) == SCR_ARG_STR &&
+      args[0].v.s->len >= SCR_CONSOLE_STACK_LINE) {
+    char *owned;
+    const char *bytes = scr_str_utf8(args[0].v.s, &owned);
+    FILE *locked = scr_fd_stream_lock(fd);
+    if (scr_stdout_pending()) fflush(stdout);
+    struct iovec iov[2] = {{(void *)bytes, args[0].v.s->len}, {(void *)"\n", 1}};
+    (void)scr_fd_writev_all(fd, iov, 2);
+    scr_fd_stream_unlock(locked);
+    scr_str_utf8_end(owned);
+    return;
+  }
+#endif
+  char stack[SCR_CONSOLE_STACK_LINE];
+  size_t capacity = scr_console_capacity(n, args);
+  char *line = capacity <= sizeof stack ? stack : malloc(capacity);
+  if (!line) scr_trap("scriptc: out of memory\n");
+  bool wide = false;
+  size_t used = scr_console_render(line, n, args, &wide);
+  if (global && scr_console_indenter) {
+    char *indented = scr_console_indenter(line, &used);
+    if (line != stack) free(line);
+    line = indented;
+  }
+  if (scr_stdio_write_hook) {
+    /* A patched write receives the JavaScript string, lone surrogates kept. */
+    scr_stdio_write_hook(fd, line, used, wide);
+    if (scr_exc_pending()) scr_exc_clear();
+  } else {
+    if (wide) scr_wtf8_to_utf8(line, used);
+    (void)scr_stdio_write_raw(fd, line, used);
+  }
+  if (line != stack) free(line);
 }
 
 void scr_console_log(size_t n, const ScrLogArg *args) {
-  scr_console_write(stdout, n, args);
+  scr_console_write(1, n, args, true);
 }
 
-/* console.error and console.warn. Flush stdout first so runtime-internal
- * output that is still being assembled cannot cross this stderr line under
- * a merged redirection (2>&1); JavaScript-visible stdout writes have already
- * flushed themselves. */
+/* console.error and console.warn. Runtime-internal stdout output that is
+ * still buffered goes out first so it cannot cross this stderr line under a
+ * merged redirection (2>&1); JavaScript-visible stdout writes have already
+ * been submitted. */
 void scr_console_error(size_t n, const ScrLogArg *args) {
-  fflush(stdout);
-  scr_console_write(stderr, n, args);
+  scr_console_write(2, n, args, true);
+}
+
+void scr_console_log_parts(size_t n, const ScrLogArg *args) {
+  scr_console_write(1, n, args, true);
+}
+
+void scr_console_error_parts(size_t n, const ScrLogArg *args) {
+  scr_console_write(2, n, args, true);
+}
+
+/* A Console instance's line on process stdout (fd 1) or stderr (fd 2):
+ * the global console's group indentation does not apply. */
+void scr_console_write_fd(int fd, size_t n, const ScrLogArg *args) {
+  scr_console_write(fd == 2 ? 2 : 1, n, args, false);
 }
 
 /* One JavaScript-visible raw write. Node's global console and process stream
@@ -242,18 +461,44 @@ void scr_console_error(size_t n, const ScrLogArg *args) {
  * exit. The runtime remains synchronous internally, so its backpressure
  * surface is still constantly true, but the bytes are observable promptly.
  *
- * stderr flushes any runtime-internal stdout fragment first to preserve the
- * existing merged-fd ordering convention. */
+ * Buffered runtime-internal stdout bytes go out first (for both streams) to
+ * preserve stdout order and the merged-fd ordering convention. */
 int scr_stdio_write_raw(int fd, const void *data, size_t len) {
+  if (__builtin_expect(scr_stdio_capture != NULL, 0) && scr_stdio_capture(fd == 2 ? 2 : 1, data, len)) return 0;
+#if SCR_STDIO_DIRECT
+  FILE *locked = scr_fd_stream_lock(fd == 2 ? 2 : 1);
+  if (scr_stdout_pending()) fflush(stdout);
+  struct iovec iov = {(void *)data, len};
+  int result = len == 0 ? 0 : scr_fd_writev_all(fd == 2 ? 2 : 1, &iov, 1);
+  scr_fd_stream_unlock(locked);
+  return result;
+#else
   FILE *out = fd == 2 ? stderr : stdout;
   if (fd == 2) fflush(stdout);
   if (len > 0 && fwrite(data, 1, len, out) != len) return errno ? errno : EIO;
   if (fflush(out) != 0) return errno ? errno : EIO;
   return 0;
+#endif
 }
 
 bool scr_stdio_write(int fd, const void *data, size_t len) {
-  if (scr_stdio_write_hook) return scr_stdio_write_hook(fd, data, len);
+  if (scr_stdio_write_hook) return scr_stdio_write_hook(fd, data, len, false);
   (void)scr_stdio_write_raw(fd, data, len);
   return true;
+}
+
+/* A string chunk: a patched write receives the string itself; the stream
+ * receives its UTF-8, each lone surrogate as U+FFFD. */
+static __attribute__((noinline)) bool scr_stdio_write_wide(int fd, const ScrStr *s) {
+  if (scr_stdio_write_hook) return scr_stdio_write_hook(fd, s->data, s->len, true);
+  char *owned;
+  const char *bytes = scr_str_utf8(s, &owned);
+  (void)scr_stdio_write_raw(fd, bytes, s->len);
+  scr_str_utf8_end(owned);
+  return true;
+}
+
+bool scr_stdio_write_str(int fd, const ScrStr *s) {
+  if (__builtin_expect(scr_wtf8_any(), 0) && !s->ascii) return scr_stdio_write_wide(fd, s);
+  return scr_stdio_write(fd, s->data, s->len);
 }

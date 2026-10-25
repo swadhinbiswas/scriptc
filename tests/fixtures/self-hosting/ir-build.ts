@@ -14,7 +14,7 @@ const concat: IrExpr = { kind: "strConcat", left: text, right: suffix, type: STR
 // Execute backend-independent analyses against the same real, recursive
 // IR types that the builders consume. Fail before generating any module
 // if an analysis loses a variant or reads the wrong payload.
-if (matchStringSelfConcat("text.0", concat) !== suffix) throw new Error("concat recognition");
+if (matchStringSelfConcat("text.0", concat)?.suffix !== suffix) throw new Error("concat recognition");
 if (matchStringSelfConcat("other.0", concat) !== null) throw new Error("concat target");
 if (matchStringSelfConcat("text.0", numLit(0, loc)) !== null) throw new Error("concat variant");
 if (!isStableReceiverOperand(numLit(3, loc), "sum.0")) throw new Error("stable literal");

@@ -4,9 +4,24 @@
  * files; only legacy requests try .js/.json/.node and directory indexes.
  * Every filesystem observation passes through the frontend input tracker. */
 import { isBuiltin } from "node:module";
-import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep, toNamespacedPath } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  resolve,
+  sep,
+  toNamespacedPath,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { trackedDirectoryExists, trackedFileExists, trackedReadFile, trackedRealpath } from "./input-tracker.js";
+import {
+  trackedDirectoryExists,
+  trackedFileExists,
+  trackedReadFile,
+  trackedRealpath,
+} from "./input-tracker.js";
 import type { RuntimeResolveError, RuntimeResolveResult } from "./runtime-resolve.js";
 
 interface PackageConfig {
@@ -15,7 +30,9 @@ interface PackageConfig {
 }
 
 class ResolveFailure extends Error {
-  constructor(readonly detail: RuntimeResolveError) { super(detail.message); }
+  constructor(readonly detail: RuntimeResolveError) {
+    super(detail.message);
+  }
 }
 
 function fail(code: string, message: string, name = "Error"): never {
@@ -23,12 +40,20 @@ function fail(code: string, message: string, name = "Error"): never {
 }
 
 function missing(request: string, parent: string | null): never {
-  fail("MODULE_NOT_FOUND", `Cannot find module '${request}'${parent === null ? "" : `\nRequire stack:\n- ${parent}`}`);
+  fail(
+    "MODULE_NOT_FOUND",
+    `Cannot find module '${request}'${parent === null ? "" : `\nRequire stack:\n- ${parent}`}`,
+  );
 }
 
 function relativeRequest(request: string): boolean {
-  return request === "." || request === ".." || request.startsWith("./") || request.startsWith("../") ||
-    (process.platform === "win32" && (request.startsWith(".\\") || request.startsWith("..\\")));
+  return (
+    request === "." ||
+    request === ".." ||
+    request.startsWith("./") ||
+    request.startsWith("../") ||
+    (process.platform === "win32" && (request.startsWith(".\\") || request.startsWith("..\\")))
+  );
 }
 
 /** Node intentionally skips node_modules/node_modules while walking upward. */
@@ -43,7 +68,8 @@ export function cjsNodeModulePaths(fromDirectory: string): string[] {
     for (let index = from.length - 1; index >= 0; index--) {
       const character = from.charAt(index);
       if (character !== "\\" && character !== "/" && character !== ":") continue;
-      if (from.slice(index + 1, end) !== "node_modules") paths.push(from.slice(0, end) + "\\node_modules");
+      if (from.slice(index + 1, end) !== "node_modules")
+        paths.push(from.slice(0, end) + "\\node_modules");
       end = index;
     }
     return paths;
@@ -59,10 +85,16 @@ export function cjsNodeModulePaths(fromDirectory: string): string[] {
  * use their own executable prefix, so they need no installed Node executable.
  * Capture the environment once, as Node does during module initialization. */
 function initialGlobalPaths(): string[] {
-  const prefix = process.platform === "win32" ? dirname(process.execPath) : dirname(dirname(process.execPath));
+  const prefix =
+    process.platform === "win32" ? dirname(process.execPath) : dirname(dirname(process.execPath));
   const paths = [resolve(prefix, "lib", "node")];
-  const homeDirectory = process.platform === "win32" ? process.env["USERPROFILE"] : process.env["HOME"];
-  if (homeDirectory) paths.unshift(resolve(homeDirectory, ".node_modules"), resolve(homeDirectory, ".node_libraries"));
+  const homeDirectory =
+    process.platform === "win32" ? process.env["USERPROFILE"] : process.env["HOME"];
+  if (homeDirectory)
+    paths.unshift(
+      resolve(homeDirectory, ".node_modules"),
+      resolve(homeDirectory, ".node_libraries"),
+    );
   const nodePath = process.env["NODE_PATH"];
   if (nodePath) paths.unshift(...nodePath.split(delimiter).filter((part) => part !== ""));
   return paths;
@@ -70,7 +102,9 @@ function initialGlobalPaths(): string[] {
 const globalPaths = initialGlobalPaths();
 
 function parentFile(fromFile: string): string {
-  return resolve(fromFile.endsWith(sep) || fromFile.endsWith("/") ? join(fromFile, "noop.js") : fromFile);
+  return resolve(
+    fromFile.endsWith(sep) || fromFile.endsWith("/") ? join(fromFile, "noop.js") : fromFile,
+  );
 }
 
 export function cjsResolvePaths(fromFile: string, request: string): string[] | null {
@@ -78,19 +112,30 @@ export function cjsResolvePaths(fromFile: string, request: string): string[] | n
   fromFile = parentFile(fromFile);
   // _resolveLookupPaths has a wider dot-prefix test than isRelative, notably
   // for names such as "...". Keep these two Node rules separate.
-  if (request.startsWith(".") && (request.length === 1 || request[1] === "." || request[1] === "/" ||
-      (process.platform === "win32" && request[1] === "\\"))) return [dirname(fromFile)];
+  if (
+    request.startsWith(".") &&
+    (request.length === 1 ||
+      request[1] === "." ||
+      request[1] === "/" ||
+      (process.platform === "win32" && request[1] === "\\"))
+  )
+    return [dirname(fromFile)];
   return [...cjsNodeModulePaths(dirname(fromFile)), ...globalPaths];
 }
 
 const extensions = [".js", ".json", ".node"];
 const requireConditions = new Set(["node", "require", "node-addons", "module-sync", "default"]);
 const packageRequest = /^((?:@[^/\\%]+\/)?[^./\\%][^/\\%]*)(\/.*)?$/;
-const invalidSegment = /(^|\\|\/)((\.|%2e)(\.|%2e)?|(n|%6e|%4e)(o|%6f|%4f)(d|%64|%44)(e|%65|%45)(_|%5f)(m|%6d|%4d)(o|%6f|%4f)(d|%64|%44)(u|%75|%55)(l|%6c|%4c)(e|%65|%45)(s|%73|%53))(\\|\/|$)/i;
+const invalidSegment =
+  /(^|\\|\/)((\.|%2e)(\.|%2e)?|(n|%6e|%4e)(o|%6f|%4f)(d|%64|%44)(e|%65|%45)(_|%5f)(m|%6d|%4d)(o|%6f|%4f)(d|%64|%44)(u|%75|%55)(l|%6c|%4c)(e|%65|%45)(s|%73|%53))(\\|\/|$)/i;
 
 function absoluteUrl(value: string): boolean {
-  try { new URL(value); return true; }
-  catch { return false; }
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 class CjsResolver {
@@ -101,10 +146,16 @@ class CjsResolver {
     const cached = this.packages.get(path);
     if (cached !== undefined) return cached;
     const text = trackedReadFile(path);
-    if (text === null) { this.packages.set(path, null); return null; }
+    if (text === null) {
+      this.packages.set(path, null);
+      return null;
+    }
     let value: unknown;
-    try { value = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); }
-    catch { fail("ERR_INVALID_PACKAGE_CONFIG", `Invalid package config ${toNamespacedPath(path)}.`); }
+    try {
+      value = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+    } catch {
+      fail("ERR_INVALID_PACKAGE_CONFIG", `Invalid package config ${toNamespacedPath(path)}.`);
+    }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       fail("ERR_INVALID_PACKAGE_CONFIG", `Invalid package config ${toNamespacedPath(path)}.`);
     }
@@ -112,7 +163,8 @@ class CjsResolver {
     // Node's package reader only exposes non-null string/object map fields.
     for (const field of ["exports", "imports"]) {
       const entry = data[field];
-      if (entry === null || (typeof entry !== "string" && typeof entry !== "object")) delete data[field];
+      if (entry === null || (typeof entry !== "string" && typeof entry !== "object"))
+        delete data[field];
     }
     const pkg: PackageConfig = { path, data };
     this.packages.set(path, pkg);
@@ -120,7 +172,11 @@ class CjsResolver {
   }
 
   private scope(fromFile: string): PackageConfig | null {
-    for (let directory = dirname(fromFile); basename(directory) !== "node_modules"; directory = dirname(directory)) {
+    for (
+      let directory = dirname(fromFile);
+      basename(directory) !== "node_modules";
+      directory = dirname(directory)
+    ) {
       const pkg = this.package(directory);
       if (pkg !== null) return pkg;
       if (dirname(directory) === directory) break;
@@ -145,10 +201,16 @@ class CjsResolver {
     if (typeof main !== "string" || main === "") return this.withExtensions(join(path, "index"));
     const filename = resolve(path, main);
     // Node does not recursively consult another package.json under main.
-    const result = this.file(filename) ?? this.withExtensions(filename) ?? this.withExtensions(join(filename, "index")) ??
+    const result =
+      this.file(filename) ??
+      this.withExtensions(filename) ??
+      this.withExtensions(join(filename, "index")) ??
       this.withExtensions(join(path, "index"));
     if (result !== null) return result;
-    fail("MODULE_NOT_FOUND", `Cannot find module '${filename}'. Please verify that the package.json has a valid "main" entry`);
+    fail(
+      "MODULE_NOT_FOUND",
+      `Cannot find module '${filename}'. Please verify that the package.json has a valid "main" entry`,
+    );
   }
 
   private legacy(path: string, request: string): string | null {
@@ -161,25 +223,48 @@ class CjsResolver {
   }
 
   private invalidConfig(pkg: PackageConfig, base: string | null, message: string): never {
-    fail("ERR_INVALID_PACKAGE_CONFIG", `Invalid package config ${pkg.path}${base ? ` while importing ${pathToFileURL(base).href}` : ""}. ${message}`);
+    fail(
+      "ERR_INVALID_PACKAGE_CONFIG",
+      `Invalid package config ${pkg.path}${base ? ` while importing ${pathToFileURL(base).href}` : ""}. ${message}`,
+    );
   }
 
-  private invalidTarget(pkg: PackageConfig, key: string, target: unknown, internal: boolean, base: string | null): never {
-    const text = typeof target === "object" && target !== null ? JSON.stringify(target) : String(target);
+  private invalidTarget(
+    pkg: PackageConfig,
+    key: string,
+    target: unknown,
+    internal: boolean,
+    base: string | null,
+  ): never {
+    const text =
+      typeof target === "object" && target !== null ? JSON.stringify(target) : String(target);
     const label = key === "." ? '"exports" main' : `"${internal ? "imports" : "exports"}"`;
     const forKey = key === "." ? "" : ` for '${key}'`;
-    const relative = typeof target === "string" && !internal && target !== "" && !target.startsWith("./");
-    fail("ERR_INVALID_PACKAGE_TARGET", `Invalid ${label} target ${JSON.stringify(text)} defined${forKey} in the package config ${pkg.path}${base ? ` imported from ${base}` : ""}${relative ? '; targets must start with "./"' : ""}`);
+    const relative =
+      typeof target === "string" && !internal && target !== "" && !target.startsWith("./");
+    fail(
+      "ERR_INVALID_PACKAGE_TARGET",
+      `Invalid ${label} target ${JSON.stringify(text)} defined${forKey} in the package config ${pkg.path}${base ? ` imported from ${base}` : ""}${relative ? '; targets must start with "./"' : ""}`,
+    );
   }
 
   private invalidSpecifier(request: string, reason: string, base: string | null): never {
-    fail("ERR_INVALID_MODULE_SPECIFIER", `Invalid module "${request}" ${reason}${base ? ` imported from ${base}` : ""}`, "TypeError");
+    fail(
+      "ERR_INVALID_MODULE_SPECIFIER",
+      `Invalid module "${request}" ${reason}${base ? ` imported from ${base}` : ""}`,
+      "TypeError",
+    );
   }
 
   /** undefined means no matching condition; null is an explicitly blocked
    * target. A null conditional arm must not fall through to default. */
   private target(
-    pkg: PackageConfig, value: unknown, key: string, wildcard: string | null, internal: boolean, base: string | null,
+    pkg: PackageConfig,
+    value: unknown,
+    key: string,
+    wildcard: string | null,
+    internal: boolean,
+    base: string | null,
   ): string | null | undefined {
     if (typeof value === "string") {
       if (!value.startsWith("./")) {
@@ -192,10 +277,15 @@ class CjsResolver {
       if (invalidSegment.test(value.slice(2))) this.invalidTarget(pkg, key, value, internal, base);
       const url = new URL(value, pathToFileURL(pkg.path));
       const packageUrl = new URL(".", pathToFileURL(pkg.path));
-      if (!url.pathname.startsWith(packageUrl.pathname)) this.invalidTarget(pkg, key, value, internal, base);
+      if (!url.pathname.startsWith(packageUrl.pathname))
+        this.invalidTarget(pkg, key, value, internal, base);
       if (wildcard !== null) {
         if (invalidSegment.test(wildcard)) {
-          this.invalidSpecifier(key.replace("*", wildcard), `request is not a valid match in pattern "${key}" for the "${internal ? "imports" : "exports"}" resolution of ${pkg.path}`, base);
+          this.invalidSpecifier(
+            key.replace("*", wildcard),
+            `request is not a valid match in pattern "${key}" for the "${internal ? "imports" : "exports"}" resolution of ${pkg.path}`,
+            base,
+          );
         }
         return new URL(url.href.split("*").join(wildcard)).href;
       }
@@ -208,10 +298,18 @@ class CjsResolver {
         try {
           const result = this.target(pkg, item, key, wildcard, internal, base);
           if (result === undefined) continue;
-          if (result === null) { lastFailure = null; blocked = true; continue; }
+          if (result === null) {
+            lastFailure = null;
+            blocked = true;
+            continue;
+          }
           return result;
         } catch (error) {
-          if (!(error instanceof ResolveFailure) || error.detail.code !== "ERR_INVALID_PACKAGE_TARGET") throw error;
+          if (
+            !(error instanceof ResolveFailure) ||
+            error.detail.code !== "ERR_INVALID_PACKAGE_TARGET"
+          )
+            throw error;
           lastFailure = error;
         }
       }
@@ -238,16 +336,32 @@ class CjsResolver {
     this.invalidTarget(pkg, key, value, internal, base);
   }
 
-  private mapTarget(pkg: PackageConfig, map: Record<string, unknown>, request: string, internal: boolean, base: string | null): string | null | undefined {
-    if (Object.hasOwn(map, request) && !request.includes("*") && (internal || !request.endsWith("/"))) {
+  private mapTarget(
+    pkg: PackageConfig,
+    map: Record<string, unknown>,
+    request: string,
+    internal: boolean,
+    base: string | null,
+  ): string | null | undefined {
+    if (
+      Object.hasOwn(map, request) &&
+      !request.includes("*") &&
+      (internal || !request.endsWith("/"))
+    ) {
       return this.target(pkg, map[request], request, null, internal, base);
     }
     let best = "";
     let prefixLength = -1;
     for (const key of Object.keys(map)) {
       const star = key.indexOf("*");
-      if (star < 0 || key.lastIndexOf("*") !== star || request.length < key.length ||
-          !request.startsWith(key.slice(0, star)) || !request.endsWith(key.slice(star + 1))) continue;
+      if (
+        star < 0 ||
+        key.lastIndexOf("*") !== star ||
+        request.length < key.length ||
+        !request.startsWith(key.slice(0, star)) ||
+        !request.endsWith(key.slice(star + 1))
+      )
+        continue;
       if (star > prefixLength || (star === prefixLength && key.length > best.length)) {
         best = key;
         prefixLength = star;
@@ -268,23 +382,36 @@ class CjsResolver {
       const keys = Object.keys(map);
       const subpaths = keys.filter((key) => key.startsWith("."));
       if (subpaths.length !== 0 && subpaths.length !== keys.length) {
-        this.invalidConfig(pkg, base, '"exports" cannot contain some keys starting with \'.\' and some not. The exports object must either be an object of package subpath keys or an object of main entry condition name keys only.');
+        this.invalidConfig(
+          pkg,
+          base,
+          "\"exports\" cannot contain some keys starting with '.' and some not. The exports object must either be an object of package subpath keys or an object of main entry condition name keys only.",
+        );
       }
-      result = subpaths.length > 0 ? this.mapTarget(pkg, map, request, false, base)
-        : request === "." ? this.target(pkg, map, ".", null, false, base) : null;
+      result =
+        subpaths.length > 0
+          ? this.mapTarget(pkg, map, request, false, base)
+          : request === "."
+            ? this.target(pkg, map, ".", null, false, base)
+            : null;
     }
     if (result != null) return result;
-    const message = request === "." ? `No "exports" main defined in ${pkg.path}`
-      : `Package subpath '${request}' is not defined by "exports" in ${pkg.path}`;
+    const message =
+      request === "."
+        ? `No "exports" main defined in ${pkg.path}`
+        : `Package subpath '${request}' is not defined by "exports" in ${pkg.path}`;
     fail("ERR_PACKAGE_PATH_NOT_EXPORTED", message + (base ? ` imported from ${base}` : ""));
   }
 
   private finalize(url: string, base: string | null): string {
-    if (/%2f|%5c/i.test(url)) this.invalidSpecifier(url, 'must not include encoded "/" or "\\" characters', base);
-    if (!url.startsWith("file:")) fail("ERR_INVALID_URL_SCHEME", "The URL must be of scheme file", "TypeError");
+    if (/%2f|%5c/i.test(url))
+      this.invalidSpecifier(url, 'must not include encoded "/" or "\\" characters', base);
+    if (!url.startsWith("file:"))
+      fail("ERR_INVALID_URL_SCHEME", "The URL must be of scheme file", "TypeError");
     let filename: string;
-    try { filename = fileURLToPath(url); }
-    catch (error) {
+    try {
+      filename = fileURLToPath(url);
+    } catch (error) {
       if (error instanceof URIError) fail("", error.message, "URIError");
       throw error;
     }
@@ -300,11 +427,17 @@ class CjsResolver {
     const parts = request.split("/");
     const scoped = request.startsWith("@");
     const name = scoped ? `${parts[0]}/${parts[1] ?? ""}` : parts[0]!;
-    if (name.startsWith(".") || name.includes("%") || name.includes("\\") || (scoped && (parts.length < 2 || parts[1] === ""))) {
+    if (
+      name.startsWith(".") ||
+      name.includes("%") ||
+      name.includes("\\") ||
+      (scoped && (parts.length < 2 || parts[1] === ""))
+    ) {
       this.invalidSpecifier(request, "is not a valid package name", from.path);
     }
     const subpath = request.length === name.length ? "." : "." + request.slice(name.length);
-    if (from.data["name"] === name && from.data["exports"] != null) return this.exports(from, subpath, from.path);
+    if (from.data["name"] === name && from.data["exports"] != null)
+      return this.exports(from, subpath, from.path);
     for (const directory of cjsNodeModulePaths(dirname(from.path))) {
       const root = join(directory, name);
       if (!trackedDirectoryExists(root)) continue;
@@ -315,7 +448,8 @@ class CjsResolver {
         const found = this.directory(root);
         if (found !== null) return pathToFileURL(found).href;
       } catch (error) {
-        if (!(error instanceof ResolveFailure) || error.detail.code !== "MODULE_NOT_FOUND") throw error;
+        if (!(error instanceof ResolveFailure) || error.detail.code !== "MODULE_NOT_FOUND")
+          throw error;
       }
       break;
     }
@@ -327,22 +461,33 @@ class CjsResolver {
     if (isBuiltin(request)) return request;
     const scope = this.scope(fromFile);
     if (request.startsWith("#") && scope !== null && scope.data["imports"] != null) {
-      if (request === "#" || request.endsWith("/")) this.invalidSpecifier(request, "is not a valid internal imports specifier name", fromFile);
+      if (request === "#" || request.endsWith("/"))
+        this.invalidSpecifier(request, "is not a valid internal imports specifier name", fromFile);
       const imports = scope.data["imports"];
       try {
-        const target = typeof imports === "object" && imports !== null
-          ? this.mapTarget(scope, imports as Record<string, unknown>, request, true, fromFile) : null;
+        const target =
+          typeof imports === "object" && imports !== null
+            ? this.mapTarget(scope, imports as Record<string, unknown>, request, true, fromFile)
+            : null;
         if (target != null) return this.finalize(target, fromFile);
       } catch (error) {
-        if (!(error instanceof ResolveFailure) || error.detail.code !== "ERR_MODULE_NOT_FOUND") throw error;
+        if (!(error instanceof ResolveFailure) || error.detail.code !== "ERR_MODULE_NOT_FOUND")
+          throw error;
         missing(request, null);
       }
-      fail("ERR_PACKAGE_IMPORT_NOT_DEFINED", `Package import specifier "${request}" is not defined in package ${scope.path} imported from ${fromFile}`, "TypeError");
+      fail(
+        "ERR_PACKAGE_IMPORT_NOT_DEFINED",
+        `Package import specifier "${request}" is not defined in package ${scope.path} imported from ${fromFile}`,
+        "TypeError",
+      );
     }
     if (scope !== null && scope.data["exports"] !== undefined) {
       const name = scope.data["name"];
       if (typeof name === "string" && (request === name || request.startsWith(name + "/"))) {
-        return this.finalize(this.exports(scope, "." + request.slice(name.length), fromFile), fromFile);
+        return this.finalize(
+          this.exports(scope, "." + request.slice(name.length), fromFile),
+          fromFile,
+        );
       }
     }
     let lookup: string[];
@@ -374,11 +519,16 @@ class CjsResolver {
   }
 }
 
-export function resolveCjsRuntime(fromFile: string, request: string, paths?: readonly string[]): RuntimeResolveResult {
+export function resolveCjsRuntime(
+  fromFile: string,
+  request: string,
+  paths?: readonly string[],
+): RuntimeResolveResult {
   // createRequire treats a directory URL as a synthetic noop.js parent.
   const parent = parentFile(fromFile);
-  try { return { ok: true, value: new CjsResolver().resolve(parent, request, paths) }; }
-  catch (error) {
+  try {
+    return { ok: true, value: new CjsResolver().resolve(parent, request, paths) };
+  } catch (error) {
     if (error instanceof ResolveFailure) return { ok: false, error: error.detail };
     throw error;
   }

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4970-int32-call-abi.ts"
+ ],
+ "diags": []
+}

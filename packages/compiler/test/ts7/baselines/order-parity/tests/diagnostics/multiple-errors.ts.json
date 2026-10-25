@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/multiple-errors.ts"
+ ],
+ "diags": []
+}

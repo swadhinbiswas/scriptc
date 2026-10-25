@@ -1,4 +1,3 @@
-// @dynamic
 // A CHECKED-DYNAMIC (`unknown`) value entering 'any'-typed island code,
 // and async OBJECT-LITERAL methods (`{ async load() {...} }` — the lazy
 // service-registry pattern): the checked-dynamic tree deep-copies into engine values

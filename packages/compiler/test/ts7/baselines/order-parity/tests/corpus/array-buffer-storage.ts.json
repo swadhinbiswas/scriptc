@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-buffer-storage.ts"
+ ],
+ "diags": []
+}

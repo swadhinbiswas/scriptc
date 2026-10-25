@@ -42,7 +42,7 @@ function mapProgram(services: FrontendServices, entry: string): MappingReport {
     const shapes = new ShapeRegistry();
     const unions = new UnionRegistry();
     const ctx: TypeMapperCtx = {
-      checker, shapes, unions, dynamic: false, typeMemo: new Map(),
+      checker, shapes, unions, typeMemo: new Map(),
       classNamer: (decl) => decl.name?.text ?? "anonymous",
       isStdlibFile: (sf) => sf.fileName === ambient || sf.fileName === overrides || sf.fileName === fallback ||
         load.program.isSourceFileDefaultLibrary(sf) || (sf.isDeclarationFile && isNodeTypesPath(sf.fileName)),
@@ -140,11 +140,6 @@ function mapProgram(services: FrontendServices, entry: string): MappingReport {
     if (!anyAlias) throw new Error("missing any fixture");
     const anyType = checker.getTypeAtLocation(anyAlias.type);
     requireValue(mapType(anyType, ctx) === null, "static any unexpectedly mapped");
-    ctx.dynamic = true;
-    requireValue(mapType(anyType, ctx)?.kind === "jsval", "dynamic any did not map to an island handle");
-    ctx.dynamic = false;
-    requireValue(mapType(anyType, ctx) === null, "dynamic memo escaped into static mapping");
-    hooks.push("dynamic memo isolation");
     return { mappings, records: shapes.shapes, unions: unions.unions,
       memoEntries: ctx.typeMemo!.size, variants, hooks, tuples };
   } finally { load.dispose(); }

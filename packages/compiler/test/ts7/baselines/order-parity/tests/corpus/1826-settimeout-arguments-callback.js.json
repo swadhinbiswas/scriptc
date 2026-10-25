@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1826-settimeout-arguments-callback.js"
+ ],
+ "diags": []
+}

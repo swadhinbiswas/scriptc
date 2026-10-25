@@ -60,6 +60,28 @@ test("semantic validation reads non-source dependencies once and still invalidat
   expect(reads.mock.calls.filter(([path]) => path === dependency)).toHaveLength(1);
 });
 
+test("an equivalent edit of a file whose raw text the frontend read does not match", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
+  scratch.push(dir);
+  const source = join(dir, "entry.ts");
+  const previous = "export const answer = 1;\n";
+  await writeFile(source, previous);
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => {
+    trackedReadFile(source);
+    tracker.record({ op: "text", path: source });
+  });
+  const snapshot = tracker.snapshot();
+  expect(validFrontendInputSnapshot(snapshot)).toBe(true);
+  expect(frontendInputsStillMatch(snapshot)).toBe(true);
+  await writeFile(source, `// comment\n${previous}`);
+  const equivalent = vi.fn(() => true);
+  expect(
+    frontendInputsSemanticallyMatch(snapshot, new Map([[source, previous]]), equivalent),
+  ).toBeNull();
+  expect(equivalent).not.toHaveBeenCalled();
+});
+
 test("tracked frontend reads invalidate on byte edits", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
   scratch.push(dir);
@@ -228,16 +250,69 @@ test("synchronous tracking restores parents after throws and propagates unstable
   const parent = new FrontendInputTracker();
   const child = new FrontendInputTracker();
   parent.runSynchronous(() => {
-    expect(() => child.runSynchronous(() => {
-      trackedReadFile(first);
-      markFrontendInputsUnstable();
-      throw new Error("interrupted");
-    })).toThrow("interrupted");
+    expect(() =>
+      child.runSynchronous(() => {
+        trackedReadFile(first);
+        markFrontendInputsUnstable();
+        throw new Error("interrupted");
+      }),
+    ).toThrow("interrupted");
     trackedReadFile(second);
   });
-  expect(parent.snapshot().probes.filter((probe) => probe.op === "file").map((probe) => probe.path)).toEqual([first, second]);
+  expect(
+    parent
+      .snapshot()
+      .probes.filter((probe) => probe.op === "file")
+      .map((probe) => probe.path),
+  ).toEqual([first, second]);
   expect(parent.snapshot().stable).toBe(false);
   const before = parent.snapshot();
   trackedFileExists(join(dir, "outside.ts"));
   expect(parent.snapshot()).toEqual(before);
+});
+
+test("a settled file is checked by its identity, and any write invalidates it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
+  scratch.push(dir);
+  const source = join(dir, "entry.ts");
+  await writeFile(source, "export const answer = 1;\n");
+  const written = fs.statSync(source);
+  // The file was last changed long enough before the read.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 5000);
+  const tracker = new FrontendInputTracker();
+  try {
+    tracker.run(() => trackedReadFile(source));
+  } finally {
+    vi.useRealTimers();
+  }
+  const snapshot = tracker.snapshot();
+  const probe = snapshot.probes.find((entry) => entry.op === "file");
+  expect(probe?.op === "file" && probe.identity !== undefined).toBe(true);
+  expect(validFrontendInputSnapshot(snapshot)).toBe(true);
+  const reads = vi.mocked(fs.readFileSync);
+  reads.mockClear();
+  expect(frontendInputsStillMatch(snapshot)).toBe(true);
+  expect(reads.mock.calls.filter(([path]) => path === source)).toHaveLength(0);
+  // A same-size rewrite that restores the modification time still changes
+  // the change time.
+  await writeFile(source, "export const answer = 2;\n");
+  fs.utimesSync(source, written.atime, written.mtime);
+  expect(frontendInputsStillMatch(snapshot)).toBe(false);
+});
+
+test("a file changed shortly before the read is hashed on every check", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
+  scratch.push(dir);
+  const source = join(dir, "entry.ts");
+  await writeFile(source, "export const answer = 1;\n");
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => trackedReadFile(source));
+  const snapshot = tracker.snapshot();
+  const probe = snapshot.probes.find((entry) => entry.op === "file");
+  expect(probe?.op === "file" && probe.identity).toBeUndefined();
+  const reads = vi.mocked(fs.readFileSync);
+  reads.mockClear();
+  expect(frontendInputsStillMatch(snapshot)).toBe(true);
+  expect(reads.mock.calls.filter(([path]) => path === source)).toHaveLength(1);
 });

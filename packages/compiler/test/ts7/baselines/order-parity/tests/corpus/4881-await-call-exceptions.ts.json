@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4881-await-call-exceptions.ts"
+ ],
+ "diags": []
+}

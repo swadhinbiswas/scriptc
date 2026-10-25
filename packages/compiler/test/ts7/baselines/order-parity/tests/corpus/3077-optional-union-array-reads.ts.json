@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3077-optional-union-array-reads.ts"
+ ],
+ "diags": []
+}

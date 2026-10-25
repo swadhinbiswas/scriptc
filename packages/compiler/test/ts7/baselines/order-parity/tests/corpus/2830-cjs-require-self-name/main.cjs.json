@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2830-cjs-require-self-name/lib.cjs",
+  "<repo>/tests/corpus/2830-cjs-require-self-name/main.cjs"
+ ],
+ "diags": []
+}

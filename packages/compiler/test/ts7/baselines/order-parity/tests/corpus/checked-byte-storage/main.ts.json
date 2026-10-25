@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/checked-byte-storage/values.js",
+  "<repo>/tests/corpus/checked-byte-storage/main.ts"
+ ],
+ "diags": []
+}

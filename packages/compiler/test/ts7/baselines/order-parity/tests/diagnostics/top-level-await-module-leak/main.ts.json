@@ -1,0 +1,18 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/top-level-await-module-leak/a.ts",
+  "<repo>/tests/diagnostics/top-level-await-module-leak/b.ts",
+  "<repo>/tests/diagnostics/top-level-await-module-leak/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Cannot find name 'shared'.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/top-level-await-module-leak/b.ts",
+    "start": 37,
+    "end": 43
+   }
+  }
+ ]
+}

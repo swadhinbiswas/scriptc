@@ -1,0 +1,19 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/cjs-esm-lexer-require-reached/table.cjs",
+  "<repo>/tests/diagnostics/cjs-esm-lexer-require-reached/mid.mjs",
+  "<repo>/tests/diagnostics/cjs-esm-lexer-require-reached/main.js"
+ ],
+ "diags": [
+  {
+   "code": "SC1013",
+   "message": "a named import of a CommonJS export Node's lexer cannot detect, reached through require() of an ES module (Node throws its SyntaxError mid-evaluation at that require; import the CommonJS module's default and read members off it instead) is not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/cjs-esm-lexer-require-reached/mid.mjs",
+    "start": 9,
+    "end": 10
+   },
+   "milestone": "later"
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/error-prototype-tostring.js"
+ ],
+ "diags": []
+}

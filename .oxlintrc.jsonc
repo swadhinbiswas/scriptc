@@ -1,0 +1,292 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error",
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/vendor/**",
+    "**/fixtures/**",
+    "**/*.generated.*",
+    "**/artifacts/**",
+    "docs/**",
+    "tests/corpus/**",
+    "tests/diagnostics/**",
+    "tests/library-mode/**",
+    "tests/test262/**",
+    "benchmarks/**",
+    "examples/**",
+  ],
+  "rules": {
+    // Sparse capacity and snapshot iteration are intentional; review these rewrites manually.
+    "unicorn/no-new-array": "off",
+    "unicorn/no-useless-spread": "off",
+  },
+  "overrides": [
+    {
+      "files": ["packages/compiler/src/**", "packages/cli/src/**"],
+      "rules": {
+        "no-var": "error",
+        "prefer-const": "error",
+        "prefer-rest-params": "error",
+        "prefer-spread": "error",
+        "typescript/ban-ts-comment": "error",
+        "typescript/no-duplicate-enum-values": "error",
+        "typescript/no-empty-object-type": "error",
+        "typescript/no-explicit-any": "error",
+        "typescript/no-extra-non-null-assertion": "error",
+        "typescript/no-misused-new": "error",
+        "typescript/no-namespace": "error",
+        "typescript/no-non-null-asserted-optional-chain": "error",
+        "typescript/no-require-imports": "error",
+        "typescript/no-this-alias": "error",
+        "typescript/no-unnecessary-type-constraint": "error",
+        "typescript/no-unsafe-declaration-merging": "error",
+        "typescript/no-unsafe-function-type": "error",
+        "typescript/no-wrapper-object-types": "error",
+        "typescript/prefer-as-const": "error",
+        "typescript/prefer-namespace-keyword": "error",
+        "typescript/triple-slash-reference": "error",
+        "no-array-constructor": "error",
+        "no-unused-expressions": "error",
+      },
+    },
+    {
+      "files": ["packages/compiler/src/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      "files": ["packages/compiler/src/frontend/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/backend/*", "**/backend/**"],
+                "message": "frontend must not import backend; use the IR interface.",
+              },
+              {
+                "group": ["**/ir/validate", "**/ir/validate.*"],
+                "message": "frontend must not import IR validation; use the shared builtin and intrinsic signatures.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      "files": ["packages/compiler/src/backend/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/frontend/*", "**/frontend/**"],
+                "message": "backend must not import frontend; use the IR interface.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // Native recipe owners must not depend on the public driver facade.
+      "files": ["packages/compiler/src/backend/native/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/native-toolchain", "**/native-toolchain.*"],
+                "message": "native recipe owners must not import the facade; import the driver, identity, artifact or build owner.",
+              },
+              {
+                "group": ["**/frontend/*", "**/frontend/**"],
+                "message": "backend must not import frontend; use the IR interface.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // Call contracts and function construction must not depend on dispatch.
+      "files": [
+        "packages/compiler/src/frontend/lowering/call-signatures.ts",
+        "packages/compiler/src/frontend/lowering/call-arguments.ts",
+        "packages/compiler/src/frontend/lowering/function-returns.ts",
+        "packages/compiler/src/frontend/lowering/generic-functions.ts",
+        "packages/compiler/src/frontend/lowering/binding-analysis.ts",
+        "packages/compiler/src/frontend/lowering/native-ffi.ts",
+        "packages/compiler/src/frontend/lowering/lower-functions.ts",
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/lower-calls", "**/lower-calls.*"],
+                "message": "call contracts and function construction must not import call dispatch; import the implementation owner.",
+              },
+              {
+                "group": ["**/backend/*", "**/backend/**"],
+                "message": "frontend must not import backend; use the IR interface.",
+              },
+              {
+                "group": ["**/ir/validate", "**/ir/validate.*"],
+                "message": "frontend must not import IR validation; use the shared builtin and intrinsic signatures.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // Container implementations import semantic owners rather than array dispatch.
+      "files": ["packages/compiler/src/frontend/lowering/containers/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/array-methods", "**/array-methods.*"],
+                "message": "container implementations must not import array dispatch; import the callback, construction or iteration owner.",
+              },
+              {
+                "group": ["**/backend/*", "**/backend/**"],
+                "message": "frontend must not import backend; use the IR interface.",
+              },
+              {
+                "group": ["**/ir/validate", "**/ir/validate.*"],
+                "message": "frontend must not import IR validation; use the shared builtin and intrinsic signatures.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // Builtin implementations must not depend on module call dispatch.
+      "files": ["packages/compiler/src/frontend/lowering/builtins/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/module-calls", "**/module-calls.*"],
+                "message": "builtin implementations must not import module dispatch; import the API or argument owner.",
+              },
+              {
+                "group": ["**/backend/*", "**/backend/**"],
+                "message": "frontend must not import backend; use the IR interface.",
+              },
+              {
+                "group": ["**/ir/validate", "**/ir/validate.*"],
+                "message": "frontend must not import IR validation; use the shared builtin and intrinsic signatures.",
+              },
+              {
+                "group": ["typescript5", "typescript5/**"],
+                "message": "typescript5 is restricted to the explicit parser islands; TypeScript AST worlds must not mix.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // Only strings and offsets cross these TypeScript 5 parser islands.
+      "files": [
+        "packages/compiler/src/frontend/npm.ts",
+        "packages/compiler/src/frontend/cjs-lexer.ts",
+        "packages/compiler/src/frontend/comptime-node.ts",
+        "packages/compiler/src/frontend/ts7/world-check.ts",
+        "packages/compiler/src/frontend/ts7/source-parser.test.ts",
+        "packages/compiler/src/frontend/jsx-source.test.ts",
+        "packages/compiler/src/frontend/npm-static-rewrite.ts",
+        "packages/compiler/src/frontend/npm-static-bundled-cjs.ts",
+        "packages/compiler/src/library/semantic-source.ts",
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/backend/*", "**/backend/**"],
+                "message": "frontend must not import backend; use the IR interface.",
+              },
+              {
+                "group": ["**/ir/validate", "**/ir/validate.*"],
+                "message": "frontend must not import IR validation; use the shared builtin and intrinsic signatures.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // IR branches use a `then` field without implementing Promise assimilation.
+      "files": [
+        "packages/compiler/src/frontend/lowering/**",
+        "packages/compiler/src/backend/llvm/**",
+        "packages/compiler/src/backend/loop-polls.test.ts",
+        "packages/compiler/src/backend/may-throw.test.ts",
+        "packages/compiler/src/backend/stack-observations.test.ts",
+        "packages/compiler/src/ir/**",
+        "packages/compiler/src/library/*.test.ts",
+        "packages/compiler/test/**",
+        "tests/harness/self-hosting-*-cases.ts",
+      ],
+      "rules": {
+        "unicorn/no-thenable": "off",
+      },
+    },
+    {
+      // Ambient declarations describe an existing constructor and its prototype methods.
+      "files": ["packages/compiler/ambient/scriptc-node-fallback.d.ts"],
+      "rules": {
+        "typescript/no-unsafe-declaration-merging": "off",
+      },
+    },
+  ],
+}

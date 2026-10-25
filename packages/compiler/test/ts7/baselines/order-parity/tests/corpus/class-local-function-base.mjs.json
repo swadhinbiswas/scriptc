@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/class-local-function-base.mjs"
+ ],
+ "diags": []
+}

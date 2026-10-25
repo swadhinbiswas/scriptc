@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2300-dyn-record-spread-and-keyed-access.cjs"
+ ],
+ "diags": []
+}

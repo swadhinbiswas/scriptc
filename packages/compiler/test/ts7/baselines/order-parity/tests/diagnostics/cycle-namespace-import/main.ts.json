@@ -1,0 +1,20 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/cycle-namespace-import/b.ts",
+  "<repo>/tests/diagnostics/cycle-namespace-import/a.ts",
+  "<repo>/tests/diagnostics/cycle-namespace-import/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC1016",
+   "message": "circular imports (<repo>/tests/diagnostics/cycle-namespace-import/a.ts → <repo>/tests/diagnostics/cycle-namespace-import/b.ts → <repo>/tests/diagnostics/cycle-namespace-import/a.ts; the namespace import 'helpers' at <repo>/tests/diagnostics/cycle-namespace-import/a.ts:1 names a module of the cycle) are not supported yet",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/cycle-namespace-import/a.ts",
+    "start": 0,
+    "end": 0
+   },
+   "milestone": "later",
+   "hint": "ES-module cycles of let/const/function bindings compile as-is; rewrite the named construct (a named import instead of a namespace, a const instead of a default-export expression or var, a class declared before the code that can reach it) or break the named edge"
+  }
+ ]
+}

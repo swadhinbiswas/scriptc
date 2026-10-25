@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2977-nested-array-binding-defaults.js"
+ ],
+ "diags": []
+}

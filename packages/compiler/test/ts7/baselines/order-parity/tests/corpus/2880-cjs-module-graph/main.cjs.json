@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2880-cjs-module-graph/leaf.cjs",
+  "<repo>/tests/corpus/2880-cjs-module-graph/child.cjs",
+  "<repo>/tests/corpus/2880-cjs-module-graph/failed.cjs",
+  "<repo>/tests/corpus/2880-cjs-module-graph/main.cjs"
+ ],
+ "diags": []
+}

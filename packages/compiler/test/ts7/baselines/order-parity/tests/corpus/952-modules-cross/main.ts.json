@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/952-modules-cross/shapes.ts",
+  "<repo>/tests/corpus/952-modules-cross/ops.ts",
+  "<repo>/tests/corpus/952-modules-cross/main.ts"
+ ],
+ "diags": []
+}

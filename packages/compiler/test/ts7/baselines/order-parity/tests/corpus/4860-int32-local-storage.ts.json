@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4860-int32-local-storage.ts"
+ ],
+ "diags": []
+}

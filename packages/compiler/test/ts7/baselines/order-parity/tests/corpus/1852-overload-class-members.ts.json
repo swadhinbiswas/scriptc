@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1852-overload-class-members.ts"
+ ],
+ "diags": []
+}

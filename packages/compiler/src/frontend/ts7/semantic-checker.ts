@@ -1,17 +1,46 @@
-import type { SemanticIndexInfoData as IndexInfoResponse, SemanticSignatureData as SignatureResponse, SemanticSymbolData as SymbolResponse, SemanticTypePredicateData as TypePredicateResponse, SemanticTypeData as TypeResponse } from "./semantic-schema.generated.js";
+import type {
+  SemanticIndexInfoData as IndexInfoResponse,
+  SemanticSymbolData as SymbolResponse,
+  SemanticTypePredicateData as TypePredicateResponse,
+} from "./semantic-schema.generated.js";
 import { AstFile, AstNode } from "./ast-node.js";
-import { SemanticNodeHandle, SemanticProject, SemanticSignature, SemanticSymbol, SemanticType, type SemanticDocument, type SemanticQuery } from "./semantic-model.js";
+import {
+  SemanticNodeHandle,
+  SemanticProject,
+  SemanticSignature,
+  SemanticSymbol,
+  SemanticType,
+  type SemanticDocument,
+  type SemanticQuery,
+  present,
+} from "./semantic-model.js";
 import { SemanticSymbolFlags } from "./semantic-schema.generated.js";
+import type { TypePredicateKind } from "./enums.generated.js";
 
-export interface SemanticIndexInfo {
-  keyType: SemanticType;
-  valueType: SemanticType;
-  isReadonly: boolean;
-  declaration: SemanticNodeHandle | undefined;
+/** An index signature of a type. Its declaration resolves on first read: most queries only count a
+ * type's index infos. */
+export class SemanticIndexInfo {
+  private declarationNode: AstNode | undefined;
+  private declarationResolved = false;
+
+  constructor(
+    readonly keyType: SemanticType,
+    readonly type: SemanticType,
+    readonly isReadonly: boolean,
+    private readonly declarationHandle: SemanticNodeHandle | undefined,
+  ) {}
+
+  get declaration(): AstNode | undefined {
+    if (!this.declarationResolved) {
+      this.declarationNode = this.declarationHandle?.resolve();
+      this.declarationResolved = true;
+    }
+    return this.declarationNode;
+  }
 }
 
 export interface SemanticTypePredicate {
-  kind: number;
+  kind: TypePredicateKind;
   parameterIndex: number;
   parameterName: string | undefined;
   type: SemanticType | undefined;
@@ -33,7 +62,11 @@ export interface SemanticJsDocTag {
   text?: string;
 }
 
-interface WellKnownSymbols { unknown: number; undefined: number; arguments: number; }
+interface WellKnownSymbols {
+  unknown: number;
+  undefined: number;
+  arguments: number;
+}
 
 export interface SemanticCompletionOptions {
   triggerCharacter?: string;
@@ -63,6 +96,13 @@ export interface SemanticCompletion {
   symbol: SemanticSymbol | undefined;
 }
 
+/** Whether lowering asks the checker for contextual types and resolved
+ * signatures in batches (`getContextualTypes`, `getResolvedSignatures`,
+ * answered from tsc-ts 0.0.7 on). Off, the batch prefetches (checker.ts) do
+ * nothing and lowering asks node by node. A server without a batch method
+ * (tsgo) answers it as unknown once, and the facade stops asking. */
+export const NODE_BATCH_QUERIES = true;
+
 /** The pinned checker's request surface over native objects. Every query
  * converges on the same snapshot/project registries, including batch and
  * lazy-object queries. No SDK object is constructed or consulted here. */
@@ -72,113 +112,205 @@ export class SemanticChecker {
   constructor(readonly project: SemanticProject) {}
 
   private type(method: string, query: SemanticQuery): SemanticType | undefined {
-    const data = this.project.request<TypeResponse | null>(method, query);
-    return data === null ? undefined : this.project.type(data);
+    return this.project.requestType(method, query);
   }
   private symbol(method: string, query: SemanticQuery): SemanticSymbol | undefined {
-    const data = this.project.request<SymbolResponse | null>(method, query);
-    return data === null ? undefined : this.project.symbol(data);
+    return this.project.requestSymbol(method, query);
   }
   private signature(method: string, query: SemanticQuery): SemanticSignature | undefined {
-    const data = this.project.request<SignatureResponse | null>(method, query);
-    return data === null ? undefined : this.project.signature(data);
+    return this.project.requestSignature(method, query);
   }
   private types(method: string, query: SemanticQuery): SemanticType[] {
-    const data = this.project.request<TypeResponse[] | null>(method, query);
-    return (data ?? []).map((item) => this.project.type(item));
+    return present(this.project.requestTypes(method, query), method);
   }
   private symbols(method: string, query: SemanticQuery): SemanticSymbol[] {
-    const data = this.project.request<SymbolResponse[] | null>(method, query);
-    return (data ?? []).map((item) => this.project.symbol(item));
+    return present(this.project.requestSymbols(method, query), method);
   }
   private optionalTypes(method: string, query: SemanticQuery): (SemanticType | undefined)[] {
-    const data = this.project.request<(TypeResponse | null)[]>(method, query);
-    return data.map((item) => item === null ? undefined : this.project.type(item));
+    return this.project.requestTypes(method, query);
   }
   private optionalSymbols(method: string, query: SemanticQuery): (SemanticSymbol | undefined)[] {
-    const data = this.project.request<(SymbolResponse | null)[]>(method, query);
-    return data.map((item) => item === null ? undefined : this.project.symbol(item));
+    return this.project.requestSymbols(method, query);
   }
 
   getTypeAtLocation(node: AstNode): SemanticType | undefined;
   getTypeAtLocation(nodes: readonly AstNode[]): (SemanticType | undefined)[];
-  getTypeAtLocation(input: AstNode | readonly AstNode[]): SemanticType | undefined | (SemanticType | undefined)[] {
-    if (Array.isArray(input)) return this.optionalTypes("getTypeAtLocations", { locations: (input as readonly AstNode[]).map((node) => node.id) });
+  getTypeAtLocation(
+    input: AstNode | readonly AstNode[],
+  ): SemanticType | undefined | (SemanticType | undefined)[] {
+    if (Array.isArray(input))
+      return this.optionalTypes("getTypeAtLocations", {
+        locations: (input as readonly AstNode[]).map((node) => node.id),
+      });
     return this.type("getTypeAtLocation", { location: (input as AstNode).id });
   }
   getSymbolAtLocation(node: AstNode): SemanticSymbol | undefined;
   getSymbolAtLocation(nodes: readonly AstNode[]): (SemanticSymbol | undefined)[];
-  getSymbolAtLocation(input: AstNode | readonly AstNode[]): SemanticSymbol | undefined | (SemanticSymbol | undefined)[] {
-    if (Array.isArray(input)) return this.optionalSymbols("getSymbolsAtLocations", { locations: (input as readonly AstNode[]).map((node) => node.id) });
+  getSymbolAtLocation(
+    input: AstNode | readonly AstNode[],
+  ): SemanticSymbol | undefined | (SemanticSymbol | undefined)[] {
+    if (Array.isArray(input))
+      return this.optionalSymbols("getSymbolsAtLocations", {
+        locations: (input as readonly AstNode[]).map((node) => node.id),
+      });
     return this.symbol("getSymbolAtLocation", { location: (input as AstNode).id });
   }
   getTypeAtPosition(file: SemanticDocument, position: number): SemanticType | undefined;
-  getTypeAtPosition(file: SemanticDocument, positions: readonly number[]): (SemanticType | undefined)[];
-  getTypeAtPosition(file: SemanticDocument, positions: number | readonly number[]): SemanticType | undefined | (SemanticType | undefined)[] {
+  getTypeAtPosition(
+    file: SemanticDocument,
+    positions: readonly number[],
+  ): (SemanticType | undefined)[];
+  getTypeAtPosition(
+    file: SemanticDocument,
+    positions: number | readonly number[],
+  ): SemanticType | undefined | (SemanticType | undefined)[] {
     return typeof positions === "number"
       ? this.type("getTypeAtPosition", { file, position: positions })
       : this.optionalTypes("getTypesAtPositions", { file, positions });
   }
   getSymbolAtPosition(file: SemanticDocument, position: number): SemanticSymbol | undefined;
-  getSymbolAtPosition(file: SemanticDocument, positions: readonly number[]): (SemanticSymbol | undefined)[];
-  getSymbolAtPosition(file: SemanticDocument, positions: number | readonly number[]): SemanticSymbol | undefined | (SemanticSymbol | undefined)[] {
+  getSymbolAtPosition(
+    file: SemanticDocument,
+    positions: readonly number[],
+  ): (SemanticSymbol | undefined)[];
+  getSymbolAtPosition(
+    file: SemanticDocument,
+    positions: number | readonly number[],
+  ): SemanticSymbol | undefined | (SemanticSymbol | undefined)[] {
     return typeof positions === "number"
       ? this.symbol("getSymbolAtPosition", { file, position: positions })
       : this.optionalSymbols("getSymbolsAtPositions", { file, positions });
   }
   getTypeOfSymbol(symbol: SemanticSymbol): SemanticType | undefined;
   getTypeOfSymbol(symbols: readonly SemanticSymbol[]): (SemanticType | undefined)[];
-  getTypeOfSymbol(input: SemanticSymbol | readonly SemanticSymbol[]): SemanticType | undefined | (SemanticType | undefined)[] {
-    if (Array.isArray(input)) return this.optionalTypes("getTypesOfSymbols", { symbols: (input as readonly SemanticSymbol[]).map((symbol) => symbol.id) });
+  getTypeOfSymbol(
+    input: SemanticSymbol | readonly SemanticSymbol[],
+  ): SemanticType | undefined | (SemanticType | undefined)[] {
+    if (Array.isArray(input))
+      return this.optionalTypes("getTypesOfSymbols", {
+        symbols: (input as readonly SemanticSymbol[]).map((symbol) => symbol.id),
+      });
     return this.type("getTypeOfSymbol", { symbol: (input as SemanticSymbol).id });
   }
 
   getDeclaredTypeOfSymbol(symbol: SemanticSymbol): SemanticType {
     const type = this.type("getDeclaredTypeOfSymbol", { symbol: symbol.id });
-    if (type === undefined) throw new Error(`getDeclaredTypeOfSymbol returned no type for symbol ${symbol.id}`);
+    if (type === undefined)
+      throw new Error(`getDeclaredTypeOfSymbol returned no type for symbol ${symbol.id}`);
     return type;
   }
   getTypeOfSymbolAtLocation(symbol: SemanticSymbol, node: AstNode): SemanticType {
     const type = this.type("getTypeOfSymbolAtLocation", { symbol: symbol.id, location: node.id });
-    if (type === undefined) throw new Error(`getTypeOfSymbolAtLocation returned no type for symbol ${symbol.id}`);
+    if (type === undefined)
+      throw new Error(`getTypeOfSymbolAtLocation returned no type for symbol ${symbol.id}`);
     return type;
   }
-  getContextualType(node: AstNode): SemanticType | undefined { return this.type("getContextualType", { location: node.id }); }
-  getTypeFromTypeNode(node: AstNode): SemanticType | undefined { return this.type("getTypeFromTypeNode", { location: node.id }); }
-  getShorthandAssignmentValueSymbol(node: AstNode): SemanticSymbol | undefined { return this.symbol("getShorthandAssignmentValueSymbol", { location: node.id }); }
-  getExportSpecifierLocalTargetSymbol(node: AstNode): SemanticSymbol | undefined { return this.symbol("getExportSpecifierLocalTargetSymbol", { location: node.id }); }
-  getResolvedSignature(node: AstNode): SemanticSignature | undefined { return this.signature("getResolvedSignature", { location: node.id }); }
-  getSignatureFromDeclaration(node: AstNode): SemanticSignature | undefined { return this.signature("getSignatureFromDeclaration", { location: node.id }); }
-  getReturnTypeOfSignature(signature: SemanticSignature): SemanticType | undefined { return this.type("getReturnTypeOfSignature", { signature: signature.id }); }
-  getRestTypeOfSignature(signature: SemanticSignature): SemanticType | undefined { return this.type("getRestTypeOfSignature", { signature: signature.id }); }
-  getParameterType(signature: SemanticSignature, index: number): SemanticType | undefined { return this.type("getParameterType", { signature: signature.id, index }); }
-  getBaseTypeOfLiteralType(type: SemanticType): SemanticType | undefined { return this.type("getBaseTypeOfLiteralType", { type: type.id }); }
-  getNonNullableType(type: SemanticType): SemanticType | undefined { return this.type("getNonNullableType", { type: type.id }); }
-  getWidenedType(type: SemanticType): SemanticType | undefined { return this.type("getWidenedType", { type: type.id }); }
-  getApparentType(type: SemanticType): SemanticType | undefined { return this.type("getApparentType", { type: type.id }); }
-  getConstraintOfTypeParameter(type: SemanticType): SemanticType | undefined { return this.type("getConstraintOfTypeParameter", { type: type.id }); }
-  getBaseConstraintOfType(type: SemanticType): SemanticType | undefined { return this.type("getBaseConstraintOfType", { type: type.id }); }
-  getBaseTypes(type: SemanticType): SemanticType[] { return this.types("getBaseTypes", { type: type.id }); }
-  getTypeArguments(type: SemanticType): SemanticType[] { return this.types("getTypeArguments", { type: type.id }); }
-  getPropertiesOfType(type: SemanticType): SemanticSymbol[] { return this.symbols("getPropertiesOfType", { type: type.id }); }
-  getPropertyOfType(type: SemanticType, name: string): SemanticSymbol | undefined { return this.symbol("getPropertyOfType", { type: type.id, name }); }
-  getExportsOfModule(symbol: SemanticSymbol): SemanticSymbol[] { return this.symbols("getExportsOfModule", { symbol: symbol.id }); }
-  getMemberInModuleExports(symbol: SemanticSymbol, name: string): SemanticSymbol | undefined { return this.symbol("getMemberInModuleExports", { symbol: symbol.id, name }); }
-  getImmediateAliasedSymbol(symbol: SemanticSymbol): SemanticSymbol | undefined { return this.symbol("getImmediateAliasedSymbol", { symbol: symbol.id }); }
+  getContextualType(node: AstNode): SemanticType | undefined {
+    return this.type("getContextualType", { location: node.id });
+  }
+  /** getContextualType for each node. */
+  getContextualTypes(nodes: readonly AstNode[]): (SemanticType | undefined)[] {
+    return this.optionalTypes("getContextualTypes", { locations: nodes.map((node) => node.id) });
+  }
+  getTypeFromTypeNode(node: AstNode): SemanticType | undefined {
+    return this.type("getTypeFromTypeNode", { location: node.id });
+  }
+  getShorthandAssignmentValueSymbol(node: AstNode): SemanticSymbol | undefined {
+    return this.symbol("getShorthandAssignmentValueSymbol", { location: node.id });
+  }
+  getExportSpecifierLocalTargetSymbol(node: AstNode): SemanticSymbol | undefined {
+    return this.symbol("getExportSpecifierLocalTargetSymbol", { location: node.id });
+  }
+  getResolvedSignature(node: AstNode): SemanticSignature | undefined {
+    return this.signature("getResolvedSignature", { location: node.id });
+  }
+  /** getResolvedSignature for each node. */
+  getResolvedSignatures(nodes: readonly AstNode[]): (SemanticSignature | undefined)[] {
+    return this.project.requestSignatures("getResolvedSignatures", {
+      locations: nodes.map((node) => node.id),
+    });
+  }
+  getSignatureFromDeclaration(node: AstNode): SemanticSignature | undefined {
+    return this.signature("getSignatureFromDeclaration", { location: node.id });
+  }
+  getReturnTypeOfSignature(signature: SemanticSignature): SemanticType | undefined {
+    return this.type("getReturnTypeOfSignature", { signature: signature.id });
+  }
+  getRestTypeOfSignature(signature: SemanticSignature): SemanticType | undefined {
+    return this.type("getRestTypeOfSignature", { signature: signature.id });
+  }
+  getParameterType(signature: SemanticSignature, index: number): SemanticType | undefined {
+    return this.type("getParameterType", { signature: signature.id, index });
+  }
+  getBaseTypeOfLiteralType(type: SemanticType): SemanticType | undefined {
+    return this.type("getBaseTypeOfLiteralType", { type: type.id });
+  }
+  getNonNullableType(type: SemanticType): SemanticType | undefined {
+    return this.type("getNonNullableType", { type: type.id });
+  }
+  getWidenedType(type: SemanticType): SemanticType | undefined {
+    return this.type("getWidenedType", { type: type.id });
+  }
+  getApparentType(type: SemanticType): SemanticType | undefined {
+    return this.type("getApparentType", { type: type.id });
+  }
+  getConstraintOfTypeParameter(type: SemanticType): SemanticType | undefined {
+    return this.type("getConstraintOfTypeParameter", { type: type.id });
+  }
+  getBaseConstraintOfType(type: SemanticType): SemanticType | undefined {
+    return this.type("getBaseConstraintOfType", { type: type.id });
+  }
+  getBaseTypes(type: SemanticType): SemanticType[] {
+    return this.types("getBaseTypes", { type: type.id });
+  }
+  getTypeArguments(type: SemanticType): SemanticType[] {
+    return this.types("getTypeArguments", { type: type.id });
+  }
+  getPropertiesOfType(type: SemanticType): SemanticSymbol[] {
+    return this.symbols("getPropertiesOfType", { type: type.id });
+  }
+  getPropertyOfType(type: SemanticType, name: string): SemanticSymbol | undefined {
+    return this.symbol("getPropertyOfType", { type: type.id, name });
+  }
+  getExportsOfModule(symbol: SemanticSymbol): SemanticSymbol[] {
+    return this.symbols("getExportsOfModule", { symbol: symbol.id });
+  }
+  getMemberInModuleExports(symbol: SemanticSymbol, name: string): SemanticSymbol | undefined {
+    return this.symbol("getMemberInModuleExports", { symbol: symbol.id, name });
+  }
+  getImmediateAliasedSymbol(symbol: SemanticSymbol): SemanticSymbol | undefined {
+    return this.symbol("getImmediateAliasedSymbol", { symbol: symbol.id });
+  }
 
   getAliasedSymbol(symbol: SemanticSymbol): SemanticSymbol {
     const result = this.symbol("getAliasedSymbol", { symbol: symbol.id });
-    if (result === undefined) throw new Error(`getAliasedSymbol returned no symbol for symbol ${symbol.id}`);
+    if (result === undefined)
+      throw new Error(`getAliasedSymbol returned no symbol for symbol ${symbol.id}`);
     return result;
   }
-  resolveName(name: string, meaning: number, location?: AstNode | { document: SemanticDocument; position: number }, excludeGlobals?: boolean): SemanticSymbol | undefined {
+  resolveName(
+    name: string,
+    meaning: number,
+    location?: AstNode | { document: SemanticDocument; position: number },
+    excludeGlobals?: boolean,
+  ): SemanticSymbol | undefined {
     const node = location instanceof AstNode ? location : undefined;
-    const position = location !== undefined && !(location instanceof AstNode) ? location : undefined;
-    return this.symbol("resolveName", { name, meaning, location: node?.id, file: position?.document, position: position?.position, excludeGlobals });
+    const position =
+      location !== undefined && !(location instanceof AstNode) ? location : undefined;
+    return this.symbol("resolveName", {
+      name,
+      meaning,
+      location: node?.id,
+      file: position?.document,
+      position: position?.position,
+      excludeGlobals,
+    });
   }
   getResolvedSymbol(node: AstNode): SemanticSymbol | undefined {
     const text = node.text;
-    return text ? this.resolveName(text, SemanticSymbolFlags.Value | SemanticSymbolFlags.ExportValue, node) : undefined;
+    return text
+      ? this.resolveName(text, SemanticSymbolFlags.Value | SemanticSymbolFlags.ExportValue, node)
+      : undefined;
   }
 
   private intrinsic(method: string): SemanticType {
@@ -186,103 +318,215 @@ export class SemanticChecker {
     if (result === undefined) throw new Error(`${method} returned no intrinsic type`);
     return result;
   }
-  getAnyType(): SemanticType { return this.intrinsic("getAnyType"); }
-  getStringType(): SemanticType { return this.intrinsic("getStringType"); }
-  getNumberType(): SemanticType { return this.intrinsic("getNumberType"); }
-  getBooleanType(): SemanticType { return this.intrinsic("getBooleanType"); }
-  getVoidType(): SemanticType { return this.intrinsic("getVoidType"); }
-  getUndefinedType(): SemanticType { return this.intrinsic("getUndefinedType"); }
-  getNullType(): SemanticType { return this.intrinsic("getNullType"); }
-  getNeverType(): SemanticType { return this.intrinsic("getNeverType"); }
-  getUnknownType(): SemanticType { return this.intrinsic("getUnknownType"); }
-  getBigIntType(): SemanticType { return this.intrinsic("getBigIntType"); }
-  getESSymbolType(): SemanticType { return this.intrinsic("getESSymbolType"); }
+  getAnyType(): SemanticType {
+    return this.intrinsic("getAnyType");
+  }
+  getStringType(): SemanticType {
+    return this.intrinsic("getStringType");
+  }
+  getNumberType(): SemanticType {
+    return this.intrinsic("getNumberType");
+  }
+  getBooleanType(): SemanticType {
+    return this.intrinsic("getBooleanType");
+  }
+  getVoidType(): SemanticType {
+    return this.intrinsic("getVoidType");
+  }
+  getUndefinedType(): SemanticType {
+    return this.intrinsic("getUndefinedType");
+  }
+  getNullType(): SemanticType {
+    return this.intrinsic("getNullType");
+  }
+  getNeverType(): SemanticType {
+    return this.intrinsic("getNeverType");
+  }
+  getUnknownType(): SemanticType {
+    return this.intrinsic("getUnknownType");
+  }
+  getBigIntType(): SemanticType {
+    return this.intrinsic("getBigIntType");
+  }
+  getESSymbolType(): SemanticType {
+    return this.intrinsic("getESSymbolType");
+  }
 
   typeToString(type: SemanticType, enclosingDeclaration?: AstNode, flags?: number): string {
-    return this.project.request<string>("typeToString", { type: type.id, location: enclosingDeclaration?.id, flags });
+    return this.project.request<string>("typeToString", {
+      type: type.id,
+      location: enclosingDeclaration?.id,
+      flags,
+    });
   }
-  isContextSensitive(node: AstNode): boolean { return this.project.request<boolean>("isContextSensitive", { location: node.id }); }
-  isArrayType(type: SemanticType): boolean { return this.project.request<boolean>("isArrayType", { type: type.id }); }
-  isArrayLikeType(type: SemanticType): boolean { return this.project.request<boolean>("isArrayLikeType", { type: type.id }); }
-  isTupleType(type: SemanticType): boolean { return this.project.request<boolean>("isTupleType", { type: type.id }); }
+  isContextSensitive(node: AstNode): boolean {
+    return this.project.request<boolean>("isContextSensitive", { location: node.id });
+  }
+  isArrayType(type: SemanticType): boolean {
+    return this.project.request<boolean>("isArrayType", { type: type.id });
+  }
+  isArrayLikeType(type: SemanticType): boolean {
+    return this.project.request<boolean>("isArrayLikeType", { type: type.id });
+  }
+  isTupleType(type: SemanticType): boolean {
+    return this.project.request<boolean>("isTupleType", { type: type.id });
+  }
   isTypeAssignableTo(source: SemanticType, target: SemanticType): boolean {
-    return this.project.request<boolean>("isTypeAssignableTo", { source: source.id, target: target.id });
+    return this.project.request<boolean>("isTypeAssignableTo", {
+      source: source.id,
+      target: target.id,
+    });
   }
   getConstantValue(node: AstNode): string | number | undefined {
-    return this.project.request<string | number | null>("getConstantValue", { location: node.id }) ?? undefined;
+    return (
+      this.project.request<string | number | null>("getConstantValue", { location: node.id }) ??
+      undefined
+    );
   }
   getSignaturesOfType(type: SemanticType, kind: number): SemanticSignature[] {
-    const data = this.project.request<SignatureResponse[]>("getSignaturesOfType", { type: type.id, kind });
-    return data.map((item) => this.project.signature(item));
+    return present(
+      this.project.requestSignatures("getSignaturesOfType", { type: type.id, kind }),
+      "getSignaturesOfType",
+    );
   }
   getTypePredicateOfSignature(signature: SemanticSignature): SemanticTypePredicate | undefined {
-    const data = this.project.request<TypePredicateResponse | null>("getTypePredicateOfSignature", { signature: signature.id });
-    return data === null ? undefined : {
-      kind: data.kind, parameterIndex: data.parameterIndex, parameterName: data.parameterName,
-      type: data.type === undefined ? undefined : this.project.type(data.type),
-    };
+    const data = this.project.request<TypePredicateResponse | null>("getTypePredicateOfSignature", {
+      signature: signature.id,
+    });
+    return data === null
+      ? undefined
+      : {
+          kind: data.kind,
+          parameterIndex: data.parameterIndex,
+          parameterName: data.parameterName,
+          type: data.type === undefined ? undefined : this.project.type(data.type),
+        };
   }
   getIndexInfosOfType(type: SemanticType): SemanticIndexInfo[] {
-    const data = this.project.request<IndexInfoResponse[] | null>("getIndexInfosOfType", { type: type.id });
-    return (data ?? []).map((item) => ({
-      keyType: this.project.type(item.keyType), valueType: this.project.type(item.valueType),
-      isReadonly: item.isReadonly ?? false,
-      declaration: item.declaration === undefined ? undefined : new SemanticNodeHandle(item.declaration, this.project),
-    }));
+    const data = this.project.request<IndexInfoResponse[] | null>("getIndexInfosOfType", {
+      type: type.id,
+    });
+    return (data ?? []).map(
+      (item) =>
+        new SemanticIndexInfo(
+          this.project.type(item.keyType),
+          this.project.type(item.valueType),
+          item.isReadonly ?? false,
+          item.declaration === undefined
+            ? undefined
+            : new SemanticNodeHandle(item.declaration, this.project),
+        ),
+    );
   }
   private getWellKnownSymbols(): WellKnownSymbols {
     this.project.ensureActive();
-    if (this.wellKnown === undefined) this.wellKnown = this.project.request<WellKnownSymbols>("getWellKnownSymbols");
+    if (this.wellKnown === undefined)
+      this.wellKnown = this.project.request<WellKnownSymbols>("getWellKnownSymbols");
     return this.wellKnown;
   }
-  isUnknownSymbol(symbol: SemanticSymbol): boolean { return symbol.id === this.getWellKnownSymbols().unknown; }
-  isUndefinedSymbol(symbol: SemanticSymbol): boolean { return symbol.id === this.getWellKnownSymbols().undefined; }
-  isArgumentsSymbol(symbol: SemanticSymbol): boolean { return symbol.id === this.getWellKnownSymbols().arguments; }
+  isUnknownSymbol(symbol: SemanticSymbol): boolean {
+    return symbol.id === this.getWellKnownSymbols().unknown;
+  }
+  isUndefinedSymbol(symbol: SemanticSymbol): boolean {
+    return symbol.id === this.getWellKnownSymbols().undefined;
+  }
+  isArgumentsSymbol(symbol: SemanticSymbol): boolean {
+    return symbol.id === this.getWellKnownSymbols().arguments;
+  }
 
-  getReferencesToSymbolInFile(file: SemanticDocument, symbol: SemanticSymbol): SemanticNodeHandle[] {
-    const data = this.project.request<string[] | null>("getReferencesToSymbolInFile", { file, symbol: symbol.id });
+  getReferencesToSymbolInFile(
+    file: SemanticDocument,
+    symbol: SemanticSymbol,
+  ): SemanticNodeHandle[] {
+    const data = this.project.request<string[] | null>("getReferencesToSymbolInFile", {
+      file,
+      symbol: symbol.id,
+    });
     return (data ?? []).map((handle) => new SemanticNodeHandle(handle, this.project));
   }
   getReferencedSymbolsForNode(node: AstNode, position: number): SemanticReferencedSymbol[] {
-    const data = this.project.request<{ definition: string; symbol?: SymbolResponse; references?: string[] }[] | null>("getReferencedSymbolsForNode", { node: node.id, position });
+    const data = this.project.request<
+      { definition: string; symbol?: SymbolResponse; references?: string[] }[] | null
+    >("getReferencedSymbolsForNode", { node: node.id, position });
     return (data ?? []).map((item) => ({
       definition: new SemanticNodeHandle(item.definition, this.project),
       symbol: item.symbol === undefined ? undefined : this.project.symbol(item.symbol),
-      references: (item.references ?? []).map((handle) => new SemanticNodeHandle(handle, this.project)),
+      references: (item.references ?? []).map(
+        (handle) => new SemanticNodeHandle(handle, this.project),
+      ),
     }));
   }
   getSignatureUsage(node: AstNode): SemanticSignatureUsage[] {
-    const data = this.project.request<{ name: string; call?: string }[] | null>("getSignatureUsages", { signatureDecl: node.id });
+    const data = this.project.request<{ name: string; call?: string }[] | null>(
+      "getSignatureUsages",
+      { signatureDecl: node.id },
+    );
     return (data ?? []).map((item) => ({
       name: new SemanticNodeHandle(item.name, this.project),
       call: item.call === undefined ? undefined : new SemanticNodeHandle(item.call, this.project),
     }));
   }
   getJsDocTagsOfSymbol(symbol: SemanticSymbol): SemanticJsDocTag[] {
-    return this.project.request<SemanticJsDocTag[] | null>("getJsDocTags", { symbol: symbol.id }) ?? [];
+    return (
+      this.project.request<SemanticJsDocTag[] | null>("getJsDocTags", { symbol: symbol.id }) ?? []
+    );
   }
   getDocumentationCommentOfSymbol(symbol: SemanticSymbol): string {
     return this.project.request<string>("getDocumentationComment", { symbol: symbol.id });
   }
-  getCompletionsAtPosition(file: SemanticDocument, position: number, options?: SemanticCompletionOptions): { isIncomplete: boolean; entries: SemanticCompletion[] } | undefined {
-    const data = this.project.request<CompletionResponse | null>("getCompletionsAtPosition", { file, position, triggerCharacter: options?.triggerCharacter, includeSymbol: options?.includeSymbol });
+  getCompletionsAtPosition(
+    file: SemanticDocument,
+    position: number,
+    options?: SemanticCompletionOptions,
+  ): { isIncomplete: boolean; entries: SemanticCompletion[] } | undefined {
+    const data = this.project.request<CompletionResponse | null>("getCompletionsAtPosition", {
+      file,
+      position,
+      triggerCharacter: options?.triggerCharacter,
+      includeSymbol: options?.includeSymbol,
+    });
     if (data === null) return undefined;
     return {
       isIncomplete: data.isIncomplete,
       entries: data.entries.map((item) => ({
-        name: item.name, kind: item.kind, sortText: item.sortText, insertText: item.insertText,
-        filterText: item.filterText, detail: item.detail, labelDetails: item.labelDetails,
+        name: item.name,
+        kind: item.kind,
+        sortText: item.sortText,
+        insertText: item.insertText,
+        filterText: item.filterText,
+        detail: item.detail,
+        labelDetails: item.labelDetails,
         symbol: item.symbol === undefined ? undefined : this.project.symbol(item.symbol),
       })),
     };
   }
-  typeToTypeNode(type: SemanticType, enclosingDeclaration?: AstNode, flags?: number): AstNode | undefined {
-    const bytes = this.project.requestBinary("typeToTypeNode", { type: type.id, location: enclosingDeclaration?.id, flags });
+  typeToTypeNode(
+    type: SemanticType,
+    enclosingDeclaration?: AstNode,
+    flags?: number,
+  ): AstNode | undefined {
+    const bytes = this.project.requestBinary("typeToTypeNode", {
+      type: type.id,
+      location: enclosingDeclaration?.id,
+      flags,
+    });
     return bytes.length === 0 ? undefined : new AstFile(bytes).root;
   }
-  signatureToSignatureDeclaration(signature: SemanticSignature, kind: number, enclosingDeclaration?: AstNode, flags?: number): AstNode | undefined {
-    const bytes = this.project.requestBinary("signatureToSignatureDeclaration", { signature: signature.id, kind, location: enclosingDeclaration?.id, flags });
+  signatureToSignatureDeclaration(
+    signature: SemanticSignature,
+    kind: number,
+    enclosingDeclaration?: AstNode,
+    flags?: number,
+  ): AstNode | undefined {
+    const bytes = this.project.requestBinary("signatureToSignatureDeclaration", {
+      signature: signature.id,
+      kind,
+      location: enclosingDeclaration?.id,
+      flags,
+    });
     return bytes.length === 0 ? undefined : new AstFile(bytes).root;
   }
-  dispose(): void { this.project.dispose(); }
+  dispose(): void {
+    this.project.dispose();
+  }
 }

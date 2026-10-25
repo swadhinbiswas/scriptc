@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5236-inline-union-unchecked-reads.ts"
+ ],
+ "diags": []
+}

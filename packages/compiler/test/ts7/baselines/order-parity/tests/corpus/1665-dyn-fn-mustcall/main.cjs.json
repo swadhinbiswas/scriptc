@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1665-dyn-fn-mustcall/common.cjs",
+  "<repo>/tests/corpus/1665-dyn-fn-mustcall/main.cjs"
+ ],
+ "diags": []
+}

@@ -1,0 +1,472 @@
+---
+title: "Contract Types"
+---
+
+Contract types let you state a promise about your code, such as "this function never throws" or "this value is always a 32-bit integer", that scriptc checks at build time and then uses to generate faster code or use less memory. Reach for them in performance-sensitive code once it already compiles.
+
+Contracts are type aliases imported from `@scriptc/types` with `import type`. TypeScript erases them, so Node.js never loads the package and runs the program as if the annotations weren't there. scriptc either proves each contract or fails the build with a diagnostic that explains why it doesn't hold. Contracts don't change what a program computes; they only tell scriptc what it can rely on.
+
+<table>
+  <thead>
+    <tr>
+      <th>Contract</th>
+      <th>Promise</th>
+      <th>What scriptc does with it</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>NoThrow&lt;T&gt;</code></td>
+      <td>The function never throws.</td>
+      <td>Callers need no exception check after the call.</td>
+    </tr>
+    <tr>
+      <td><code>Int32</code></td>
+      <td>Every value stored is a signed 32-bit integer by construction.</td>
+      <td>The variable, field, parameter or result is stored as a 32-bit integer.</td>
+    </tr>
+    <tr>
+      <td><code>Int32[]</code></td>
+      <td>Every element stored into the array, through any reference, is a signed 32-bit integer by construction.</td>
+      <td>Integer arithmetic over its elements runs in 32-bit integer operations.</td>
+    </tr>
+    <tr>
+      <td><code>Immutable&lt;T&gt;</code></td>
+      <td>No code writes to the value, through any reference.</td>
+      <td>A module constant built from literals becomes immortal data: never reference counted, never traced by the collector.</td>
+    </tr>
+    <tr>
+      <td><code>Acyclic</code></td>
+      <td>No chain of references leads from an object of the class or type back to itself.</td>
+      <td>Its objects carry no cycle-collector header and are freed by reference counting alone.</td>
+    </tr>
+    <tr>
+      <td><code>ProgramLifetime</code></td>
+      <td>Instances of the class are kept until the program exits.</td>
+      <td>Instances are immortal from construction: no reference counting, no cycle collection, never freed.</td>
+    </tr>
+  </tbody>
+</table>
+
+Add `@scriptc/types` to your project's development dependencies. It contains only type declarations.
+
+## Example
+
+```ts:main.ts
+import type { Immutable, Int32, NoThrow } from "@scriptc/types";
+
+const KEYWORDS: Immutable<Map<string, number>> = new Map([
+  ["const", 1],
+  ["let", 2],
+  ["function", 3],
+]);
+
+class Token {
+  pos: Int32;
+  end: Int32;
+  kind: number;
+  constructor(pos: Int32, end: Int32, kind: number) {
+    this.pos = pos;
+    this.end = end;
+    this.kind = kind;
+  }
+}
+
+function isLetter(ch: number): NoThrow<boolean> {
+  return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90);
+}
+
+function scan(text: string): Token[] {
+  const tokens: Token[] = [];
+  let pos: Int32 = 0;
+  while (pos < text.length) {
+    if (!isLetter(text.charCodeAt(pos))) {
+      pos = (pos + 1) | 0;
+      continue;
+    }
+    let end: Int32 = pos;
+    while (end < text.length && isLetter(text.charCodeAt(end))) end = (end + 1) | 0;
+    tokens.push(new Token(pos, end, KEYWORDS.get(text.slice(pos, end)) ?? 0));
+    pos = end;
+  }
+  return tokens;
+}
+
+for (const t of scan("const answer = 42; function f() {}")) console.log(t.pos, t.end, t.kind);
+```
+
+Node.js 24 runs the program directly:
+
+```console
+$ node main.ts
+0 5 1
+6 12 0
+19 27 3
+28 29 0
+```
+
+The scriptc executable prints the same output. `KEYWORDS` is immortal, `Token.pos`, `Token.end` and the scanner's positions are 32-bit integers, and the calls to `isLetter` carry no exception checks:
+
+```console
+$ scriptc build main.ts -o scan >/dev/null
+$ ./scan
+0 5 1
+6 12 0
+19 27 3
+28 29 0
+```
+
+## Where contracts apply
+
+scriptc recognizes a contract where it is written as the annotation of a declaration, and only when the name is imported from `@scriptc/types` (a named import, possibly renamed, or a namespace import such as `sc.Int32`). TypeScript does not keep alias names in inferred types, so a contract never spreads by inference: write it where the value is declared.
+
+<dl>
+  <dt><code>NoThrow&lt;T&gt;</code></dt>
+  <dd>The written return type of a function, method or arrow function. <code>NoThrow&lt;Int32&gt;</code> and <code>NoThrow&lt;Immutable&lt;T&gt;&gt;</code> combine the result contracts.</dd>
+  <dt><code>Int32</code></dt>
+  <dd>Parameters, variables, class instance fields and function results whose type is a plain <code>number</code>.</dd>
+  <dt><code>Int32[]</code></dt>
+  <dd>Parameters, variables, class instance fields and function results whose type is a plain <code>number[]</code>, written <code>Int32[]</code>, <code>readonly Int32[]</code>, <code>Array&lt;Int32&gt;</code> or <code>ReadonlyArray&lt;Int32&gt;</code>.</dd>
+  <dt><code>Immutable&lt;T&gt;</code></dt>
+  <dd>Parameters, variables, class instance fields and function results.</dd>
+  <dt><code>Acyclic</code></dt>
+  <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;...&gt;</code> over an object type).</dd>
+  <dt><code>ProgramLifetime</code></dt>
+  <dd>The <code>implements</code> clause of a class declaration: <code>class Node implements ProgramLifetime</code>.</dd>
+</dl>
+
+A contract anywhere else (a type alias, an interface member, a nested array or other type argument such as `Int32[][]` or `Map<string, Int32[]>`, a function type) would promise something scriptc does not check, so the build reports it with SC7006.
+
+## NoThrow
+
+A `NoThrow` function must not contain a path to a throwing operation: a `throw`, a call to a function that may throw, a call through a function value that may hold such a function, an operation that throws in Node.js (such as reading a property of `undefined`), or recursion, whose stack guard can throw `RangeError`. scriptc already computes this for every function to omit exception checks; the contract turns the result into a guarantee and reports the first throwing path when it does not hold.
+
+A `try` statement discharges what its handlers take. A throwing call inside a `try` with a `catch`, or inside a `try` whose `finally` always ends with `return`, `break` or `continue` (which discards the pending exception), cannot leave the function:
+
+```ts:digits.ts
+import type { NoThrow } from "@scriptc/types";
+
+function parseDigit(ch: number): number {
+  if (ch < 48 || ch > 57) throw new RangeError("not a digit");
+  return ch - 48;
+}
+
+function digitOr(text: string, i: number, fallback: number): NoThrow<number> {
+  try {
+    return parseDigit(text.charCodeAt(i));
+  } catch {
+    return fallback;
+  }
+}
+
+console.log(digitOr("7", 0, -1), digitOr("x", 0, -1));
+```
+
+```console
+$ node digits.ts
+7 -1
+$ scriptc build digits.ts -o digits >/dev/null
+$ ./digits
+7 -1
+```
+
+The `catch` and `finally` bodies are checked like any other code: a rethrow, a throwing call in the `catch`, or a `try`/`finally` without `catch` whose `finally` can complete normally (and so re-raises the exception) still fails the contract. A recursive function cannot be `NoThrow`, because its stack guard throws on entry, outside any handler. In programs that use worker threads, `try` does not discharge the contract, since a termination request unwinds through `catch`. `async` functions and generators cannot be `NoThrow`.
+
+## Int32
+
+Each value stored into an `Int32` slot (initializers, assignments, compound assignments, `++` and `--`, arguments and returns) must be an int32 in Node.js semantics, so storing it as a 32-bit integer cannot change it:
+
+- an integer literal in range;
+- the result of `|`, `&`, `^`, `~`, `<<`, `>>` or `Math.imul`;
+- another `Int32` value;
+- arithmetic whose range scriptc can bound, such as `i + 1` under a loop condition `i < text.length`.
+
+`x >>> 0` is a uint32 and is not accepted. Anything else needs an explicit `| 0`, which makes Node.js compute the same 32-bit value. Reads keep JavaScript semantics: `a + b` of two `Int32` values is an ordinary number that may exceed the int32 range.
+
+scriptc refuses an `Int32` slot whose writes it cannot all see (SC7003): a parameter of a function used as a value, or a field of a class whose instances are stored in `any` or `unknown` values.
+
+## Int32 arrays
+
+`Int32[]` promises that every element stored into the array is an int32, so an element read that finds a value reads an int32. Integer kernels over such arrays, such as sums, hashes and prefix sums written with `| 0` or `Math.imul`, then compute in 32-bit integer operations instead of converting every element and intermediate result between doubles and integers:
+
+```ts:checksum.ts
+import type { Int32 } from "@scriptc/types";
+
+function checksum(data: Int32[]): number {
+  let h = 17;
+  for (let i = 0; i < data.length; i++) h = (Math.imul(h, 31) + data[i]) | 0;
+  return h;
+}
+
+const samples: Int32[] = [];
+for (let i = 0; i < 1000; i++) samples.push((i * 7919) & 0xffff);
+console.log(checksum(samples));
+samples[1200] = -1;
+console.log(samples.length, samples[1100], checksum(samples));
+```
+
+```console
+$ node checksum.ts
+-220195363
+1201 undefined -1
+$ scriptc build checksum.ts -o checksum >/dev/null
+$ ./checksum
+-220195363
+1201 undefined -1
+```
+
+The contract constrains the values stored, not the array's shape. Holes, present `undefined` and indices past the end read as `undefined`, and as `NaN` in arithmetic, exactly as in Node.js; writing past the end or changing `length` behaves as usual. The elements stay ordinary numbers, so `a[i] + a[j]` can exceed the int32 range.
+
+The promise belongs to the array, not to one variable, so scriptc checks every store into any array that can reach an `Int32[]` slot, through any reference and wherever it happens, including before the array reaches the slot: `a[i] = v`, `push`, `unshift`, `fill`, `with`, `splice` items, array literal elements, and elements copied in by spreads and `concat`. Each stored value must be an int32 in the same sense as for `Int32`, and an element read from another `Int32[]` array counts as one. Arrays flow through parameters, results, variables, class fields, object properties, `Map` values, nested arrays and captured bindings; reads through any of them are faster when only checked arrays can reach them, so the annotation is needed only where the program declares the array:
+
+```ts:scale.ts
+import type { Int32 } from "@scriptc/types";
+
+function scale(values: number[], factor: number): void {
+  for (let i = 0; i < values.length; i++) values[i] = values[i] * factor;
+}
+
+const counts: Int32[] = [3, 5, 8];
+scale(counts, 1.5);
+console.log(counts);
+```
+
+```console
+$ scriptc build scale.ts
+/tmp/app/scale.ts:4:55 - error SC7002: the element stored into 'values' is not provably an int32: 'values[i] * factor' (the array can reach 'counts', declared Int32[])
+
+  3 | function scale(values: number[], factor: number): void {
+  4 |   for (let i = 0; i < values.length; i++) values[i] = values[i] * factor;
+    |                                                       ^~~~~~~~~~~~~~~~~~
+  5 | }
+
+  hint: make the int32 conversion explicit, for example '(values[i] * factor) | 0', so Node stores the same value
+
+1 error.
+```
+
+A copy such as `slice()` or a spread is checked as if it were the same array as its source. The results of a callback are followed only when scriptc copies it into the loop that runs the array method: a callback written at a `map` or `filter` call whose captured variables are not reassigned, such as `xs.map((x) => (x * 2) | 0)`. Other callback results are not followed, so for example an array built by `Array.from` with a mapping function cannot be `Int32[]`; build it with a loop that stores `value | 0`. scriptc refuses an `Int32[]` slot whose array can come from code it cannot see, such as `JSON.parse`, dynamic values or the callers of a function used as a value, and an array that can reach one and escapes to such code, such as a call through a function value (SC7003).
+
+## Immutable
+
+`Immutable<T>` is a deep read-only view, so TypeScript already rejects direct writes such as `KEYWORDS.set(...)`. scriptc also checks the writes TypeScript cannot see:
+
+- a method that writes `this`, called on the value;
+- a function that writes a parameter, given the value;
+- a cast such as `value as number[]`, an `any` alias, `Object.assign`, or index-signature writes;
+- a value stored into an `Immutable` slot that another reference can still change.
+
+A value stored into an `Immutable` slot must be fresh: a literal, a `new` expression whose constructor keeps `this` to itself, or a function that returns what it builds. Values that are stored in `any` or `unknown`, or passed to functions scriptc cannot see, are refused.
+
+## Acyclic
+
+scriptc frees objects by reference counting and finds unreachable reference cycles with a cycle collector. Objects of a type that can never lie on a cycle need neither the collector's object header nor its bookkeeping. scriptc already proves this for many types; `Acyclic` turns the proof into a guarantee and shows the cycle when it does not hold.
+
+A reference can close a cycle when it is stored after its object was constructed (a later write can point an older object at a newer one), when it sits in an array, `Map` or `Set` (whose contents change), or when a field holds a function, a promise or an `any` or `unknown` value (which can reference anything). Scalar fields never matter. A subclass shares its base class's object layout, so a class hierarchy is acyclic only as a whole.
+
+```ts:tree.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Tree implements Acyclic {
+  readonly left: Tree | null;
+  readonly right: Tree | null;
+  constructor(left: Tree | null, right: Tree | null) {
+    this.left = left;
+    this.right = right;
+  }
+  count(): number {
+    return 1 + (this.left?.count() ?? 0) + (this.right?.count() ?? 0);
+  }
+}
+
+function build(depth: number): Tree {
+  return depth === 0 ? new Tree(null, null) : new Tree(build(depth - 1), build(depth - 1));
+}
+
+console.log(build(20).count());
+```
+
+```console
+$ node tree.ts
+2097151
+$ scriptc build tree.ts -o tree >/dev/null
+$ ./tree
+2097151
+```
+
+When a cycle can form, the diagnostic shows its path:
+
+```ts:graph.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Graph implements Acyclic {
+  readonly nodes: GraphNode[] = [];
+}
+
+class GraphNode {
+  readonly graph: Graph;
+  constructor(graph: Graph) {
+    this.graph = graph;
+  }
+}
+
+const graph = new Graph();
+graph.nodes.push(new GraphNode(graph));
+console.log(graph.nodes.length);
+```
+
+```console
+$ scriptc build graph.ts
+/tmp/app/graph.ts:3:24 - error SC7007: 'Graph' is declared Acyclic but can lie on a reference cycle: Graph.nodes → GraphNode.graph → Graph (Graph.nodes is an array, whose contents can change)
+
+  2 | 
+  3 | class Graph implements Acyclic {
+    |                        ^~~~~~~
+  4 |   readonly nodes: GraphNode[] = [];
+
+  hint: an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic
+
+1 error.
+```
+
+## ProgramLifetime
+
+`ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are never freed, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed. On Linux, the instances a worker thread creates are returned with the rest of its memory after it exits, unless the worker shared objects with other threads (see [cost](/docs/threads#cost)).
+
+```ts:tree.ts
+import type { ProgramLifetime } from "@scriptc/types";
+
+abstract class SyntaxNode implements ProgramLifetime {
+  parent: SyntaxNode | undefined = undefined;
+}
+
+class Identifier extends SyntaxNode {
+  readonly text: string;
+  constructor(text: string) {
+    super();
+    this.text = text;
+  }
+}
+```
+
+On Linux, except in builds with sanitizers, the instances also take less memory. An executable keeps them in one address range below 32 GiB that it reserves at startup (only the pages in use take memory), and a field typed `C`, `C | undefined` or `C | null`, where `C` is a program-lifetime class, stores the instance's address in 4 bytes instead of 8, as does each element of an array of such a type and each value of a `Map` with `string` keys and such a value type. In the example, `parent` takes 4 bytes.
+
+scriptc checks that the promise cannot change what the program computes (SC7008):
+
+- the class is the root of its hierarchy, so every value of any class type in the hierarchy is program-lifetime; built-in bases such as `Error`, `EventEmitter` and streams are refused because they hold runtime state that is released with the object;
+- the build is an executable: a library's host decides when the objects it receives are released.
+
+A class can be both `ProgramLifetime` and `Acyclic`. `Acyclic` is still checked against the references the program writes, so a chain of references that passes through a program-lifetime instance and leads back is still a cycle (SC7007).
+
+Instances can be published to other threads with `@scriptc/threads` like other class instances: `publish()` makes them immutable and shares them by reference, writes to a published instance throw the same `TypeError` as under Node.js, and instances that were not published stay writable and are cloned by `postMessage` and `workerData`.
+
+Static code has no `WeakRef`, a `FinalizationRegistry` never runs its cleanup callbacks, and a `WeakMap` or `WeakSet` entry whose key is never freed is never observable as removed, so nothing else can tell the difference.
+
+### Lifetime regions
+
+A long-running program, such as a compiler in watch mode, can free program-lifetime instances one generation at a time with `LifetimeRegion` from [`@scriptc/experimental`](/docs/experimental). Instances created while `region.run(fn)` runs belong to the region. After `region.release()`, scriptc frees them together once nothing outside the region refers to any of them, and removes the `WeakMap` and `WeakSet` entries they are keys of. Instances created outside every region are never freed, as described above.
+
+## Diagnostics
+
+Each failed contract names the declaration and the reason:
+
+```ts:reject.ts
+import type { Immutable, Int32, NoThrow } from "@scriptc/types";
+
+const LIMITS: Immutable<number[]> = [10, 20];
+
+function widen(limits: number[]): void {
+  limits.push(30);
+}
+
+function parseDigit(ch: number): number {
+  if (ch < 48 || ch > 57) throw new RangeError("not a digit");
+  return ch - 48;
+}
+
+function digitAt(text: string, i: number): NoThrow<number> {
+  return parseDigit(text.charCodeAt(i));
+}
+
+function middle(start: Int32, end: Int32): Int32 {
+  return (start + end) / 2;
+}
+
+widen(LIMITS as number[]);
+console.log(digitAt("7", 0), middle(2, 5), LIMITS.length);
+```
+
+```console
+$ scriptc build reject.ts
+/tmp/app/reject.ts:6:3 - error SC7004: 'limits.push(30)' writes to a value that may be Immutable ('limits' may be an Immutable value passed to 'widen' at reject.ts:22:1)
+
+  5 | function widen(limits: number[]): void {
+  6 |   limits.push(30);
+    |   ^~~~~~~~~~~~~~~
+  7 | }
+
+  hint: Immutable values cannot be written through any reference; copy the value before changing it
+
+/tmp/app/reject.ts:14:44 - error SC7001: 'digitAt' is declared NoThrow but may throw: calls 'parseDigit' at reject.ts:15:10 → throw statement at reject.ts:10:27
+
+  13 | 
+  14 | function digitAt(text: string, i: number): NoThrow<number> {
+     |                                            ^~~~~~~~~~~~~~~
+  15 |   return parseDigit(text.charCodeAt(i));
+
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
+
+/tmp/app/reject.ts:19:10 - error SC7002: the value returned from 'middle' (Int32) is not provably an int32: '(start + end) / 2'
+
+  18 | function middle(start: Int32, end: Int32): Int32 {
+  19 |   return (start + end) / 2;
+     |          ^~~~~~~~~~~~~~~~~
+  20 | }
+
+  hint: make the int32 conversion explicit, for example '((start + end) / 2) | 0', so Node computes the same value
+
+3 errors.
+```
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>SC7001</td>
+      <td>A <code>NoThrow</code> function may throw; the message shows the path to the throwing operation.</td>
+    </tr>
+    <tr>
+      <td>SC7002</td>
+      <td>A value stored into an <code>Int32</code> slot, or an element stored into an array that can reach an <code>Int32[]</code> slot, is not provably an int32; the hint shows the <code>| 0</code> form.</td>
+    </tr>
+    <tr>
+      <td>SC7003</td>
+      <td>An <code>Int32</code> slot has writes scriptc cannot see, or an <code>Int32[]</code> array can come from or escape to code scriptc cannot see.</td>
+    </tr>
+    <tr>
+      <td>SC7004</td>
+      <td>A write can reach an <code>Immutable</code> value, or a stored value is not fresh.</td>
+    </tr>
+    <tr>
+      <td>SC7005</td>
+      <td>An <code>Immutable</code> value escapes to code scriptc cannot check.</td>
+    </tr>
+    <tr>
+      <td>SC7006</td>
+      <td>A contract is written where scriptc does not check it.</td>
+    </tr>
+    <tr>
+      <td>SC7007</td>
+      <td>An <code>Acyclic</code> class or type can lie on a reference cycle; the message shows the cycle.</td>
+    </tr>
+    <tr>
+      <td>SC7008</td>
+      <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, or is part of a library build.</td>
+    </tr>
+  </tbody>
+</table>

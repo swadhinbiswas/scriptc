@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5014-lifetime-region-nesting.ts"
+ ],
+ "diags": []
+}

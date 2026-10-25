@@ -56,6 +56,15 @@ void scr_dyn_listener_fire_data(ScrClosure *cb, ScrBytes *chunk) {
 
 void scr_dyn_listener_fire_err(ScrClosure *cb, ScrStr *msg) {
   ScrDyn *fn = scr_dyn_listener_peek(cb);
+  if (scr_event_error_payload != NULL) {
+    ScrDyn *error = scr_dyn_from_error(scr_event_error_payload);
+    ScrDyn *error_args[1] = { error };
+    ScrDyn *result = scr_dyn_call(fn, error_args, 1, "listener");
+    scr_dyn_release(result);
+    scr_dyn_release(error);
+    scr_dyn_release(fn);
+    return;
+  }
   /* The checked-dynamic tree's error encoding (caughtToDyn's shape) — what a dyn 'error'
    * listener body can instanceof-test and read .message from. */
   ScrDyn *arg = scr_dyn_new_obj();

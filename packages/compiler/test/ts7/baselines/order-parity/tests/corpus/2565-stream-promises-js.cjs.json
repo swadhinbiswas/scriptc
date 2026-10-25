@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2565-stream-promises-js.cjs"
+ ],
+ "diags": []
+}

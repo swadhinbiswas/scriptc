@@ -10,10 +10,7 @@ export {
   targetPlatform,
 } from "./backend/external-c.js";
 export { prepareBuildCacheRoot, resolveBuildCacheRoot } from "./backend/build-cache.js";
-export {
-  executableLinkerEnvironmentFingerprint,
-  resolvePlatformLinker,
-} from "./backend/linker.js";
+export { executableLinkerEnvironmentFingerprint, resolvePlatformLinker } from "./backend/linker.js";
 import { nativeCodegenTarget, type NativeTargetSpec } from "./backend/targets.js";
 
 /** Whether an ordinary LLVM executable can take the helper/object plus
@@ -23,6 +20,9 @@ import { nativeCodegenTarget, type NativeTargetSpec } from "./backend/targets.js
 export function precompiledRuntimePackTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): NativeTargetSpec | null {
-  if (env["SCRIPTC_FETCH_CURL"] === "1") return null;
   return nativeCodegenTarget(env);
 }
+export { checkerCacheIdentity } from "./frontend/ts7/checker-backend.js";
+export { readCoverageVerdict } from "./coverage/verdict-startup.js";
+export { coverageEnvelope, coveragePasses, renderCoverage } from "./coverage/report.js";
+export { renderPerformanceWarnings } from "./diagnostics/dynamic-tier.js";

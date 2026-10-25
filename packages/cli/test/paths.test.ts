@@ -1,7 +1,13 @@
 import { join, resolve } from "node:path";
 import { buildTargetPlatform } from "@scriptc/compiler";
 import { expect, test } from "vitest";
-import { defaultExecutableName, defaultOutputName, selectOutputPaths, wasiEnvironment, wasiPreopens } from "../src/paths.js";
+import {
+  defaultExecutableName,
+  defaultOutputName,
+  selectOutputPaths,
+  wasiEnvironment,
+  wasiPreopens,
+} from "../src/paths.js";
 
 test("default executable names use the Windows PE suffix", () => {
   expect(defaultExecutableName("main", "win32")).toBe("main.exe");
@@ -11,12 +17,16 @@ test("default executable names use the Windows PE suffix", () => {
 });
 
 test("source artifact names use stable POSIX and Windows suffixes", () => {
-  expect(["ir", "llvm", "asm", "obj", "exe"].map((kind) =>
-    defaultOutputName("main", kind as Parameters<typeof defaultOutputName>[1], "linux")
-  )).toEqual(["main.ir.json", "main.ll", "main.s", "main.o", "main"]);
-  expect(["ir", "llvm", "asm", "obj", "exe"].map((kind) =>
-    defaultOutputName("main", kind as Parameters<typeof defaultOutputName>[1], "win32")
-  )).toEqual(["main.ir.json", "main.ll", "main.asm", "main.obj", "main.exe"]);
+  expect(
+    ["ir", "llvm", "asm", "obj", "exe"].map((kind) =>
+      defaultOutputName("main", kind as Parameters<typeof defaultOutputName>[1], "linux"),
+    ),
+  ).toEqual(["main.ir.json", "main.ll", "main.s", "main.o", "main"]);
+  expect(
+    ["ir", "llvm", "asm", "obj", "exe"].map((kind) =>
+      defaultOutputName("main", kind as Parameters<typeof defaultOutputName>[1], "win32"),
+    ),
+  ).toEqual(["main.ir.json", "main.ll", "main.asm", "main.obj", "main.exe"]);
 });
 
 test("primary output selection keeps explicit paths exact", () => {
@@ -33,10 +43,12 @@ test("primary output selection keeps explicit paths exact", () => {
 });
 
 test("TypeScript module extensions do not become part of default stems", () => {
-  expect(selectOutputPaths(resolve("work/main.mts"), "ir", undefined, "linux").outPath)
-    .toBe(resolve("work/.scriptc/main.ir.json"));
-  expect(selectOutputPaths(resolve("work/main.cts"), "llvm", undefined, "linux").outPath)
-    .toBe(resolve("work/.scriptc/main.ll"));
+  expect(selectOutputPaths(resolve("work/main.mts"), "ir", undefined, "linux").outPath).toBe(
+    resolve("work/.scriptc/main.ir.json"),
+  );
+  expect(selectOutputPaths(resolve("work/main.cts"), "llvm", undefined, "linux").outPath).toBe(
+    resolve("work/.scriptc/main.ll"),
+  );
 });
 
 test("WASI cross-builds use the WebAssembly suffix", () => {
@@ -60,17 +72,23 @@ test("WASI environment paths name guest-visible capabilities", () => {
   const hostTmp = resolve("host/tmp");
   const outside = resolve("elsewhere");
 
-  expect(wasiEnvironment({
-    KEEP: "yes",
-    PWD: cwd,
-    HOME: outside,
-    TMPDIR: hostTmp,
-    TMP: hostTmp,
-    TEMP: hostTmp,
-    USERPROFILE: outside,
-    OLDPWD: outside,
-    INIT_CWD: join(cwd, "package"),
-  }, cwd, hostTmp)).toEqual({
+  expect(
+    wasiEnvironment(
+      {
+        KEEP: "yes",
+        PWD: cwd,
+        HOME: outside,
+        TMPDIR: hostTmp,
+        TMP: hostTmp,
+        TEMP: hostTmp,
+        USERPROFILE: outside,
+        OLDPWD: outside,
+        INIT_CWD: join(cwd, "package"),
+      },
+      cwd,
+      hostTmp,
+    ),
+  ).toEqual({
     KEEP: "yes",
     PWD: "/",
     HOME: "/",

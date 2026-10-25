@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5377-zlib-stream-backpressure.cjs"
+ ],
+ "diags": []
+}

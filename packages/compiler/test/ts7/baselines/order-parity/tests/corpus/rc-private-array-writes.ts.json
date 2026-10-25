@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/rc-private-array-writes.ts"
+ ],
+ "diags": []
+}

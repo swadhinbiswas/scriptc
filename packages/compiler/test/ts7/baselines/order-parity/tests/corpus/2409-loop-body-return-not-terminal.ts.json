@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2409-loop-body-return-not-terminal.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1571-stdin-set-raw-mode-non-tty.ts"
+ ],
+ "diags": []
+}

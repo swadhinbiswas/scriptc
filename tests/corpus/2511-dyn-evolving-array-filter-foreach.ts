@@ -1,4 +1,3 @@
-// @dynamic
 // Evolving-`any` closure arrays into the other monomorphized helpers:
 // filter's result keeps the handle-element array (the file-scope DERIVED
 // binding adopts it — tsc spells the evolved element type there), and

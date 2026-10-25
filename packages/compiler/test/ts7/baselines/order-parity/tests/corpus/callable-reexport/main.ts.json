@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/callable-reexport/core.js",
+  "<repo>/tests/corpus/callable-reexport/barrel.js",
+  "<repo>/tests/corpus/callable-reexport/main.ts"
+ ],
+ "diags": []
+}

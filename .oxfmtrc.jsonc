@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": false,
+  "quoteProps": "preserve",
+  "trailingComma": "all",
+  "endOfLine": "lf",
+  // Source strings and import execution order are part of compiler and harness contracts.
+  "embeddedLanguageFormatting": "off",
+  "sortImports": false,
+  "sortPackageJson": false,
+  "proseWrap": "preserve",
+  // Program fixtures, generated output, native/vendor sources and the standalone docs workspace
+  // are outside the root JS/TS formatting scope.
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/vendor/**",
+    "**/fixtures/**",
+    "**/*.generated.*",
+    "**/artifacts/**",
+    "docs/**",
+    "tests/corpus/**",
+    "tests/diagnostics/**",
+    "tests/library-mode/**",
+    "tests/test262/**",
+    "benchmarks/**",
+    "examples/**",
+  ],
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4903-bigint-fixed-width.ts"
+ ],
+ "diags": []
+}

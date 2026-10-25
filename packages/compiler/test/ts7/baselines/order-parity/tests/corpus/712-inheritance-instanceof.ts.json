@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/712-inheritance-instanceof.ts"
+ ],
+ "diags": []
+}

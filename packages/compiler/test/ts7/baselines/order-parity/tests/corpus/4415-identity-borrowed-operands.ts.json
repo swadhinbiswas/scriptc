@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4415-identity-borrowed-operands.ts"
+ ],
+ "diags": []
+}

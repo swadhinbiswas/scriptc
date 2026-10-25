@@ -25,6 +25,9 @@ long scr_bytes_live_count(void);
 
 static long total = 0, failed = 0;
 
+void scr_bytes_test_bulk_storage(void);
+void scr_bytes_test_buffer_pool(void);
+
 static void check(bool ok, const char *what) {
   total++;
   if (!ok) {
@@ -155,6 +158,7 @@ static void test_slice_set_copy(void) {
 }
 
 static void test_encodings(void) {
+  check_str(scr_str_from_utf8_lossy(NULL, 0), "", "empty native UTF-8 span");
   /* utf8 round-trip, astral included (U+1F4A9 + U+00E9). */
   ScrStr *utf8 = S("utf8");
   ScrStr *hex = S("hex");
@@ -343,6 +347,43 @@ static void test_fs_roundtrip(const char *scratch) {
   check(back->len == data->len && memcmp(back->data, data->data, data->len) == 0,
         "fs round-trip is byte-exact");
   scr_bytes_release(back);
+
+  /* The UTF-8 read decodes in place: each maximal malformed subpart (ff,
+   * 80, ed, a0, bd) becomes U+FFFD. */
+  ScrStr *utf8 = S("utf8");
+  ScrStr *upper = S("UTF-8");
+  static const char repaired[] =
+      "\0\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\n";
+  ScrStr *forms[2] = { scr_fs_read_file_encoded(path, utf8), scr_fs_read_file(path) };
+  for (int i = 0; i < 2; i++) {
+    check(forms[i]->len == sizeof repaired - 1 && memcmp(forms[i]->data, repaired, sizeof repaired - 1) == 0,
+          i == 0 ? "utf8 file read replaces malformed bytes"
+                 : "promise-form utf8 read replaces malformed bytes");
+    scr_str_release(forms[i]);
+  }
+  ScrStr *latin = S("caf\xc3\xa9 \xef\xbb\xbf");
+  scr_fs_write_file(path, latin);
+  ScrStr *read_back = scr_fs_read_file_encoded(path, upper);
+  check(read_back->len == latin->len && memcmp(read_back->data, latin->data, latin->len) == 0 &&
+            !scr_str_known_ascii(read_back),
+        "well-formed utf8 file reads back unchanged");
+  scr_str_release(read_back);
+  ScrStr *plain = S("plain ascii text that spans more than one thirty-two byte chunk");
+  scr_fs_write_file(path, plain);
+  read_back = scr_fs_read_file_encoded(path, utf8);
+  check(read_back->len == plain->len && memcmp(read_back->data, plain->data, plain->len) == 0 &&
+            scr_str_known_ascii(read_back),
+        "ascii file read records the ASCII fact");
+  scr_str_release(read_back);
+  ScrStr *empty = S("");
+  scr_fs_write_file(path, empty);
+  check_str(scr_fs_read_file_encoded(path, utf8), "", "empty utf8 file read");
+  scr_str_release(empty);
+  scr_str_release(plain);
+  scr_str_release(latin);
+  scr_str_release(upper);
+  scr_str_release(utf8);
+
   scr_bytes_release(data);
   scr_str_release(blob);
   scr_str_release(hex);
@@ -401,6 +442,8 @@ int main(int argc, char **argv) {
   test_construction();
   test_coercion_matrix();
   test_slice_set_copy();
+  scr_bytes_test_bulk_storage();
+  scr_bytes_test_buffer_pool();
   test_encodings();
   test_concat_and_u32be();
   test_from_arr_and_random();

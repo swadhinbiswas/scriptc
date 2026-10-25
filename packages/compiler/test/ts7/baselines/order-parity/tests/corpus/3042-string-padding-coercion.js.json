@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3042-string-padding-coercion.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,15 @@
+deferred-class-binding/crate.ts:3:3 - error SC1090: 'any'-typed class fields are not supported yet
+
+  2 |   readonly label: string;
+  3 |   contents: any;
+    |   ^~~~~~~~
+  4 |   constructor(label: string) {
+
+deferred-class-binding/main.ts:5:13 - error SC2004: uses of 'pack' inherit the blocker on its declaration
+
+  4 | 
+  5 | console.log(pack("spare parts").label);
+    |             ^~~~
+  6 | 
+
+  hint: the declaration of 'pack' did not compile — fix the diagnostic reported there and these sites clear with it

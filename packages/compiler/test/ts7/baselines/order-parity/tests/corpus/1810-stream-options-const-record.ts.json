@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1810-stream-options-const-record.ts"
+ ],
+ "diags": []
+}

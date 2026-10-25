@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/deep-binary-nesting.ts"
+ ],
+ "diags": []
+}

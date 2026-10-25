@@ -8,7 +8,7 @@ const assert = require('assert');
 assert.throws(() => structuredClone(), { code: 'ERR_MISSING_ARGS' });
 assert.throws(() => structuredClone(undefined, ''), { code: 'ERR_INVALID_ARG_TYPE', message: "Failed to execute 'structuredClone': Options cannot be converted to a dictionary" });
 assert.throws(() => structuredClone(undefined, 1), { code: 'ERR_INVALID_ARG_TYPE' });
-assert.throws(() => structuredClone(undefined, { transfer: 1 }), { code: 'ERR_INVALID_ARG_TYPE', message: "Failed to execute 'structuredClone': transfer in Options can not be converted to sequence." });
+assert.throws(() => structuredClone(undefined, { transfer: 1 }), { code: 'ERR_INVALID_ARG_TYPE', message: "Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence." });
 assert.throws(() => structuredClone(undefined, { transfer: null }), { code: 'ERR_INVALID_ARG_TYPE' });
 assert.strictEqual(structuredClone(undefined), undefined);
 assert.strictEqual(structuredClone(undefined, null), undefined);

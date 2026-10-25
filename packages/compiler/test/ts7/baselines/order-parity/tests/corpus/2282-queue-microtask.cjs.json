@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2282-queue-microtask.cjs"
+ ],
+ "diags": []
+}

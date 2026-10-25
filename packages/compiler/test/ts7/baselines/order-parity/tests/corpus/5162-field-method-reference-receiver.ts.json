@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5162-field-method-reference-receiver.ts"
+ ],
+ "diags": []
+}

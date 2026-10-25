@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3103-scalar-record-nested-control-flow.ts"
+ ],
+ "diags": []
+}

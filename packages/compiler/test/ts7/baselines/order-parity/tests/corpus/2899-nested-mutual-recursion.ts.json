@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2899-nested-mutual-recursion.ts"
+ ],
+ "diags": []
+}

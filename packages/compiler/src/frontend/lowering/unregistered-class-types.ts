@@ -40,7 +40,10 @@ export class UnregisteredClassTypes {
           for (let i = type.params.length - 1; i >= 0; i--) pending.push(type.params[i]!);
           break;
         case "record": {
-          if (this.badRecords.has(type.shapeId)) { bad = true; break; }
+          if (this.badRecords.has(type.shapeId)) {
+            bad = true;
+            break;
+          }
           if (this.safeRecords.has(type.shapeId) || records.has(type.shapeId)) break;
           records.add(type.shapeId);
           const shape = this.record(type.shapeId);
@@ -51,7 +54,10 @@ export class UnregisteredClassTypes {
           break;
         }
         case "union": {
-          if (this.badUnions.has(type.unionId)) { bad = true; break; }
+          if (this.badUnions.has(type.unionId)) {
+            bad = true;
+            break;
+          }
           if (this.safeUnions.has(type.unionId) || unions.has(type.unionId)) break;
           unions.add(type.unionId);
           const definition = this.union(type.unionId);

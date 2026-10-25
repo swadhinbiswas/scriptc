@@ -1,0 +1,8 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1730-countdown-symbol-keys/index.js",
+  "<repo>/tests/corpus/1730-countdown-symbol-keys/countdown.js",
+  "<repo>/tests/corpus/1730-countdown-symbol-keys/main.js"
+ ],
+ "diags": []
+}

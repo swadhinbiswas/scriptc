@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5161-field-callback-receiver-escape.ts"
+ ],
+ "diags": []
+}

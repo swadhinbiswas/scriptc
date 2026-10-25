@@ -75,9 +75,14 @@ if(TARGET zstd::libzstd_shared AND TARGET zstd::libzstd_static)
 endif()
 
 add_executable(scriptc-llvm-codegen
+  src/cache.cpp
   src/diagnostics.cpp
   src/emit.cpp
   src/main.cpp
+  src/partition.cpp
+  src/profile.cpp
+  src/runtime-import.cpp
+  src/runtime-unit.cpp
   src/target.cpp
 )
 
@@ -100,13 +105,13 @@ endif()
 
 foreach(SCRIPTC_TARGET_BACKEND IN LISTS SCRIPTC_TARGET_BACKENDS)
   if(SCRIPTC_TARGET_BACKEND STREQUAL "AArch64")
-    list(APPEND SCRIPTC_LLVM_TARGET_LIBS AArch64CodeGen)
+    list(APPEND SCRIPTC_LLVM_TARGET_LIBS AArch64CodeGen AArch64AsmParser)
     target_compile_definitions(scriptc-llvm-codegen PRIVATE SCRIPTC_ENABLE_AARCH64=1)
   elseif(SCRIPTC_TARGET_BACKEND STREQUAL "X86")
-    list(APPEND SCRIPTC_LLVM_TARGET_LIBS X86CodeGen)
+    list(APPEND SCRIPTC_LLVM_TARGET_LIBS X86CodeGen X86AsmParser)
     target_compile_definitions(scriptc-llvm-codegen PRIVATE SCRIPTC_ENABLE_X86=1)
   elseif(SCRIPTC_TARGET_BACKEND STREQUAL "WebAssembly")
-    list(APPEND SCRIPTC_LLVM_TARGET_LIBS WebAssemblyCodeGen)
+    list(APPEND SCRIPTC_LLVM_TARGET_LIBS WebAssemblyCodeGen WebAssemblyAsmParser)
     target_compile_definitions(scriptc-llvm-codegen PRIVATE SCRIPTC_ENABLE_WEBASSEMBLY=1)
   else()
     message(FATAL_ERROR "unsupported SCRIPTC_TARGET_BACKENDS entry: ${SCRIPTC_TARGET_BACKEND}")
@@ -176,7 +181,7 @@ if(SCRIPTC_STATIC_LINUX_BUILD)
     endif()
   endfunction()
 
-  set(SCRIPTC_LLVM_LINK_ROOTS ${SCRIPTC_LLVM_TARGET_LIBS} IRReader Passes)
+  set(SCRIPTC_LLVM_LINK_ROOTS ${SCRIPTC_LLVM_TARGET_LIBS} BitReader BitWriter IRReader LTO Linker Passes ProfileData TransformUtils)
   foreach(component IN LISTS SCRIPTC_LLVM_LINK_ROOTS)
     if(TARGET "LLVM${component}")
       scriptc_collect_llvm_target("LLVM${component}")
@@ -196,13 +201,19 @@ if(SCRIPTC_STATIC_LINUX_BUILD)
 else()
   llvm_map_components_to_libnames(SCRIPTC_LLVM_LIBS
     ${SCRIPTC_LLVM_TARGET_LIBS}
+    BitReader
+    BitWriter
     CodeGen
     Core
     Coroutines
     IRReader
+    LTO
+    Linker
     Passes
+    ProfileData
     Support
     Target
+    TransformUtils
   )
   list(REMOVE_DUPLICATES SCRIPTC_LLVM_LIBS)
 endif()

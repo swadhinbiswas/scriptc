@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1481-string-case-static.ts"
+ ],
+ "diags": []
+}

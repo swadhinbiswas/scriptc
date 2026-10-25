@@ -1,19 +1,62 @@
 import { dirname, resolve } from "node:path";
 import type { CompileFailure } from "../compile-types.js";
-import { fenceSpeculativeWasiFunctions, moduleWasiUnavailableSurface, targetRefusalDiag } from "../backend/target-diagnostics.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
-import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./int-infer.js";
+import { frontendDisposed } from "../frontend/dispose-hook.js";
+import {
+  fenceSpeculativeWasiFunctions,
+  moduleWasiUnavailableSurface,
+  targetRefusalDiag,
+} from "../backend/target-diagnostics.js";
+import {
+  checkerPanicDiag,
+  libAsyncExportDiag,
+  libAsyncSurfaceDiag,
+  libExportUnresolvedDiag,
+  libGenericExportDiag,
+  libIntBoundaryDiag,
+  libNpmIneligibleDiag,
+  libSidecarDiag,
+  libUnmappableSignatureDiag,
+  iceDiag,
+  isCheckerPanic,
+  LIB_INBOUND_BYTES_TRAP_CODE,
+  LIB_RUNTIME_TRAP_CODES,
+  type ScrDiagnostic,
+} from "../diagnostics/diagnostic.js";
+import {
+  checkLibraryIntegerSlots,
+  classSeed,
+  hasIntSlots,
+  numberCarrierKind,
+  type FnIntSlots,
+  type IntSlotConfig,
+} from "./int-infer.js";
 import { profileRemediation, profileTeaching, type LibraryProfile } from "./library-profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./fence-eval.js";
 import { assembleTrapTeaching } from "./trap-teaching.js";
-import { buildSidecar, canonicalModuleGraph, canonicalPath, libraryIdentityHashes, type SidecarIntegerSlotFacts, type SidecarIrRecordPattern, type SidecarIrTypePattern } from "./sidecar.js";
+import {
+  buildSidecar,
+  canonicalModuleGraph,
+  canonicalPath,
+  libraryIdentityHashes,
+  type SidecarIntegerSlotFacts,
+  type SidecarIrRecordPattern,
+  type SidecarIrTypePattern,
+} from "./sidecar.js";
 import { validateSidecar } from "./sidecar-validate.js";
 import type { EntryExportInfo } from "../frontend/lib-exports.js";
 import type { ContractFacts } from "../frontend/lib-contract.js";
 import type { LowerResult } from "../frontend/lowering/lowerer.js";
 import type { FrontendFactory } from "../frontend/pipeline.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, type IrFfiImport, type IrLibSection, type IrModule, type IrRecordShape, type IrType } from "../ir/ir.js";
+import {
+  type IrFfiImport,
+  type IrLibSection,
+  type IrModule,
+  type IrRecordShape,
+  type IrType,
+} from "../ir/ir.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface } from "./ir-policy.js";
 import { validateModule } from "../ir/validate.js";
+import { checkContracts } from "../contracts/check.js";
 
 /** The marshalling-class fit over IR types (design §4.2 + the ratified
  * integer plumbing classes): number is every f64-backed class, bool/string
@@ -23,6 +66,7 @@ function libClassFits(cls: string, t: IrType): boolean {
     case "bool":
       return t.kind === "bool";
     case "string":
+    case "cstring":
       return t.kind === "string";
     case "bytes":
       return t.kind === "bytes" && t.elem === "u8";
@@ -48,7 +92,11 @@ function resolveLibrarySection(
     const info = entryInfo.get(e.export);
     if (info === undefined) {
       diagnostics.push(
-        libExportUnresolvedDiag(e.export, "the entry module has no exported function declaration by that name", entryLoc),
+        libExportUnresolvedDiag(
+          e.export,
+          "the entry module has no exported function declaration by that name",
+          entryLoc,
+        ),
       );
       continue;
     }
@@ -63,7 +111,11 @@ function resolveLibrarySection(
     const fn = fnByName.get(e.export);
     if (fn === undefined) {
       diagnostics.push(
-        libExportUnresolvedDiag(e.export, "the export did not lower to a compiled function", info.loc),
+        libExportUnresolvedDiag(
+          e.export,
+          "the export did not lower to a compiled function",
+          info.loc,
+        ),
       );
       continue;
     }
@@ -92,7 +144,9 @@ function resolveLibrarySection(
         );
       }
     });
-    if (e.returns === "void" ? fn.returnType.kind !== "void" : !libClassFits(e.returns, fn.returnType)) {
+    if (
+      e.returns === "void" ? fn.returnType.kind !== "void" : !libClassFits(e.returns, fn.returnType)
+    ) {
       bad = true;
       diagnostics.push(
         libUnmappableSignatureDiag(
@@ -126,10 +180,22 @@ function resolveLibrarySection(
           profileRemediation(profile, LIB_INBOUND_BYTES_TRAP_CODE),
         );
       }
+      if (e.params.includes("cstring")) {
+        // The host-contract trap for a NULL cstring parameter: a C string
+        // argument is a pointer to NUL-terminated text, never NULL. Same
+        // code and assembly-once discipline as the bytes and integer traps.
+        resolvedExport.inboundCstringTrap = assembleTrapTeaching(
+          profileTeaching(profile, LIB_INBOUND_BYTES_TRAP_CODE) ??
+            "scriptc: library inbound cstring parameter is NULL\n",
+          LIB_INBOUND_BYTES_TRAP_CODE,
+          e.symbol,
+          profileRemediation(profile, LIB_INBOUND_BYTES_TRAP_CODE),
+        );
+      }
       if (e.params.includes("i64") || e.params.includes("u64")) {
         // The sibling host-contract trap for inbound declared-integer
         // parameters (ask 4): a value past ±(2^53−1) cannot ride f64
-        // exactly, and silent rounding is a coercion the author never
+        // exactly, and implicit rounding is a coercion the author never
         // wrote. Same code (SC4012 — one host-contract story), same
         // assembly-once discipline.
         resolvedExport.inboundIntTrap = assembleTrapTeaching(
@@ -163,29 +229,32 @@ function resolveLibrarySection(
     }
   }
   const lib: IrLibSection = {
-      profileName: profile.name,
-      prefix: profile.prefix,
-      initSymbol: profile.initSymbol,
-      sinkRegisterSymbol: profile.sinkRegisterSymbol,
-      collectSymbol: profile.collectSymbol,
-      resultResetSymbol: profile.resultResetSymbol,
-      threadInstances: profile.instancePerThread,
-      // Host-callback channels: declaration order is the runtime slot
-      // assignment, and the unregistered-call trap text is assembled HERE,
-      // once, for consistent constant bytes (a DETECTED
-      // trap: the funnel classifies the "scriptc: library callback "
-      // prefix as SC4025 and names the entry the host called — the entry
-      // is runtime knowledge, so no compile-time SC4012-style assembly
-      // can carry it). Both fields stay absent on callback-free profiles
-      // (the byte-identity guarantee).
+    profileName: profile.name,
+    prefix: profile.prefix,
+    initSymbol: profile.initSymbol,
+    sinkRegisterSymbol: profile.sinkRegisterSymbol,
+    collectSymbol: profile.collectSymbol,
+    resultResetSymbol: profile.resultResetSymbol,
+    threadInstances: profile.instancePerThread,
+    // Host-callback channels: declaration order is the runtime slot
+    // assignment, and the unregistered-call trap text is assembled HERE,
+    // once, for consistent constant bytes (a DETECTED
+    // trap: the funnel classifies the "scriptc: library callback "
+    // prefix as SC4025 and names the entry the host called — the entry
+    // is runtime knowledge, so no compile-time SC4012-style assembly
+    // can carry it). Both fields stay absent on callback-free profiles
+    // (the byte-identity guarantee).
 
-      exports,
-      trapOverlays,
+    exports,
+    trapOverlays,
   };
   if (profile.callbacks.length > 0) {
     lib.callbackRegisterSymbol = profile.callbackRegisterSymbol!;
     lib.callbacks = profile.callbacks.map((cb, slot) => ({
-      name: cb.name, slot, params: [...cb.params], returns: cb.returns,
+      name: cb.name,
+      slot,
+      params: [...cb.params],
+      returns: cb.returns,
       unregisteredTrap: `scriptc: library callback '${cb.name}' invoked before registration\n`,
     }));
   }
@@ -204,12 +273,17 @@ function libraryIntSlotConfig(profile: LibraryProfile): IntSlotConfig {
   for (const e of profile.exports) {
     const params = e.params.map((c) => (c === "i64" || c === "u64" ? c : null));
     const ret = e.returns === "i64" || e.returns === "u64" ? e.returns : null;
-    const paramSeeds = e.params.map((c) => (c === "u8" || c === "u32" || c === "i32" ? classSeed(c) : null));
-    if (params.every((p) => p === null) && ret === null && paramSeeds.every((s) => s === null)) continue;
+    const paramSeeds = e.params.map((c) =>
+      c === "u8" || c === "u32" || c === "i32" ? classSeed(c) : null,
+    );
+    if (params.every((p) => p === null) && ret === null && paramSeeds.every((s) => s === null))
+      continue;
     const slots: FnIntSlots = {
       fnName: e.export,
       params,
-      paramPaths: e.params.map((c, i) => (c === "i64" || c === "u64" ? `exports.${e.export}.params[${i}]` : null)),
+      paramPaths: e.params.map((c, i) =>
+        c === "i64" || c === "u64" ? `exports.${e.export}.params[${i}]` : null,
+      ),
       ret,
       retPath: ret !== null ? `exports.${e.export}.return` : null,
       paramSeeds,
@@ -231,10 +305,7 @@ function sidecarRecordMatcher(
   const records = new Map((mod.records ?? []).map((shape) => [shape.id, shape]));
   const unions = new Map((mod.unions ?? []).map((union) => [union.id, union]));
 
-  const recordMatches = (
-    pattern: SidecarIrRecordPattern,
-    shape: IrRecordShape,
-  ): boolean => {
+  const recordMatches = (pattern: SidecarIrRecordPattern, shape: IrRecordShape): boolean => {
     if (shape.tuple === true || shape.indexValue !== undefined) return false;
     const variants = [pattern.fields];
     if (pattern.kindMayBeOmitted === true) {
@@ -250,10 +321,7 @@ function sidecarRecordMatcher(
     );
   };
 
-  const unionMatches = (
-    patterns: SidecarIrTypePattern[],
-    actual: IrType[],
-  ): boolean => {
+  const unionMatches = (patterns: SidecarIrTypePattern[], actual: IrType[]): boolean => {
     if (patterns.length !== actual.length) return false;
     const used = new Set<number>();
     const visit = (index: number): boolean => {
@@ -269,10 +337,7 @@ function sidecarRecordMatcher(
     return visit(0);
   };
 
-  const typeMatches = (
-    pattern: SidecarIrTypePattern,
-    actual: IrType,
-  ): boolean => {
+  const typeMatches = (pattern: SidecarIrTypePattern, actual: IrType): boolean => {
     switch (pattern.kind) {
       case "f64":
       case "string":
@@ -400,12 +465,8 @@ export function prepareLibrary(
   timing: (phase: string, detail?: Record<string, unknown>) => void = () => {},
 ): PreparedLibrary | CompileFailure {
   const entryPath = profile.entry;
-  // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
-  // posture: "lib" runs the same auto-detection and eligibility bar as
-  // the executable lane's --npm-static (own .d.ts, unminified shipped JS,
-  // no build-transform markers), automatically — the library path has no
-  // island/dynamic tier to offer. Explicit profile npm_static entries may
-  // also attempt source inference; any failed attempt remains a refusal.
+  // Library and executable graphs share automatic package eligibility.
+  // Explicit profile selections attempt source inference; failures remain refusals.
   const fe = createFrontend(entryPath, "lib", undefined, profile.npmStatic);
   timing("frontend-load", {
     entry_bytes: fe.entryText().length,
@@ -424,23 +485,14 @@ export function prepareLibrary(
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
-    // The npm verdicts FIRST: whatever the shared frontend would have
-    // served from the island — an eligibility miss, an untyped install, a
-    // preflight offender inside a package's files, a dropped inferred
-    // surface — refuses here with the package and the specific bar it
-    // missed. Checked before the general preflight, whose diagnostics for
-    // these same imports speak executable-lane teachings (SC1010/SC0001 at
-    // the unresolvable edge); the library answer is this one.
-    const npmRefused = fe.npmStatic.filter((s) => s.status === "fallback");
+    // Report the package-specific refusal before general preflight errors.
+    const npmRefused = fe.npmStatic.filter((s) => s.status === "refused");
     if (npmRefused.length > 0) {
       return fail(
         npmRefused.map((s) =>
           libNpmIneligibleDiag(
             s.package,
-            // The one shared offender reason that narrates the executable
-            // lane's fallback loses that clause here — no island exists on
-            // this path to serve anything.
-            (s.detail ?? "its static compilation was refused").replace("; the island serves the package", ""),
+            s.detail ?? "its static compilation was refused",
             fe.npmImportSites.get(s.package) ?? { file: entryPath, start: 0, end: 0 },
           ),
         ),
@@ -460,14 +512,21 @@ export function prepareLibrary(
     const contractSurfaceRoots: string[] = [];
     if (profile.sidecar !== null && profile.sidecar.integerSlots.length > 0) {
       const sc = profile.sidecar;
-      const fnNames = new Set(contractFacts!.functions.filter((f) => !f.generic).map((f) => f.name));
+      const fnNames = new Set(
+        contractFacts!.functions.filter((f) => !f.generic).map((f) => f.name),
+      );
       for (const name of [sc.initExport, sc.updateExport, sc.subscriptionsExport]) {
         if (fnNames.has(name)) contractSurfaceRoots.push(name);
       }
       for (const fn of contractFacts!.functions) {
         if (fn.generic) continue;
         const first = fn.params[0];
-        if (first !== undefined && first.shape !== null && first.shape.k === "ref" && first.shape.name === sc.model) {
+        if (
+          first !== undefined &&
+          first.shape !== null &&
+          first.shape.k === "ref" &&
+          first.shape.name === sc.model
+        ) {
           contractSurfaceRoots.push(fn.name);
         }
       }
@@ -479,10 +538,12 @@ export function prepareLibrary(
     // SC4024 diagnostics, unused channels legal, undeclared references
     // refused with the callback teaching. The library lane never loads a
     // native-FFI manifest, so the channel set owns the surface outright.
+    // A cstring channel parameter is a string on the TypeScript side; the
+    // channel's own classes (lib.callbacks) drive the marshalling.
     const cbImports: IrFfiImport[] = profile.callbacks.map((cb) => ({
       name: cb.name,
       symbol: cb.name,
-      params: [...cb.params],
+      params: cb.params.map((cls) => (cls === "cstring" ? "string" : cls)),
       returns: cb.returns,
     }));
     const integerSlotRoots: string[] = [];
@@ -492,8 +553,9 @@ export function prepareLibrary(
     }
     try {
       lowered = fe.lower({
-        dynamic: false,
         targetPlatform: buildPlatform,
+        // Library artifacts are static-tier only (two-tier design I2).
+        tierMode: "static-only",
         ...(cbImports.length > 0 ? { ffiImports: cbImports } : {}),
         ...(cbImports.length > 0 ? { libraryCallbacks: true } : {}),
         // The profile-mapped exports are called from OUTSIDE the graph:
@@ -515,13 +577,16 @@ export function prepareLibrary(
       });
     } catch (e) {
       if (!isCheckerPanic(e)) throw e;
-      return fail([checkerPanicDiag(e.message.split("\n", 1)[0]!, { file: entryPath, start: 0, end: 0 })]);
+      return fail([
+        checkerPanicDiag(e.message.split("\n", 1)[0]!, { file: entryPath, start: 0, end: 0 }),
+      ]);
     }
     if (lowered.module === null) return fail(lowered.diagnostics);
     entryInfo = fe.entryExports();
     sourceTexts = fe.sourceTexts();
   } finally {
     fe.dispose();
+    frontendDisposed();
   }
   const mod = lowered.module!;
   timing("frontend-dispose");
@@ -547,10 +612,17 @@ export function prepareLibrary(
   const fenced = evaluateLibraryFences(mod, profile);
   if (fenced.length > 0) return fail(fenced);
   mod.lib = resolved.lib;
+  if (lowered.contracts) {
+    const checked = checkContracts(mod, lowered.contracts, sourceTexts);
+    timing("contracts");
+    if (checked.diagnostics.length > 0) return fail(checked.diagnostics);
+    if (checked.contracts) mod.contracts = checked.contracts;
+  }
   if (buildPlatform === "wasi") {
     fenceSpeculativeWasiFunctions(mod);
     const unavailable = moduleWasiUnavailableSurface(mod);
-    if (unavailable !== null) return fail([targetRefusalDiag("wasm32-wasi", unavailable.surface, unavailable.loc)]);
+    if (unavailable !== null)
+      return fail([targetRefusalDiag("wasm32-wasi", unavailable.surface, unavailable.loc)]);
   }
 
   // Ask 4's declared integer slots: the export map's i64/u64 classes
@@ -571,7 +643,11 @@ export function prepareLibrary(
   if (profile.sidecar !== null) {
     const rootDir = dirname(resolve(profilePath));
     const modules = canonicalModuleGraph(rootDir, sourceTexts);
-    const { buildId, sourceHash } = libraryIdentityHashes(compilerVersion, profile.profileBytes, modules);
+    const { buildId, sourceHash } = libraryIdentityHashes(
+      compilerVersion,
+      profile.profileBytes,
+      modules,
+    );
     mod.lib.identity = {
       buildIdSymbol: profile.sidecar.buildIdSymbol,
       abiVersionSymbol: profile.sidecar.abiVersionSymbol,
@@ -594,7 +670,11 @@ export function prepareLibrary(
     if (violations.length > 0) {
       // The projection above refuses every user-caused shape; a rule
       // violation surviving to here is an emitter bug.
-      return fail(violations.map((v) => iceDiag(`sidecar self-check failed — ${v}`, { file: entryPath, start: 0, end: 0 })));
+      return fail(
+        violations.map((v) =>
+          iceDiag(`sidecar self-check failed — ${v}`, { file: entryPath, start: 0, end: 0 }),
+        ),
+      );
     }
     sidecarJson = built.json;
     const merged = mergeSidecarIntSlots(intCfg, built.integerSlotFacts, mod);
@@ -614,7 +694,11 @@ export function prepareLibrary(
   if (hasIntSlots(intCfg)) {
     const refusals = checkLibraryIntegerSlots(mod, intCfg).filter((v) => v.outcome === "refuse");
     if (refusals.length > 0) {
-      return fail(refusals.map((v) => libIntBoundaryDiag(v.path, v.cls, v.obligation!, v.detail!, v.fix!, v.loc)));
+      return fail(
+        refusals.map((v) =>
+          libIntBoundaryDiag(v.path, v.cls, v.obligation!, v.detail!, v.fix!, v.loc),
+        ),
+      );
     }
   }
   timing("integer-proof");
@@ -644,23 +728,45 @@ export function libraryLocalizeSymbols(profile: LibraryProfile): string[] | unde
 
 export function libraryWasmExports(profile: LibraryProfile): string[] {
   return [
-    profile.initSymbol, "scriptc_alloc", "scriptc_free",
+    profile.initSymbol,
+    "scriptc_alloc",
+    "scriptc_free",
     ...(profile.collectSymbol === null ? [] : [profile.collectSymbol]),
     ...(profile.resultResetSymbol === null ? [] : [profile.resultResetSymbol]),
-    ...(profile.sidecar === null ? [] : [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]),
+    ...(profile.sidecar === null
+      ? []
+      : [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]),
     ...profile.exports.map((entry) => entry.symbol),
   ];
 }
 
-export function libraryWasmRefusal(profile: LibraryProfile, sanitize: boolean): ScrDiagnostic | null {
+export function libraryWasmRefusal(
+  profile: LibraryProfile,
+  sanitize: boolean,
+): ScrDiagnostic | null {
   const reserved = new Set(["scriptc_alloc", "scriptc_free", "memory", "_initialize", "_start"]);
-  const symbols = [profile.initSymbol, profile.sinkRegisterSymbol, profile.collectSymbol, profile.resultResetSymbol,
-    profile.callbackRegisterSymbol, ...profile.exports.map((entry) => entry.symbol), profile.sidecar?.buildIdSymbol, profile.sidecar?.abiVersionSymbol];
-  const surface = sanitize ? "sanitized library builds"
-    : profile.instancePerThread ? "thread-instanced libraries (instantiate separate Wasm instances instead)"
-    : profile.localizeRuntime ? "runtime localization (Wasm instances already isolate their runtime)"
-    : symbols.some((symbol) => symbol != null && reserved.has(symbol)) ? "library symbols reserved by the Wasm embedding ABI"
-    : profile.callbacks.some((cb) => cb.name === "panic") ? "a callback named 'panic' (reserved by the Wasm embedding ABI)"
-    : null;
-  return surface === null ? null : targetRefusalDiag("wasm32-wasi", surface, { file: profile.entry, start: 0, end: 0 });
+  const symbols = [
+    profile.initSymbol,
+    profile.sinkRegisterSymbol,
+    profile.collectSymbol,
+    profile.resultResetSymbol,
+    profile.callbackRegisterSymbol,
+    ...profile.exports.map((entry) => entry.symbol),
+    profile.sidecar?.buildIdSymbol,
+    profile.sidecar?.abiVersionSymbol,
+  ];
+  const surface = sanitize
+    ? "sanitized library builds"
+    : profile.instancePerThread
+      ? "thread-instanced libraries (instantiate separate Wasm instances instead)"
+      : profile.localizeRuntime
+        ? "runtime localization (Wasm instances already isolate their runtime)"
+        : symbols.some((symbol) => symbol != null && reserved.has(symbol))
+          ? "library symbols reserved by the Wasm embedding ABI"
+          : profile.callbacks.some((cb) => cb.name === "panic")
+            ? "a callback named 'panic' (reserved by the Wasm embedding ABI)"
+            : null;
+  return surface === null
+    ? null
+    : targetRefusalDiag("wasm32-wasi", surface, { file: profile.entry, start: 0, end: 0 });
 }

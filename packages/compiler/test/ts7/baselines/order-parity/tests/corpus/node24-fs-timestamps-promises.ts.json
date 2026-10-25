@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/node24-fs-timestamps-promises.ts"
+ ],
+ "diags": []
+}

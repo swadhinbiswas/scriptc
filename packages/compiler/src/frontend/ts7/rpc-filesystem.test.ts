@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
 import { Ts7RpcClient } from "./rpc-client.js";
-import { registerTs7FileSystem, TS7_FILE_SYSTEM_CALLBACKS, type Ts7FileSystem } from "./rpc-filesystem.js";
+import {
+  registerTs7FileSystem,
+  TS7_FILE_SYSTEM_CALLBACKS,
+  type Ts7FileSystem,
+} from "./rpc-filesystem.js";
 import { Ts7Wire } from "./rpc-wire.js";
 
 const fallback: Ts7FileSystem = {
@@ -15,7 +19,10 @@ function callback(name: string, fs: Ts7FileSystem, payload = JSON.stringify("/fi
   const incoming: number[] = [];
   const encoded = new Ts7Wire({
     read: () => 0,
-    write: (buffer, offset, length) => { incoming.push(...buffer.subarray(offset, offset + length)); return length; },
+    write: (buffer, offset, length) => {
+      incoming.push(...buffer.subarray(offset, offset + length));
+      return length;
+    },
     close: () => {},
   });
   encoded.write(6, name, Buffer.from(payload));
@@ -23,19 +30,30 @@ function callback(name: string, fs: Ts7FileSystem, payload = JSON.stringify("/fi
   const outgoing: number[] = [];
   let position = 0;
   let closed = false;
-  const client = new Ts7RpcClient(new Ts7Wire({
-    read(buffer, offset, length) {
-      const chunk = incoming.slice(position, position + length);
-      buffer.set(chunk, offset);
-      position += chunk.length;
-      return chunk.length;
-    },
-    write(buffer, offset, length) { outgoing.push(...buffer.subarray(offset, offset + length)); return length; },
-    close() { closed = true; },
-  }));
+  const client = new Ts7RpcClient(
+    new Ts7Wire({
+      read(buffer, offset, length) {
+        const chunk = incoming.slice(position, position + length);
+        buffer.set(chunk, offset);
+        position += chunk.length;
+        return chunk.length;
+      },
+      write(buffer, offset, length) {
+        outgoing.push(...buffer.subarray(offset, offset + length));
+        return length;
+      },
+      close() {
+        closed = true;
+      },
+    }),
+  );
   registerTs7FileSystem(client, fs);
   let error: unknown;
-  try { client.requestText("query", "null"); } catch (caught) { error = caught; }
+  try {
+    client.requestText("query", "null");
+  } catch (caught) {
+    error = caught;
+  }
   let offset = 0;
   const reader = new Ts7Wire({
     read(buffer, start, length) {
@@ -53,11 +71,16 @@ function callback(name: string, fs: Ts7FileSystem, payload = JSON.stringify("/fi
 }
 
 test.each([
-  [undefined, ""], [null, '{"content":null}'], ["", '{"content":""}'],
+  [undefined, ""],
+  [null, '{"content":null}'],
+  ["", '{"content":""}'],
   ["\uFEFFhéllo🌍\n", '{"content":"\uFEFFhéllo🌍\\n"}'],
 ] as const)("readFile preserves the meaning of %s", (content, text) => {
   expect(callback("readFile", { ...fallback, readFile: () => content })).toEqual({
-    kind: 2, text, error: undefined, closed: false,
+    kind: 2,
+    text,
+    error: undefined,
+    closed: false,
   });
 });
 
@@ -66,25 +89,56 @@ test.each(TS7_FILE_SYSTEM_CALLBACKS.split(","))("%s delegates undefined to the s
 });
 
 test("boolean false and empty directory entries do not fall through", () => {
-  const fs = { ...fallback, fileExists: () => false, directoryExists: () => true, getAccessibleEntries: () => ({ files: [], directories: [] }) };
+  const fs = {
+    ...fallback,
+    fileExists: () => false,
+    directoryExists: () => true,
+    getAccessibleEntries: () => ({ files: [], directories: [] }),
+  };
   expect(callback("fileExists", fs).text).toBe("false");
   expect(callback("directoryExists", fs).text).toBe("true");
-  expect(JSON.parse(callback("getAccessibleEntries", fs).text)).toEqual({ files: [], directories: [] });
+  expect(JSON.parse(callback("getAccessibleEntries", fs).text)).toEqual({
+    files: [],
+    directories: [],
+  });
 });
 
 test("paths and realpath replies preserve Unicode and quoting", () => {
   const path = '/a/"héllo 🌍"/file.ts';
   let seen = "";
-  const reply = callback("realpath", { ...fallback, realpath: (value) => { seen = value; return value + ".real"; } }, JSON.stringify(path));
+  const reply = callback(
+    "realpath",
+    {
+      ...fallback,
+      realpath: (value) => {
+        seen = value;
+        return value + ".real";
+      },
+    },
+    JSON.stringify(path),
+  );
   expect(seen).toBe(path);
   expect(JSON.parse(reply.text)).toBe(path + ".real");
 });
 
-test.each(["null", "{}", "[]", "1", "true", "bad JSON"])("invalid callback path %s fails the request", (payload) => {
-  let called = false;
-  const reply = callback("readFile", { ...fallback, readFile: () => { called = true; return ""; } }, payload);
-  expect(called).toBe(false);
-  expect(reply.kind).toBe(3);
-  expect(reply.closed).toBe(true);
-  expect(reply.error).toBeInstanceOf(Error);
-});
+test.each(["null", "{}", "[]", "1", "true", "bad JSON"])(
+  "invalid callback path %s fails the request",
+  (payload) => {
+    let called = false;
+    const reply = callback(
+      "readFile",
+      {
+        ...fallback,
+        readFile: () => {
+          called = true;
+          return "";
+        },
+      },
+      payload,
+    );
+    expect(called).toBe(false);
+    expect(reply.kind).toBe(3);
+    expect(reply.closed).toBe(true);
+    expect(reply.error).toBeInstanceOf(Error);
+  },
+);

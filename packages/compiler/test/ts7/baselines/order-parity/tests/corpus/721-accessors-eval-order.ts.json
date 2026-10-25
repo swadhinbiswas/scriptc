@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/721-accessors-eval-order.ts"
+ ],
+ "diags": []
+}

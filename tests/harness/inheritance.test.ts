@@ -32,7 +32,13 @@ async function emittedLlvm(name: string, source: string, ext = "ts"): Promise<st
   const file = join(outDir, `${name}.${ext}`);
   writeFileSync(file, source);
   // Inspect LLVM directly so the cost model is independent of optimization.
-  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize, backend: "llvm", outputKind: "llvm" });
+  const result = await compile(file, {
+    outPath: join(outDir, name),
+    outDir,
+    sanitize,
+    backend: "llvm",
+    outputKind: "llvm",
+  });
   if (!result.ok) {
     throw new Error(
       "inheritance program failed to compile:\n" +
@@ -84,16 +90,22 @@ class Dog extends Animal {
   }
 }
 const a: Animal = new Dog("rex");
-console.log(a.id(), a.speak());
+const b: Animal = new Animal("cat");
+console.log(a.id(), a.speak(), b.speak());
 `,
     );
     // The devirtualized call is a direct sc_f_ call of Animal's id...
     expect(llvm).toMatch(/sc_f__x25_Animal_id\(/);
     // ...and id never becomes a vtable slot, while speak does and the
-    // base-typed call site dispatches through it.
+    // base-typed call site dispatches through it: both classes are
+    // constructed, so the loaded slot selects a direct call of each.
     expect(llvm).toMatch(/%sc_vtt_Animal = type \{ %ScrVt, ptr \}/);
-    expect(llvm).toMatch(/@sc_vtable_Dog = [^\n]*ptr @sc_f__x25_Dog_speak/);
-    expect(llvm).toMatch(/getelementptr inbounds %sc_vtt_Animal, ptr %\w+, i64 0, i32 1[\s\S]*call ptr %\w+\(ptr /);
+    expect(llvm).toMatch(/%sc_vtt_Animal \{[^\n]*ptr @sc_b?f__x25_Dog_speak\b[^\n]*; class Dog\n/);
+    expect(llvm).toMatch(
+      /getelementptr inbounds %sc_vtt_Animal, ptr %\w+, i64 0, i32 1[\s\S]*icmp eq ptr %\w+, @sc_b?f__x25_(?:Animal|Dog)_speak\n/,
+    );
+    expect(llvm).toMatch(/call ptr @sc_b?f__x25_Dog_speak\(ptr /);
+    expect(llvm).toMatch(/call ptr @sc_b?f__x25_Animal_speak\(ptr /);
   });
 
   test("accessors on standalone classes stay zero-cost direct calls", async () => {
@@ -143,20 +155,26 @@ console.log(g.level);
     return "cell"; // getter-only, overridden below: vtable slot
   }
 }
-class LoudCell extends Cell {
+class UpperCell extends Cell {
   get label(): string {
-    return "LOUD " + this._v;
+    return "UPPER " + this._v;
   }
 }
-const c: Cell = new LoudCell();
+const c: Cell = new UpperCell();
+const plain: Cell = new Cell();
 c.v = 3;
-console.log(c.v, c.label);
+console.log(c.v, c.label, plain.label);
 `,
     );
     // The overridden getter dispatches through its slot...
     expect(llvm).toMatch(/%sc_vtt_Cell = type \{ %ScrVt, ptr \}/);
-    expect(llvm).toMatch(/@sc_vtable_LoudCell = [^\n]*ptr @sc_f__x25_LoudCell_get_x3a_label/);
-    expect(llvm).toMatch(/getelementptr inbounds %sc_vtt_Cell, ptr %\w+, i64 0, i32 1[\s\S]*call ptr %\w+\(ptr /);
+    expect(llvm).toMatch(
+      /%sc_vtt_Cell \{[^\n]*ptr @sc_b?f__x25_UpperCell_get_x3a_label\b[^\n]*; class UpperCell\n/,
+    );
+    expect(llvm).toMatch(
+      /getelementptr inbounds %sc_vtt_Cell, ptr %\w+, i64 0, i32 1[\s\S]*icmp eq ptr %\w+, @sc_b?f__x25_(?:Cell|UpperCell)_get_x3a_label\n/,
+    );
+    expect(llvm).toMatch(/call ptr @sc_b?f__x25_UpperCell_get_x3a_label\(ptr /);
     // ...while the never-overridden pair keeps direct calls and no slots.
     expect(llvm).toMatch(/sc_f__x25_Cell_get_x3a_v\(/);
     expect(llvm).toMatch(/sc_f__x25_Cell_set_x3a_v\(/);
@@ -181,19 +199,18 @@ r.on("data", (b: Buffer) => console.log(b.toString()));
     // display name, state pointer) ahead of user fields...
     expect(llvm).toContain("%sc_o_Counter = type { i64, ptr, ptr, ptr, ptr, double }");
     // ...its teardown delegates the state block to the runtime...
-    expect(llvm).toMatch(/getelementptr inbounds %sc_o_Counter, ptr %o, i64 0, i32 4[\s\S]*call void @scr_stream_st_release\(ptr /);
+    expect(llvm).toMatch(
+      /getelementptr inbounds %sc_o_Counter, ptr %o, i64 0, i32 4[\s\S]*call void @scr_stream_st_release\(ptr /,
+    );
     // ...and super() initializes the state over the allocated struct.
     expect(llvm).toContain("call void @scr_stream_init_readable(ptr ");
   });
 
-  test("a runtime-fenced nested stream class emits the refusal without class helpers", async () => {
-    // The phase-1 reachable bug: a class declared inside a block (a
-    // runtime fence in JS) whose instances are captured emitted capture-
-    // box RC adapters for the uncollected class — a C compile error.
-    // run()'s unregistered-class sweep now rewrites such type slots to
-    // the inert f64 placeholder before emission (no instance can exist;
-    // every use traps), so the capture box is a PLAIN-kind box and the
-    // class never reaches the emitter at all.
+  test("a block-scoped stream class lowers natively with its class helpers", async () => {
+    // A class declared inside a block is collected like a class expression.
+    // Its captured instances once needed the unregistered-class sweep (the
+    // class was fenced); a builtin stream base no longer fences, so the
+    // class reaches the emitter with its object type and stream init.
     const llvm = await emittedLlvm(
       "stream-nested-fence",
       `const { Readable } = require("stream");
@@ -208,11 +225,10 @@ r.on("data", (b: Buffer) => console.log(b.toString()));
 `,
       "js",
     );
-    expect(llvm).not.toContain("sc_retain_R_v");
     expect(llvm).not.toContain("uncollected class");
-    expect(llvm).not.toContain("%sc_o_R");
-    expect(llvm).toMatch(/%sc_l_stream_0 = alloca ptr/);
-    expect(llvm).toContain("call void @scr_throw_error_msg_code");
+    expect(llvm).toContain("%sc_o_R");
+    expect(llvm).toContain("call void @scr_stream_init_readable(ptr ");
+    expect(llvm).not.toContain("call void @scr_throw_error_msg_code");
   });
 
   test("a getter-only override of a pair fills the set slot with a thrower", async () => {
@@ -236,19 +252,23 @@ class SealedBox extends Box {
   }
 }
 const b: Box = new SealedBox();
+const plain: Box = new Box();
 try {
   b.v = 9;
 } catch {
   console.log("sealed");
 }
-console.log(b.v);
+plain.v = 2;
+console.log(b.v, plain.v);
 `,
     );
     // JS shadowing: the derived class's synthesized setter occupies the
     // set slot (a base-typed write must throw like Node), so BOTH halves
     // dispatch dynamically here.
     expect(llvm).toMatch(/%sc_vtt_Box = type \{ %ScrVt, ptr, ptr \}/);
-    expect(llvm).toMatch(/@sc_vtable_SealedBox = [^\n]*ptr @sc_f__x25_SealedBox_get_x3a_v, ptr @sc_f__x25_SealedBox_set_x3a_v/);
+    expect(llvm).toMatch(
+      /%sc_vtt_Box \{[^\n]*ptr @sc_b?f__x25_SealedBox_get_x3a_v(\.virtual)?, ptr @sc_b?f__x25_SealedBox_set_x3a_v\b[^\n]*; class SealedBox\n/,
+    );
     expect(llvm).toMatch(/getelementptr inbounds %sc_vtt_Box, ptr %\w+, i64 0, i32 2/);
     expect(llvm).toMatch(/sc_f__x25_SealedBox_set_x3a_v/);
   });

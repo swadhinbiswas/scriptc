@@ -1,5 +1,12 @@
 import type { Node, SourceFile } from "./ast-types.js";
-import type { IndexInfo, InterfaceType, Signature, Symbol as Ts7Symbol, Type, TypePredicate } from "./semantic-types.js";
+import type {
+  IndexInfo,
+  InterfaceType,
+  Signature,
+  Symbol as Ts7Symbol,
+  Type,
+  TypePredicate,
+} from "./semantic-types.js";
 
 /** One facade's answers for one immutable semantic project. Strong keys
  * are safe only within this lifetime: project disposal clears every map,
@@ -37,9 +44,6 @@ export class CheckerCache {
   readonly managedSymbols = new Set<SourceFile>();
   readonly intrinsics = new Map<string, Type>();
   readonly tupleTypeAnswer = new Map<Type, boolean>();
-  readonly declsOf = new Map<Ts7Symbol, readonly Node[]>();
-  readonly valueDeclOf = new Map<Ts7Symbol, Node | undefined>();
-  readonly sigDeclOf = new Map<Signature, Node | undefined>();
   readonly callSigsOf = new Map<Type, readonly Signature[]>();
   readonly ctorSigsOf = new Map<Type, readonly Signature[]>();
   readonly constantValueOf = new Map<Node, string | number | undefined>();
@@ -83,9 +87,6 @@ export class CheckerCache {
     this.managedSymbols.clear();
     this.intrinsics.clear();
     this.tupleTypeAnswer.clear();
-    this.declsOf.clear();
-    this.valueDeclOf.clear();
-    this.sigDeclOf.clear();
     this.callSigsOf.clear();
     this.ctorSigsOf.clear();
     this.constantValueOf.clear();

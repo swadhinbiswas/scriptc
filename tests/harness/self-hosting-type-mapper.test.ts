@@ -47,7 +47,14 @@ function checkReport(report: MappingReport): void {
   }
   expect(byName.get("ProductionModule")!.type?.kind).toBe("record");
   expect(byName.get("ProductionFunction")!.type?.kind).toBe("record");
-  for (const name of ["Expression", "NumericVariant", "BooleanVariant", "MixedVariant", "AliasedVariant", "OtherVariant"]) {
+  for (const name of [
+    "Expression",
+    "NumericVariant",
+    "BooleanVariant",
+    "MixedVariant",
+    "AliasedVariant",
+    "OtherVariant",
+  ]) {
     const type = byName.get(name)!.type;
     if (type?.kind !== "union") throw new Error(`${name} did not map to a union`);
     const def = report.unions.find((union) => union.id === type.unionId)!;
@@ -57,54 +64,100 @@ function checkReport(report: MappingReport): void {
   for (const name of ["PlainUnion", "OptionalKind", "AccessorKind", "BroadKind"]) {
     const type = byName.get(name)!.type;
     if (type?.kind !== "union") throw new Error(`${name} did not map to a union`);
-    expect(report.unions.find((union) => union.id === type.unionId)!.discriminant, name).toBeUndefined();
+    expect(
+      report.unions.find((union) => union.id === type.unionId)!.discriminant,
+      name,
+    ).toBeUndefined();
   }
   expect(byName.get("AliasedVariant")!.type).not.toEqual(byName.get("OtherVariant")!.type);
   expect(report.variants.length).toBeGreaterThanOrEqual(18);
   expect(report.memoEntries).toBeGreaterThan(30);
   expect(report.hooks).toEqual([
-    "Box:first:f64", "Box:second:f64", "parameter:f64:string",
-    "HookIndexed:f64:string", "HookKeys:f64:string", "HookLiteral:f64:string", "dynamic memo isolation",
+    "Box:first:f64",
+    "Box:second:f64",
+    "parameter:f64:string",
+    "HookIndexed:f64:string",
+    "HookKeys:f64:string",
+    "HookLiteral:f64:string",
   ]);
 }
 
 for (const backend of ["llvm"] as const) {
   test(`production type mapper runs against native TS7 (${backend})`, async () => {
-    const directory = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-type-mapper-"));
+    const directory = mkdtempSync(
+      join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-type-mapper-"),
+    );
     try {
       const object = join(directory, "process.o");
-      execFileSync("clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", ...(sanitize ? ["-fsanitize=address"] : []),
-        "-c", join(nativeSources, "ts7-process.c"), "-o", object]);
+      execFileSync("clang", [
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        ...(sanitize ? ["-fsanitize=address"] : []),
+        "-c",
+        join(nativeSources, "ts7-process.c"),
+        "-o",
+        object,
+      ]);
       const profile = join(directory, "ffi.json");
-      writeFileSync(profile, JSON.stringify({
-        ...JSON.parse(readFileSync(join(nativeSources, "ts7-process.ffi.json"), "utf8")), libraries: [object],
-      }));
+      writeFileSync(
+        profile,
+        JSON.stringify({
+          ...JSON.parse(readFileSync(join(nativeSources, "ts7-process.ffi.json"), "utf8")),
+          libraries: [object],
+        }),
+      );
       const source = join(directory, "input.ts");
-      writeFileSync(source, typeMapperInput + `
+      writeFileSync(
+        source,
+        typeMapperInput +
+          `
         import type { IrType, IrExpr, IrStmt, IrModule, IrFunction } from ${JSON.stringify(join(root, "packages/compiler/src/ir/ir.js"))};
         export type ProductionType = IrType;
         export type ProductionExpression = IrExpr;
         export type ProductionStatement = IrStmt;
         export type ProductionModule = IrModule;
         export type ProductionFunction = IrFunction;
-      `);
+      `,
+      );
       const expected = join(directory, "node.json");
-      const node = spawnSync(process.execPath, ["--import", "tsx", join(fixtures, "type-mapper-node.ts"), ts7Executable(), source, expected], {
-        encoding: "utf8", timeout: 90_000,
-      });
+      const node = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          join(fixtures, "type-mapper-node.ts"),
+          ts7Executable(),
+          source,
+          expected,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 90_000,
+        },
+      );
       expect(node.error, node.stderr).toBeUndefined();
       expect(node.status, node.stderr).toBe(0);
       expect(node.stdout).toBe("");
       expect(node.stderr).toBe("");
-      const nodeReport = JSON.parse(readFileSync(expected, "utf8")) as { first: MappingReport; second: MappingReport };
+      const nodeReport = JSON.parse(readFileSync(expected, "utf8")) as {
+        first: MappingReport;
+        second: MappingReport;
+      };
       checkReport(nodeReport.first);
       expect(nodeReport.second).toEqual(nodeReport.first);
 
       const api = pathToFileURL(join(root, "packages/compiler/src/index.ts")).href;
-      const { stdout, stderr } = await execFileAsync(process.execPath, [
-        "--import", "tsx", "--input-type=module", "--eval",
-        `import { analyze, compile } from ${JSON.stringify(api)};
-         const options = { dynamic: false, ffiProfilePath: process.argv[2] };
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "--eval",
+          `import { analyze, compile } from ${JSON.stringify(api)};
+         const options = { ffiProfilePath: process.argv[2] };
          const { coverage } = analyze(process.argv[1], options);
          const built = await compile(process.argv[1], {
            ...options, backend: process.argv[3], optimization: 'dev', sanitize: process.argv[4] === '1',
@@ -113,9 +166,15 @@ for (const backend of ["llvm"] as const) {
          console.log(JSON.stringify({ coverage: {
            preflightFailed: coverage.preflightFailed, diagnostics: coverage.diagnostics, stats: coverage.stats,
          }, built }));`,
-        join(fixtures, "type-mapper.ts"), profile, backend, sanitize ? "1" : "0", directory,
-        join(directory, process.platform === "win32" ? "mapper.exe" : "mapper"),
-      ], { cwd: root, timeout: 300_000, maxBuffer: 32 * 1024 * 1024 });
+          join(fixtures, "type-mapper.ts"),
+          profile,
+          backend,
+          sanitize ? "1" : "0",
+          directory,
+          join(directory, process.platform === "win32" ? "mapper.exe" : "mapper"),
+        ],
+        { cwd: root, timeout: 300_000, maxBuffer: 32 * 1024 * 1024 },
+      );
       expect(stderr).toBe("");
       const { coverage, built } = JSON.parse(stdout) as {
         coverage: AnalyzeResult["coverage"];
@@ -124,22 +183,31 @@ for (const backend of ["llvm"] as const) {
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
-      if (!built.ok) throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
-      if (!("binaryPath" in built)) throw new Error("type mapper did not produce a native executable");
+      if (!built.ok)
+        throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      if (!("binaryPath" in built))
+        throw new Error("type mapper did not produce a native executable");
       expect(built.backend).toBe(backend);
 
       const output = join(directory, "native.json");
-      const native = spawnSync(built.binaryPath, [ts7Executable(), source, output], { encoding: "utf8", timeout: 90_000 });
+      const native = spawnSync(built.binaryPath, [ts7Executable(), source, output], {
+        encoding: "utf8",
+        timeout: 90_000,
+      });
       expect(native.error, native.stderr).toBeUndefined();
       expect(native.signal, native.stderr).toBeNull();
       expect(native.status, native.stderr).toBe(0);
       expect(native.stdout).toBe(node.stdout);
       expect(native.stderr).toBe(node.stderr);
-      const nativeReport = JSON.parse(readFileSync(output, "utf8")) as { first: MappingReport; second: MappingReport };
+      const nativeReport = JSON.parse(readFileSync(output, "utf8")) as {
+        first: MappingReport;
+        second: MappingReport;
+      };
       expect(nativeReport.first.tuples).toEqual(nodeReport.first.tuples);
       expect(nativeReport).toEqual(nodeReport);
-    } finally { rmSync(directory, { recursive: true, force: true }); }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 }

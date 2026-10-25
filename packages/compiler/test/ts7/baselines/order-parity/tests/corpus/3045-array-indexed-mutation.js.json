@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3045-array-indexed-mutation.js"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/cycle-growth-yield.ts"
+ ],
+ "diags": []
+}

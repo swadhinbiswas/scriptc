@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1853-overload-modules/lib.ts",
+  "<repo>/tests/corpus/1853-overload-modules/main.ts"
+ ],
+ "diags": []
+}

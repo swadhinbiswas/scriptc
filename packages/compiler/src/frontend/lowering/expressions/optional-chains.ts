@@ -1,8 +1,14 @@
+import { isNavigatorGlobal } from "../builtins/navigator.js";
+import { isSafeToDiscard } from "./evaluation-safety.js";
+import { completeFuncValueArgs } from "../call-arguments.js";
+import { dynUndefinedExpr } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
-import { DYN, JSVAL, STRING, UNDEFINED_T, VOID, isUnitType, typeEquals } from "../../../ir/ir.js";
+import { DYN, STRING, UNDEFINED_T, VOID, isUnitType, typeEquals } from "../../../ir/ir.js";
 import type { IrExpr, IrStmt, SrcLoc } from "../../../ir/ir.js";
 import { isNodeEsmFile, locOf } from "../../program.js";
-import { dynUndefinedExpr, type Lowerer } from "../lowerer.js";
+import type { Lowerer } from "../lowerer.js";
+import { tryLowerExpression } from "./try-lower-expression.js";
+import { constituentTypes } from "../../ts7/checker.js";
 
 /** One optional-chain STEP: `a?.b`, `a?.m(...)`, `a?.[i]` (the token on
  * the member access) and `f?.()` (the token on the call). The receiver
@@ -25,7 +31,8 @@ import { dynUndefinedExpr, type Lowerer } from "../lowerer.js";
  * deeper — `x?.trim().toLowerCase()` reads nothing past the guard when x
  * is nullish, so the whole tail must lower inside it. Walks
  * property/element accesses and call steps only (parens and `!` break
- * the chain per the grammar: `(a?.b).c` throws on undefined in JS);
+ * the chain per the grammar: `(a?.b).c` throws on undefined in JS, while
+ * an unparenthesized `a?.b!.c` stays one chain, as TypeScript emits it);
  * the node's OWN token — and a call's immediate callee token — are the
  * plain entries' cases, not tails, and handled markers make the chain
  * lowering's re-dispatch walk past its own step. `f?.()` steps stay out
@@ -40,6 +47,10 @@ function chainTailDot(
     // An active chain's bound receiver read is a LEAF — its own token
     // was consumed by the chain that bound it.
     if (lowerer.chainRecvByNode.has(cur)) return null;
+    if (ts.isNonNullExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
     if (ts.isCallExpression(cur)) {
       // `f?.()` steps route through their own entry (or are being
       // handled); a deeper token under one is that chain's business.
@@ -82,32 +93,41 @@ export function isRequireMainFilename(lowerer: Lowerer, expr: ts.Expression): bo
   const main = expr.expression;
   if (!ts.isPropertyAccessExpression(main) || main.name.text !== "main") return false;
   if (!lowerer.isStdlibGlobal(main.expression, "require")) return false;
-  return !isNodeEsmFile(expr.getSourceFile(), lowerer.program);
+  return !isNodeEsmFile(ts.getSourceFileOfNode(expr), lowerer.program);
 }
 
-/** True when `expr` is the tail of an optional chain that must short-circuit
- * whole: an unhandled deeper `?.` guarded by a unit-armed union or an island
- * value. Dynamic tails need the guard because an ordinary read of the
- * short-circuited undefined would throw; never-nullish receivers fold at the token. */
 export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): boolean {
   const tail = chainTailDot(lowerer, expr);
   if (!tail) return false;
-  const recvT = lowerer.mapTypeOf(lowerer.typeOf(tail.expression));
-  if (recvT?.kind === "jsval" || recvT?.kind === "dyn") return true;
-  if (recvT?.kind !== "union") return false;
-  const def = lowerer.unions.get(recvT.unionId);
-  return !!def && def.arms.some(isUnitType);
+  const recvTs = lowerer.typeOf(tail.expression);
+  // An `any` receiver short-circuits the whole tail too: `a?.b.c` reads
+  // `.c` normally once `a` is present.
+  if (recvTs.flags & ts.TypeFlags.Any) return true;
+  const recvT = lowerer.mapTypeOf(recvTs);
+  if (recvT?.kind === "dyn") return true;
+  if (recvT?.kind === "union") {
+    const def = lowerer.unions.get(recvT.unionId);
+    if (def?.arms.some(isUnitType)) return true;
+  }
+  // The checker calls the receiver present, but an unchecked read (`a[0]`
+  // past the end, a missing index-signature key) can still lower to an
+  // undefined-armed value, and `a[0]?.b.c` must then short-circuit `.c`
+  // too. The chain lowering inspects the lowered receiver: a present value
+  // re-dispatches the plain lowering, so only genuinely optional receivers
+  // change shape.
+  return lowerer.isRuntimeOptionalOrigin(tail.expression);
 }
 
 /** True when an EARLIER step of this access chain carries `?.` — JS
  * short-circuits the whole tail (`a?.b.c` reads nothing when a is
  * nullish), so a dyn tail read must answer undefined instead of
  * throwing. Walks the receiver spine only; the argument of the access
- * itself is not part of the guard. */
-export function hasOptionalChainGuard(expr: ts.Expression): boolean {
+ * itself is not part of the guard. Parentheses end the chain
+ * (`(a?.b).c` reads `.c` from undefined); `!` does not. */
+export function hasOptionalChainGuard(expr: ts.Expression, lowerer?: Lowerer): boolean {
   let cur: ts.Expression = expr;
   for (;;) {
-    if (ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)) {
+    if (ts.isNonNullExpression(cur)) {
       cur = cur.expression;
       continue;
     }
@@ -116,7 +136,11 @@ export function hasOptionalChainGuard(expr: ts.Expression): boolean {
       ts.isElementAccessExpression(cur) ||
       ts.isCallExpression(cur)
     ) {
-      if (cur.questionDotToken) return true;
+      // Inside an optional chain's guarded body (dynamic reads pass the
+      // lowerer), the enclosing optChain already short-circuits on the
+      // consumed token, so the steps above it read normally: `a?.b.c`
+      // throws when `a.b` is undefined.
+      if (cur.questionDotToken) return lowerer === undefined || !lowerer.chainHandled.has(cur);
       cur = cur.expression;
       continue;
     }
@@ -124,7 +148,35 @@ export function hasOptionalChainGuard(expr: ts.Expression): boolean {
   }
 }
 
-export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | ts.PropertyAccessExpression | ts.ElementAccessExpression,): IrExpr {
+/** `recv.m` where `m` is a required method the standard library declares
+ * and `recv` itself is a non-optional, never-nullish typed receiver. */
+function alwaysPresentStdlibMethod(lowerer: Lowerer, node: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(node) || node.questionDotToken) return false;
+  if (hasOptionalChainGuard(node.expression)) return false;
+  const symbol = lowerer.checker.getSymbolAtLocation(node.name);
+  if (!symbol || !(symbol.flags & ts.SymbolFlags.Method) || symbol.flags & ts.SymbolFlags.Optional)
+    return false;
+  if (!lowerer.isStdlibSymbol(symbol)) return false;
+  const nullable =
+    ts.TypeFlags.Any |
+    ts.TypeFlags.Unknown |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Void;
+  const receiverType = lowerer.checker.getTypeAtLocation(node.expression);
+  const calleeType = lowerer.checker.getTypeAtLocation(node);
+  const parts = (type: ts.Type): readonly ts.Type[] =>
+    type.flags & ts.TypeFlags.Union ? constituentTypes(type) : [type];
+  return (
+    parts(receiverType).every((part) => !(part.flags & nullable)) &&
+    parts(calleeType).every((part) => !(part.flags & nullable))
+  );
+}
+
+export function lowerOptionalChain(
+  lowerer: Lowerer,
+  expr: ts.CallExpression | ts.PropertyAccessExpression | ts.ElementAccessExpression,
+): IrExpr {
   const loc = locOf(expr);
   // The node CARRYING the ?. token and the receiver expression it guards.
   let dotNode: ts.Node;
@@ -134,14 +186,17 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
     recvNode = expr.expression;
   } else if (
     ts.isCallExpression(expr) &&
-    (ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)) &&
-    expr.expression.questionDotToken && !lowerer.chainHandled.has(expr.expression)
+    (ts.isPropertyAccessExpression(expr.expression) ||
+      ts.isElementAccessExpression(expr.expression)) &&
+    expr.expression.questionDotToken &&
+    !lowerer.chainHandled.has(expr.expression)
   ) {
     dotNode = expr.expression; // a?.m()
     recvNode = expr.expression.expression;
   } else if (
     (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) &&
-    expr.questionDotToken && !lowerer.chainHandled.has(expr)
+    expr.questionDotToken &&
+    !lowerer.chainHandled.has(expr)
   ) {
     dotNode = expr; // a?.b / a?.[i]
     recvNode = expr.expression;
@@ -164,11 +219,39 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
     dotNode = tail;
     recvNode = tail.expression;
   }
-  const loweredReceiver = lowerer.lowerExpr(recvNode);
+  // `h.getSetCookie?.()`: a required standard-library METHOD on a
+  // never-nullish receiver always exists, so `?.()` is the plain call.
+  // Native handle methods have no first-class value to guard; when the
+  // method read itself has no lowering, re-dispatch the plain call (which
+  // reports its own diagnostics) instead of failing on the value read.
+  // `navigator?.userAgent`: Node's navigator global is never nullish and
+  // has no value form, so the guarded step is the plain member read.
+  if (isNavigatorGlobal(lowerer, recvNode)) {
+    lowerer.chainHandled.add(dotNode);
+    try {
+      return lowerer.lowerExpr(expr);
+    } finally {
+      lowerer.chainHandled.delete(dotNode);
+    }
+  }
+  let loweredReceiver: IrExpr | null;
+  if (dotNode === expr && alwaysPresentStdlibMethod(lowerer, recvNode)) {
+    loweredReceiver = tryLowerExpression(lowerer, recvNode);
+    if (loweredReceiver === null) {
+      lowerer.chainHandled.add(dotNode);
+      try {
+        return lowerer.lowerExpr(expr);
+      } finally {
+        lowerer.chainHandled.delete(dotNode);
+      }
+    }
+  } else {
+    loweredReceiver = lowerer.lowerExpr(recvNode);
+  }
   const receiver = lowerer.runtimeOptionalSourceValue(recvNode, loweredReceiver) ?? loweredReceiver;
   if (receiver.type.kind === "dyn") {
     if (dotNode === expr && ts.isCallExpression(expr)) {
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const callee: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
       const stmts: IrStmt[] = [];
       let guarded = receiver;
@@ -183,20 +266,29 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
         thisValue = lowerer.coerceInto(recvNode.expression, reference, DYN);
         const previous = lowerer.chainRecvByNode.get(recvNode.expression);
         lowerer.chainRecvByNode.set(recvNode.expression, reference);
-        try { guarded = lowerer.lowerExpr(recvNode); }
-        finally {
+        try {
+          guarded = lowerer.lowerExpr(recvNode);
+        } finally {
           if (previous) lowerer.chainRecvByNode.set(recvNode.expression, previous);
           else lowerer.chainRecvByNode.delete(recvNode.expression);
         }
       }
       const spreads: { arg: number; what: string }[] = [];
-      const args = expr.arguments.map((arg, index) => {
+      const args = expr.arguments.nodes.map((arg, index) => {
         if (!ts.isSpreadElement(arg)) return lowerer.lowerExprExpecting(arg, DYN);
-        spreads.push({ arg: index, what: arg.expression.getText() });
+        spreads.push({ arg: index, what: ts.getTextOfNode(arg.expression) });
         return lowerer.lowerExprExpecting(arg.expression, DYN);
       });
-      const body: IrExpr = { kind: "dynCall", callee, ...(thisValue ? { receiver: thisValue } : {}),
-        calleeName: recvNode.getText(), args, ...(spreads.length ? { spreads } : {}), type: DYN, loc };
+      const body: IrExpr = {
+        kind: "dynCall",
+        callee,
+        ...(thisValue ? { receiver: thisValue } : {}),
+        calleeName: ts.getTextOfNode(recvNode),
+        args,
+        ...(spreads.length ? { spreads } : {}),
+        type: DYN,
+        loc,
+      };
       const result: IrExpr = { kind: "optChain", id, receiver: guarded, body, type: DYN, loc };
       return stmts.length ? { kind: "seqExpr", stmts, result, type: DYN, loc } : result;
     }
@@ -205,17 +297,32 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
     // read with the optional (unit-answers-undefined) policy — no
     // optChain wrapper needed; nested steps compose the same way.
     if (dotNode === expr && ts.isPropertyAccessExpression(expr)) {
-      const key: IrExpr = { kind: "strLit", value: expr.name.text, type: STRING, loc: locOf(expr.name) };
-      return lowerer.maybeNarrow({ kind: "dynKeyGet", key, optional: true, value: receiver, type: DYN, loc }, expr);
+      const key: IrExpr = {
+        kind: "strLit",
+        value: expr.name.text,
+        type: STRING,
+        loc: locOf(expr.name),
+      };
+      return lowerer.maybeNarrow(
+        { kind: "dynKeyGet", key, optional: true, value: receiver, type: DYN, loc },
+        expr,
+      );
     }
     if (dotNode === expr && ts.isElementAccessExpression(expr)) {
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const reference: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
       lowerer.chainRecvByNode.set(recvNode, reference);
       lowerer.chainHandled.add(dotNode);
       try {
         const body = lowerer.lowerExpr(expr);
-        return { kind: "optChain", id, receiver, body: lowerer.coerceToExpected(body, DYN), type: DYN, loc };
+        return {
+          kind: "optChain",
+          id,
+          receiver,
+          body: lowerer.coerceToExpected(body, DYN),
+          type: DYN,
+          loc,
+        };
       } finally {
         lowerer.chainRecvByNode.delete(recvNode);
         lowerer.chainHandled.delete(dotNode);
@@ -235,7 +342,7 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
       dotNode === expr.expression
     ) {
       const m = dotNode.name.text;
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const recvRef: IrExpr = { kind: "chainRecv", id, type: DYN, loc: locOf(recvNode) };
       lowerer.chainRecvByNode.set(recvNode, recvRef);
       lowerer.chainHandled.add(dotNode);
@@ -262,69 +369,30 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
       }
       return { kind: "optChain", id, receiver, body, type: DYN, loc };
     }
-    const id = `chain.${lowerer.chainCounter++}`;
+    const id = lowerer.closureName(loc, "", "chain");
     const reference: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
     lowerer.chainRecvByNode.set(recvNode, reference);
     lowerer.chainHandled.add(dotNode);
     try {
       const body = lowerer.lowerExpr(expr);
-      if (body.type.kind === "void") return { kind: "optChain", id, receiver, body, type: VOID, loc };
-      return { kind: "optChain", id, receiver, body: lowerer.coerceToExpected(body, DYN), type: DYN, loc };
+      if (body.type.kind === "void")
+        return { kind: "optChain", id, receiver, body, type: VOID, loc };
+      return {
+        kind: "optChain",
+        id,
+        receiver,
+        body: lowerer.coerceToExpected(body, DYN),
+        type: DYN,
+        loc,
+      };
     } finally {
       lowerer.chainRecvByNode.delete(recvNode);
       lowerer.chainHandled.delete(dotNode);
     }
   }
-  // An 'any' (island-handle) receiver: the nullish test asks the ENGINE
-  // value at runtime — null/undefined short-circuit to the engine's
-  // undefined (JS: null receivers yield undefined too), anything else
-  // proceeds as the plain island operation with the receiver evaluated
-  // once (argument side effects stay lazy, like every optChain). The
-  // result is an island value again ('any' in, 'any' out).
-  if (receiver.type.kind === "jsval") {
-    const id = `chain.${lowerer.chainCounter++}`;
-    const recvRef: IrExpr = { kind: "chainRecv", id, type: JSVAL, loc: locOf(recvNode) };
-    if (dotNode === expr && ts.isCallExpression(expr)) {
-      // `a.b?.(...)` — a MEMBER callee: JS calls it with `this` bound to
-      // `a` and short-circuits a nullish member — exactly the engine's
-      // own `o.name?.()` (optCallMethod: the RECEIVER is `a`, evaluated
-      // once through the chain; a nullish `a` itself short-circuits
-      // earlier like any optional chain). Computed members keep a fence.
-      if (ts.isPropertyAccessExpression(recvNode) || ts.isElementAccessExpression(recvNode)) {
-        if (
-          ts.isPropertyAccessExpression(recvNode) &&
-          !recvNode.questionDotToken
-        ) {
-          const obj = lowerer.lowerExpr(recvNode.expression);
-          if (obj.type.kind !== "jsval") lowerer.badType(recvNode.expression, lowerer.typeOf(recvNode.expression));
-          const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-          return { kind: "jsOp", op: "optCallMethod", name: recvNode.name.text, args: [obj, ...args], type: JSVAL, loc };
-        }
-        lowerer.unsupported(
-          "SC1090",
-          expr,
-          "optional calls of computed 'any' member values (a[k]?.() — bind the member to a const first)",
-        );
-      }
-      const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-      const body: IrExpr = { kind: "jsOp", op: "callFn", args: [recvRef, ...args], type: JSVAL, loc };
-      return { kind: "optChain", id, receiver, body, type: JSVAL, loc };
-    }
-    // Member forms (`x?.y`, `x?.y(...)`, `x?.[i]`): re-dispatch the plain
-    // island lowering with the receiver node bound to the chain.
-    lowerer.chainRecvByNode.set(recvNode, recvRef);
-    lowerer.chainHandled.add(dotNode);
-    let body: IrExpr;
-    try {
-      body = lowerer.lowerExpr(expr);
-    } finally {
-      lowerer.chainRecvByNode.delete(recvNode);
-      lowerer.chainHandled.delete(dotNode);
-    }
-    if (body.type.kind !== "jsval") lowerer.badType(expr, lowerer.typeOf(expr));
-    return { kind: "optChain", id, receiver, body, type: JSVAL, loc };
-  }
-  const def = receiver.type.kind === "union" ? lowerer.unions.get(receiver.type.unionId) : undefined;
+
+  const def =
+    receiver.type.kind === "union" ? lowerer.unions.get(receiver.type.unionId) : undefined;
   if (!def || !def.arms.some(isUnitType)) {
     // Never nullish: `?.` IS `.` — re-dispatch the plain lowering. The
     // receiver subtree above is discarded (lowering is pure IR
@@ -351,17 +419,25 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
   const rest = def.arms.filter((a) => !isUnitType(a));
   if (rest.length === 0) {
     const result = dynUndefinedExpr(loc);
-    return { kind: "seqExpr", stmts: [{ kind: "exprStmt", expr: receiver, loc }], result, type: DYN, loc };
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "exprStmt", expr: receiver, loc }],
+      result,
+      type: DYN,
+      loc,
+    };
   }
-  const narrowed = rest.length === 1
-    ? rest[0]!
-    : { kind: "union" as const, unionId: lowerer.unions.transform(def, rest) };
-  const id = `chain.${lowerer.chainCounter++}`;
+  const narrowed =
+    rest.length === 1
+      ? rest[0]!
+      : { kind: "union" as const, unionId: lowerer.unions.transform(def, rest) };
+  const id = lowerer.closureName(loc, "", "chain");
   // A single present arm binds its payload. Multiple present arms bind
   // the original tagged value, then retag inside the guarded body. The
   // nullish arms never enter that body, and each record keeps its identity.
   let recvRef: IrExpr = {
-    kind: "chainRecv", id,
+    kind: "chainRecv",
+    id,
     type: rest.length === 1 ? narrowed : receiver.type,
     loc: locOf(recvNode),
   };
@@ -374,14 +450,31 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
   if (dotNode === expr && ts.isCallExpression(expr)) {
     if (narrowed.kind !== "func") lowerer.badType(recvNode, lowerer.typeOf(recvNode));
     const params = narrowed.params;
-    const args = expr.arguments.map((a, i) => lowerer.lowerExprExpecting(a, params[i]));
+    // Forwarded fixed tuples (`f?.(...args)`) complete into the slots.
+    if (expr.arguments.nodes.some(ts.isSpreadElement)) {
+      const completed = completeFuncValueArgs(lowerer, expr, narrowed, loc);
+      const call: IrExpr = {
+        kind: "callValue",
+        callee: recvRef,
+        args: completed,
+        type: narrowed.ret,
+        loc,
+      };
+      return lowerer.finishOptionalChain(expr, id, receiver, call, loc);
+    }
+    const args = expr.arguments.nodes.map((a, i) => lowerer.lowerExprExpecting(a, params[i]));
+    // Effect-free surplus arguments (a dropped `void` slot) are ignored.
+    while (narrowed.rest !== true && args.length > params.length && isSafeToDiscard(args.at(-1)!))
+      args.pop();
     const body: IrExpr = { kind: "callValue", callee: recvRef, args, type: narrowed.ret, loc };
     return lowerer.finishOptionalChain(expr, id, receiver, body, loc);
   }
 
   // Member forms: re-dispatch the normal lowering with the receiver node
   // bound to the chain (reads as chainRecv, types as non-nullish).
-  const narrowedTs = lowerer.checker.getNonNullableType(lowerer.checker.getTypeAtLocation(recvNode));
+  const narrowedTs = lowerer.checker.getNonNullableType(
+    lowerer.checker.getTypeAtLocation(recvNode),
+  );
   lowerer.chainRecvByNode.set(recvNode, recvRef);
   lowerer.chainNarrowedType.set(recvNode, narrowedTs);
   lowerer.chainHandled.add(dotNode);
@@ -392,10 +485,11 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
   // real receiver kind. Only nodes this chain registers are cleaned up.
   const tailSteps: ts.Expression[] = [];
   if (dotNode !== expr && !(ts.isCallExpression(expr) && expr.expression === dotNode)) {
-    for (let cur: ts.Expression = expr; cur !== dotNode; ) {
+    for (let cur: ts.Expression = expr; cur !== dotNode;) {
       const next: ts.Expression = ts.isCallExpression(cur)
         ? cur.expression
-        : (cur as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression;
+        : (cur as ts.PropertyAccessExpression | ts.ElementAccessExpression | ts.NonNullExpression)
+            .expression;
       if (next === dotNode) break;
       if (!lowerer.chainNarrowedType.has(next)) {
         lowerer.chainNarrowedType.set(
@@ -430,11 +524,14 @@ export function lowerOptionalChain(lowerer: Lowerer, expr: ts.CallExpression | t
  * statement form (`cb?.();` — the checker's `void | undefined` result IS
  * void here); value bodies wrap into the checker's undefined-armed
  * result union. */
-export function finishOptionalChain(lowerer: Lowerer, expr: ts.Expression,
+export function finishOptionalChain(
+  lowerer: Lowerer,
+  expr: ts.Expression,
   id: string,
   receiver: IrExpr,
   body: IrExpr,
-  loc: SrcLoc,): IrExpr {
+  loc: SrcLoc,
+): IrExpr {
   if (body.type.kind === "void") {
     return { kind: "optChain", id, receiver, body, type: VOID, loc };
   }
@@ -445,10 +542,14 @@ export function finishOptionalChain(lowerer: Lowerer, expr: ts.Expression,
     return { kind: "optChain", id, receiver, body, type: DYN, loc };
   }
   let type = lowerer.irTypeOf(expr);
+  // The checker can call a receiver present that holds a nullish value at
+  // runtime (runtime-optional reads; a stale narrowing restored to its
+  // declared type). Either nullish arm short-circuits to undefined.
   const hiddenOptionalResult =
     (type.kind !== "union" || lowerer.armTag(type.unionId, UNDEFINED_T) < 0) &&
-    receiver.type.kind === "union" && lowerer.armTag(receiver.type.unionId, UNDEFINED_T) >= 0 &&
-    body.type.kind !== "generator" && body.type.kind !== "jsval"
+    receiver.type.kind === "union" &&
+    (lowerer.unions.get(receiver.type.unionId)?.arms.some(isUnitType) ?? false) &&
+    body.type.kind !== "generator"
       ? lowerer.withUndefinedArmOf(body.type)
       : null;
   if (hiddenOptionalResult) type = hiddenOptionalResult;

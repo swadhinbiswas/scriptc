@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts"
+ ],
+ "diags": []
+}

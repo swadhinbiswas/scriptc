@@ -1,0 +1,4 @@
+- **Globals:** Stored `globalThis` references support identity and probes for absent capabilities.
+  Most builtin members require direct global access; access through a stored global object can raise `SC2020`.
+  `Temporal` is not defined, as in Node.js 24: `typeof Temporal` is `"undefined"`, `globalThis.Temporal` is `undefined`, and any other use throws `ReferenceError: Temporal is not defined`.
+  Programs that name it type-check against TypeScript's `Temporal` declarations.

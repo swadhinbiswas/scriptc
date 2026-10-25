@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { compile, deserializeModule, validateModule } from "../src/index.js";
+import { setLibDiagnosticsStore } from "../src/frontend/ts7/lib-diagnostics.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -31,10 +32,30 @@ test("serialized IR is the primary artifact and round-trips through validation",
 test("Windows subsystem selection refuses non-executable compiler output", async () => {
   const { entry, outDir } = await fixture();
   const outPath = join(outDir, "main.ir.json");
-  const result = await compile(entry, { outDir, outPath, outputKind: "ir", windowsSubsystem: "gui" });
+  const result = await compile(entry, {
+    outDir,
+    outPath,
+    outputKind: "ir",
+    windowsSubsystem: "gui",
+  });
   expect(result).toMatchObject({
     ok: false,
-    diagnostics: [{ code: "SC3002", message: expect.stringContaining("only supported for executable output") }],
+    diagnostics: [
+      { code: "SC3002", message: expect.stringContaining("only supported for executable output") },
+    ],
+  });
+  await expect(readFile(outPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("detached exit refuses non-executable compiler output", async () => {
+  const { entry, outDir } = await fixture();
+  const outPath = join(outDir, "main.ll");
+  const result = await compile(entry, { outDir, outPath, outputKind: "llvm", detachedExit: true });
+  expect(result).toMatchObject({
+    ok: false,
+    diagnostics: [
+      { code: "SC3002", message: expect.stringContaining("only supported for executable output") },
+    ],
   });
   await expect(readFile(outPath)).rejects.toMatchObject({ code: "ENOENT" });
 });
@@ -109,16 +130,27 @@ test("an executable build never deletes same-stem assembly or object artifacts",
   }
 });
 
-test.each([{ backend: "c" }, { outputKind: "c" }])("removed C options reject before creating output: %s", async (removed) => {
-  const { entry, outDir } = await fixture();
-  // JavaScript callers may supply flags that are absent from the TypeScript API.
-  const result = await compile(entry, { outDir, ...removed } as never);
-  expect(result).toMatchObject({ ok: false, diagnostics: [{ code: "SC3002", message: expect.stringContaining("LLVM is the only backend") }] });
-  await expect(readdir(outDir)).rejects.toMatchObject({ code: "ENOENT" });
-});
+test.each([{ backend: "c" }, { outputKind: "c" }])(
+  "removed C options reject before creating output: %s",
+  async (removed) => {
+    const { entry, outDir } = await fixture();
+    // JavaScript callers may supply flags that are absent from the TypeScript API.
+    const result = await compile(entry, { outDir, ...removed } as never);
+    expect(result).toMatchObject({
+      ok: false,
+      diagnostics: [
+        { code: "SC3002", message: expect.stringContaining("LLVM is the only backend") },
+      ],
+    });
+    await expect(readdir(outDir)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
 
 test("TLS callback programs emit LLVM without a secondary backend", async () => {
-  const entry = join(import.meta.dirname, "../../../tests/fixtures/server/cases/tls-connect-basic/main.ts");
+  const entry = join(
+    import.meta.dirname,
+    "../../../tests/fixtures/server/cases/tls-connect-basic/main.ts",
+  );
   const outDir = await mkdtemp(join(tmpdir(), "scriptc-source-tls-"));
   dirs.push(outDir);
   const outPath = join(outDir, "main.ll");
@@ -139,7 +171,7 @@ test("source outputs ignore invalid external compiler selection and create no ex
   try {
     for (const [kind, name] of [
       ["ir", "main.ir.json"],
-        ["llvm", "main.ll"],
+      ["llvm", "main.ll"],
     ] as const) {
       const result = await compile(entry, {
         outDir,
@@ -152,6 +184,38 @@ test("source outputs ignore invalid external compiler selection and create no ex
   } finally {
     if (oldCc === undefined) delete process.env["SCRIPTC_CC"];
     else process.env["SCRIPTC_CC"] = oldCc;
+    if (oldCache === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCache;
+  }
+});
+
+test("source outputs neither read nor create declaration diagnostics a previous build stored", async () => {
+  const { dir, entry, outDir } = await fixture();
+  const oldCache = process.env["SCRIPTC_CACHE_DIR"];
+  const cache = join(dir, "must-not-exist");
+  process.env["SCRIPTC_CACHE_DIR"] = cache;
+  // A store an earlier build of this process left configured.
+  const reads: string[] = [];
+  setLibDiagnosticsStore(
+    { read: (key) => (reads.push(key), null), write: () => {} },
+    "earlier-checker",
+  );
+  try {
+    for (const [kind, name] of [
+      ["ir", "main.ir.json"],
+      ["llvm", "main.ll"],
+    ] as const) {
+      const result = await compile(entry, {
+        outDir,
+        outPath: join(outDir, name),
+        outputKind: kind,
+      });
+      expect(result.ok).toBe(true);
+    }
+    expect(reads).toEqual([]);
+    await expect(readdir(cache)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    setLibDiagnosticsStore(null);
     if (oldCache === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCache;
   }
@@ -182,3 +246,21 @@ test.each(["wasm64-wasi", "totally-invalid"])(
     }
   },
 );
+
+test("default sort refuses erased results that may hide a comparator", async () => {
+  const { entry, outDir } = await fixture(`
+const erased: () => void = () => (a: number, b: number) => a - b;
+const values = [2, 10, 1];
+values.sort(erased() as undefined);
+`);
+  const result = await compile(entry, { outDir, outputKind: "llvm" });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics).toEqual([
+    expect.objectContaining({
+      code: "SC2020",
+      message: expect.stringContaining("erased comparator result"),
+      hint: expect.stringContaining("void expression"),
+    }),
+  ]);
+});

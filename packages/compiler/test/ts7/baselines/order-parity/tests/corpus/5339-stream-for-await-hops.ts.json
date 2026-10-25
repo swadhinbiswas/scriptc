@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5339-stream-for-await-hops.ts"
+ ],
+ "diags": []
+}

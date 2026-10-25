@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2414-dowhile-continue-kill.ts"
+ ],
+ "diags": []
+}

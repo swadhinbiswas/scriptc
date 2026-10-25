@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4983-generator-reuse-iterables.ts"
+ ],
+ "diags": []
+}

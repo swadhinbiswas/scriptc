@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4650-stale-property-narrowing.ts"
+ ],
+ "diags": []
+}

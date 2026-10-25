@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2575-string-destructuring-decl.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2874-nullable-callback-field-cycle.js"
+ ],
+ "diags": []
+}

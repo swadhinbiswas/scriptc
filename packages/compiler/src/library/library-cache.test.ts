@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import type { IrModule } from "../ir/ir.js";
-import { FrontendInputTracker, trackedAccessibleEntries, trackedDirectoryExists, trackedFileExists, trackedReadFile } from "../frontend/input-tracker.js";
+import {
+  FrontendInputTracker,
+  trackedAccessibleEntries,
+  trackedDirectoryExists,
+  trackedFileExists,
+  trackedReadFile,
+} from "../frontend/input-tracker.js";
 import {
   publishEarlyLibraryCache,
   readEarlyLibraryCache,
@@ -37,8 +43,8 @@ async function fixture(): Promise<{
     writeFile(source, "export function value(): number { return 1; }\n"),
     writeFile(profilePath, "{}\n"),
     writeFile(llvmPath, "; generated llvm\n"),
-    writeFile(irPath, "{\"irVersion\":6}\n"),
-    writeFile(sidecarPath, "{\"contract\":true}\n"),
+    writeFile(irPath, '{"irVersion":6}\n'),
+    writeFile(sidecarPath, '{"contract":true}\n'),
   ]);
   return {
     root: join(dir, "cache"),
@@ -79,6 +85,7 @@ test("early library cache restores generated artifacts and metadata", async () =
     searchParams: false,
     emitter: false,
     zlib: false,
+    x509: false,
     copying: false,
     textDecoderLegacy: false,
     dynInvoke: false,
@@ -132,6 +139,7 @@ test("early library cache publishes after creating a fresh output directory", as
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -162,6 +170,7 @@ test("early library cache hits refresh every payload's LRU time", async () => {
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -207,6 +216,7 @@ test("early library cache misses on source edits and newly-resolved candidates",
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -236,6 +246,7 @@ test("early library cache misses on source edits and newly-resolved candidates",
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -255,16 +266,18 @@ test("semantic library cache restores and rebases IR after a comment-only edit",
   const sourceBefore = await readFile(f.source, "utf8");
   const returnStart = sourceBefore.indexOf("return");
   const semanticMod = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: f.source,
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: { kind: "void" },
-      locals: [],
-      body: [],
-      loc: { file: f.source, start: returnStart, end: returnStart + 6 },
-    }],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [],
+        loc: { file: f.source, start: returnStart, end: returnStart + 6 },
+      },
+    ],
     entry: "__main",
   } satisfies IrModule;
   const tracker = new FrontendInputTracker();
@@ -283,6 +296,7 @@ test("semantic library cache restores and rebases IR after a comment-only edit",
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -299,10 +313,12 @@ test("semantic library cache restores and rebases IR after a comment-only edit",
   expect(hit?.changedSources).toEqual([f.source]);
   expect(hit?.translationUnit).toBe("; generated llvm\n");
   expect(hit?.mod.functions[0]!.loc.start).toBe(sourceAfter.indexOf("return"));
-  expect(hit?.frontend.probes).toContainEqual(expect.objectContaining({
-    op: "file",
-    path: f.source,
-  }));
+  expect(hit?.frontend.probes).toContainEqual(
+    expect.objectContaining({
+      op: "file",
+      path: f.source,
+    }),
+  );
 
   const earlyRoot = join(f.root, "early-lib");
   const [key] = await readdir(earlyRoot);
@@ -314,16 +330,18 @@ test("semantic library cache refuses token and directive edits", async () => {
   const f = await fixture();
   const sourceBefore = await readFile(f.source, "utf8");
   const semanticMod = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: f.source,
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: { kind: "void" },
-      locals: [],
-      body: [],
-      loc: { file: f.source, start: 0, end: sourceBefore.length },
-    }],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [],
+        loc: { file: f.source, start: 0, end: sourceBefore.length },
+      },
+    ],
     entry: "__main",
   } satisfies IrModule;
   const tracker = new FrontendInputTracker();
@@ -342,6 +360,7 @@ test("semantic library cache refuses token and directive edits", async () => {
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -360,16 +379,18 @@ test("semantic LLVM cache accepts comment edits that shift source lines", async 
   const f = await fixture();
   const sourceBefore = await readFile(f.source, "utf8");
   const semanticMod = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: f.source,
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: { kind: "void" },
-      locals: [],
-      body: [],
-      loc: { file: f.source, start: 0, end: sourceBefore.length },
-    }],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [],
+        loc: { file: f.source, start: 0, end: sourceBefore.length },
+      },
+    ],
     entry: "__main",
   } satisfies IrModule;
   const tracker = new FrontendInputTracker();
@@ -388,6 +409,7 @@ test("semantic LLVM cache accepts comment edits that shift source lines", async 
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -426,6 +448,7 @@ test("semantic LLVM cache accepts line separator normalization", async () => {
         searchParams: false,
         emitter: false,
         zlib: false,
+        x509: false,
         copying: false,
         textDecoderLegacy: false,
         dynInvoke: false,
@@ -433,7 +456,7 @@ test("semantic LLVM cache accepts line separator normalization", async () => {
       frontend: tracker.snapshot(),
       semantic: {
         mod: {
-          irVersion: 13,
+          irVersion: 17,
           sourceFile: f.source,
           functions: [],
           entry: "__main",
@@ -454,16 +477,18 @@ test("semantic LLVM cache rebases comment edits in multi-source graphs", async (
   const importedSource = "export function helper(): number { return 1; }\n";
   await writeFile(imported, importedSource);
   const semanticMod = {
-    irVersion: 13,
+    irVersion: 17,
     sourceFile: f.source,
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: { kind: "void" },
-      locals: [],
-      body: [],
-      loc: { file: f.source, start: 0, end: entrySource.length },
-    }],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [],
+        loc: { file: f.source, start: 0, end: entrySource.length },
+      },
+    ],
     entry: "__main",
   } satisfies IrModule;
   const tracker = new FrontendInputTracker();
@@ -485,6 +510,7 @@ test("semantic LLVM cache rebases comment edits in multi-source graphs", async (
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -492,7 +518,10 @@ test("semantic LLVM cache rebases comment edits in multi-source graphs", async (
     frontend: tracker.snapshot(),
     semantic: {
       mod: semanticMod,
-      sources: new Map([[f.source, entrySource], [imported, importedSource]]),
+      sources: new Map([
+        [f.source, entrySource],
+        [imported, importedSource],
+      ]),
     },
   });
 
@@ -521,6 +550,7 @@ test("early library cache is separated by the host Node version", async () => {
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -529,11 +559,9 @@ test("early library cache is separated by the host Node version", async () => {
   });
 
   expect(await readEarlyLibraryCache(f.root, f.options, null)).not.toBeNull();
-  expect(await readEarlyLibraryCache(
-    f.root,
-    { ...f.options, nodeVersion: "v25-test" },
-    null,
-  )).toBeNull();
+  expect(
+    await readEarlyLibraryCache(f.root, { ...f.options, nodeVersion: "v25-test" }, null),
+  ).toBeNull();
 });
 
 test("early library cache rejects corrupted artifacts and metadata", async () => {
@@ -554,6 +582,7 @@ test("early library cache rejects corrupted artifacts and metadata", async () =>
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,
@@ -566,7 +595,7 @@ test("early library cache rejects corrupted artifacts and metadata", async () =>
   expect(await readEarlyLibraryCache(f.root, f.options, null)).toBeNull();
 
   const stamp = join(earlyRoot, key!, "stamp.json");
-  await writeFile(stamp, "{\"version\":1}\n");
+  await writeFile(stamp, '{"version":1}\n');
   expect(await readEarlyLibraryCache(f.root, f.options, null)).toBeNull();
 });
 
@@ -588,6 +617,7 @@ test("disabled early library cache performs no reads or writes", async () => {
       searchParams: false,
       emitter: false,
       zlib: false,
+      x509: false,
       copying: false,
       textDecoderLegacy: false,
       dynInvoke: false,

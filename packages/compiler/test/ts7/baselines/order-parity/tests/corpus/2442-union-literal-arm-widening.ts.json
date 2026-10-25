@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2442-union-literal-arm-widening.ts"
+ ],
+ "diags": []
+}

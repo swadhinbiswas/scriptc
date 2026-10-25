@@ -9,26 +9,45 @@ import { compile } from "@scriptc/compiler";
 const run = promisify(execFile);
 const fixture = join(import.meta.dirname, "../fixtures/terminal-geometry");
 
-test.skipIf(process.platform === "win32")("stdio geometry matches Node on independent resized PTYs", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "scriptc-geometry-"));
-  try {
-    const entry = join(fixture, "main.ts");
-    const script = join(fixture, "observe.py");
-    const oracle = await run("python3", [script, process.execPath, "--experimental-strip-types", entry]);
-    expect(JSON.parse(oracle.stdout)).toEqual([[88, 48, 72, 30], [100, 52, 80, 24]]);
-    expect(oracle.stderr).toBe("");
-    // Apple ASan can make malloc abandon its nano zone and write a startup warning to the PTY.
-    const nativeEnv = process.platform === "darwin" && process.env["SCRIPTC_SAN"] === "1"
-      ? { ...process.env, MallocNanoZone: "0" }
-      : process.env;
-    for (const backend of ["llvm"] as const) {
-      const result = await compile(entry, { outDir: dir, outPath: join(dir, backend), backend, sanitize: process.env["SCRIPTC_SAN"] === "1" });
-      if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
-      const native = await run("python3", [script, result.binaryPath], { env: nativeEnv });
-      expect(native.stdout).toBe(oracle.stdout);
-      expect(native.stderr).toBe("");
+test.skipIf(process.platform === "win32")(
+  "stdio geometry matches Node on independent resized PTYs",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-geometry-"));
+    try {
+      const entry = join(fixture, "main.ts");
+      const script = join(fixture, "observe.py");
+      const oracle = await run("python3", [
+        script,
+        process.execPath,
+        "--experimental-strip-types",
+        entry,
+      ]);
+      expect(JSON.parse(oracle.stdout)).toEqual([
+        [88, 48, 72, 30],
+        [100, 52, 80, 24],
+      ]);
+      expect(oracle.stderr).toBe("");
+      // Apple ASan can make malloc abandon its nano zone and write a startup warning to the PTY.
+      const nativeEnv =
+        process.platform === "darwin" && process.env["SCRIPTC_SAN"] === "1"
+          ? { ...process.env, MallocNanoZone: "0" }
+          : process.env;
+      for (const backend of ["llvm"] as const) {
+        const result = await compile(entry, {
+          outDir: dir,
+          outPath: join(dir, backend),
+          backend,
+          sanitize: process.env["SCRIPTC_SAN"] === "1",
+        });
+        if (!result.ok)
+          throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+        const native = await run("python3", [script, result.binaryPath], { env: nativeEnv });
+        expect(native.stdout).toBe(oracle.stdout);
+        expect(native.stderr).toBe("");
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}, 60_000);
+  },
+  60_000,
+);

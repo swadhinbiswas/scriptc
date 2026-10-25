@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/nullish-long-chain.ts"
+ ],
+ "diags": []
+}

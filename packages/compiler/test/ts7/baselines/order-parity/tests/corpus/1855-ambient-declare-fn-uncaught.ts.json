@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1855-ambient-declare-fn-uncaught.ts"
+ ],
+ "diags": []
+}

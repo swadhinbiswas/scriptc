@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2380-buffer-module-named-import.ts"
+ ],
+ "diags": []
+}

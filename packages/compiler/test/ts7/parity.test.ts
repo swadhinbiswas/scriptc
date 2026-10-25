@@ -1,4 +1,5 @@
 import { Ts7Host } from "../../src/frontend/ts7/program-adapter.js";
+import { symbolName, symbolNameOf } from "../../src/frontend/ts7/semantic-model.js";
 /* The two-world agreement battery: every fixture program is parsed and
  * checked through BOTH worlds — typescript@5.9.3 in-process and the TS7
  * adapter over tsgo — and the worlds must agree on structure (walk order,
@@ -55,30 +56,95 @@ afterAll(() => {
 /* The census's guard surface (census-ts-members.tsv), by name — called on
  * every node of every walk in both worlds. */
 const CENSUS_GUARDS = [
-  "isIdentifier", "isPropertyAccessExpression", "isPropertyAssignment", "isStringLiteral",
-  "isSpreadElement", "isObjectLiteralExpression", "isParenthesizedExpression",
-  "isInterfaceDeclaration", "isClassDeclaration", "isCallExpression", "isExpressionStatement",
-  "isShorthandPropertyAssignment", "isArrowFunction", "isArrayLiteralExpression",
-  "isFunctionExpression", "isElementAccessExpression", "isVariableDeclaration",
-  "isSpreadAssignment", "isNumericLiteral", "isMethodDeclaration", "isFunctionDeclaration",
-  "isBinaryExpression", "isSourceFile", "isNoSubstitutionTemplateLiteral",
-  "isComputedPropertyName", "isVariableStatement", "isVariableDeclarationList",
-  "isImportDeclaration", "isAsExpression", "isStringLiteralLike", "isPrefixUnaryExpression",
-  "isObjectBindingPattern", "isGetAccessorDeclaration", "isArrayBindingPattern",
-  "isSetAccessorDeclaration", "isNamespaceImport", "isBreakStatement", "isBlock",
-  "isTypeOfExpression", "isNewExpression", "isModuleDeclaration", "isGetAccessor",
-  "isExportDeclaration", "isConditionalExpression", "isRegularExpressionLiteral", "isParameter",
-  "isNonNullExpression", "isFunctionLike", "isBindingElement", "isReturnStatement",
-  "isPostfixUnaryExpression", "isOmittedExpression", "isForStatement", "isForOfStatement",
-  "isForInStatement", "isExportAssignment", "isWhileStatement", "isTypeAliasDeclaration",
-  "isThrowStatement", "isTemplateExpression", "isSwitchStatement", "isSetAccessor",
-  "isPropertyDeclaration", "isNamedImports", "isImportSpecifier", "isImportClause",
-  "isEmptyStatement", "isDoStatement", "isContinueStatement", "isCaseClause", "isAwaitExpression",
-  "isAccessor", "isVoidExpression", "isTypePredicateNode", "isTypeNode", "isTryStatement",
-  "isTaggedTemplateExpression", "isSemicolonClassElement", "isSatisfiesExpression",
-  "isPropertySignature", "isPrivateIdentifier", "isNamespaceExport",
-  "isIndexSignatureDeclaration", "isImportEqualsDeclaration", "isIfStatement",
-  "isDeleteExpression", "isDefaultClause", "isConstructorDeclaration", "isBigIntLiteral",
+  "isIdentifier",
+  "isPropertyAccessExpression",
+  "isPropertyAssignment",
+  "isStringLiteral",
+  "isSpreadElement",
+  "isObjectLiteralExpression",
+  "isParenthesizedExpression",
+  "isInterfaceDeclaration",
+  "isClassDeclaration",
+  "isCallExpression",
+  "isExpressionStatement",
+  "isShorthandPropertyAssignment",
+  "isArrowFunction",
+  "isArrayLiteralExpression",
+  "isFunctionExpression",
+  "isElementAccessExpression",
+  "isVariableDeclaration",
+  "isSpreadAssignment",
+  "isNumericLiteral",
+  "isMethodDeclaration",
+  "isFunctionDeclaration",
+  "isBinaryExpression",
+  "isSourceFile",
+  "isNoSubstitutionTemplateLiteral",
+  "isComputedPropertyName",
+  "isVariableStatement",
+  "isVariableDeclarationList",
+  "isImportDeclaration",
+  "isAsExpression",
+  "isStringLiteralLike",
+  "isPrefixUnaryExpression",
+  "isObjectBindingPattern",
+  "isGetAccessorDeclaration",
+  "isArrayBindingPattern",
+  "isSetAccessorDeclaration",
+  "isNamespaceImport",
+  "isBreakStatement",
+  "isBlock",
+  "isTypeOfExpression",
+  "isNewExpression",
+  "isModuleDeclaration",
+  "isGetAccessor",
+  "isExportDeclaration",
+  "isConditionalExpression",
+  "isRegularExpressionLiteral",
+  "isParameter",
+  "isNonNullExpression",
+  "isFunctionLike",
+  "isBindingElement",
+  "isReturnStatement",
+  "isPostfixUnaryExpression",
+  "isOmittedExpression",
+  "isForStatement",
+  "isForOfStatement",
+  "isForInStatement",
+  "isExportAssignment",
+  "isWhileStatement",
+  "isTypeAliasDeclaration",
+  "isThrowStatement",
+  "isTemplateExpression",
+  "isSwitchStatement",
+  "isSetAccessor",
+  "isPropertyDeclaration",
+  "isNamedImports",
+  "isImportSpecifier",
+  "isImportClause",
+  "isEmptyStatement",
+  "isDoStatement",
+  "isContinueStatement",
+  "isCaseClause",
+  "isAwaitExpression",
+  "isAccessor",
+  "isVoidExpression",
+  "isTypePredicateNode",
+  "isTypeNode",
+  "isTryStatement",
+  "isTaggedTemplateExpression",
+  "isSemicolonClassElement",
+  "isSatisfiesExpression",
+  "isPropertySignature",
+  "isPrivateIdentifier",
+  "isNamespaceExport",
+  "isIndexSignatureDeclaration",
+  "isImportEqualsDeclaration",
+  "isIfStatement",
+  "isDeleteExpression",
+  "isDefaultClause",
+  "isConstructorDeclaration",
+  "isBigIntLiteral",
 ] as const;
 
 test("every census guard exists in both worlds", () => {
@@ -123,7 +189,9 @@ for (const battery of ALL_BATTERIES) {
           const r5 = guards5[g]!(n5[i]!);
           const r7 = guards7[g]!(n7[i]!);
           if (r5 !== r7) {
-            expect.fail(`${file}#${i} ${g}: ts5=${r5} adapter=${r7} (kind ${kindName5(n5[i]!.kind)})`);
+            expect.fail(
+              `${file}#${i} ${g}: ts5=${r5} adapter=${r7} (kind ${kindName5(n5[i]!.kind)})`,
+            );
           }
         }
       }
@@ -131,7 +199,16 @@ for (const battery of ALL_BATTERIES) {
   });
 
   test(`${name}: modifier and combined-flag semantics agree`, () => {
-    const SEM_MODIFIERS = ["Export", "Async", "Default", "Static", "Readonly", "Private", "Abstract", "Ambient"] as const;
+    const SEM_MODIFIERS = [
+      "Export",
+      "Async",
+      "Default",
+      "Static",
+      "Readonly",
+      "Private",
+      "Abstract",
+      "Ambient",
+    ] as const;
     for (const file of w().files) {
       const { n5, n7 } = walkBoth(w(), file);
       for (let i = 0; i < n5.length; i++) {
@@ -146,12 +223,16 @@ for (const battery of ALL_BATTERIES) {
         }
         const cn5 = ts5.getCombinedNodeFlags(n5[i]!);
         const cn7 = ad.getCombinedNodeFlags(n7[i]!);
-        expect((cn7 & ad.NodeFlags.Const) !== 0, `${at} Const`).toBe((cn5 & ts5.NodeFlags.Const) !== 0);
+        expect((cn7 & ad.NodeFlags.Const) !== 0, `${at} Const`).toBe(
+          (cn5 & ts5.NodeFlags.Const) !== 0,
+        );
         expect((cn7 & ad.NodeFlags.Let) !== 0, `${at} Let`).toBe((cn5 & ts5.NodeFlags.Let) !== 0);
         const cm5 = ts5.getCombinedModifierFlags(n5[i] as never);
         const cm7 = ad.getCombinedModifierFlags(n7[i]!);
         for (const f of SEM_MODIFIERS) {
-          expect((cm7 & ad.ModifierFlags[f]) !== 0, `${at} ${f}`).toBe((cm5 & ts5.ModifierFlags[f]) !== 0);
+          expect((cm7 & ad.ModifierFlags[f]) !== 0, `${at} ${f}`).toBe(
+            (cm5 & ts5.ModifierFlags[f]) !== 0,
+          );
         }
       }
     }
@@ -199,11 +280,20 @@ for (const battery of ALL_BATTERIES) {
         for (let i = 0; i < n5.length; i++) {
           const n = n5[i]!;
           const valueish =
-            ts5.isIdentifier(n) || ts5.isCallExpression(n) || ts5.isPropertyAccessExpression(n) ||
-            ts5.isObjectLiteralExpression(n) || ts5.isArrayLiteralExpression(n) ||
-            ts5.isTemplateExpression(n) || ts5.isAwaitExpression(n) || ts5.isBinaryExpression(n) ||
-            ts5.isElementAccessExpression(n) || ts5.isNewExpression(n) || ts5.isStringLiteral(n) ||
-            ts5.isNumericLiteral(n) || ts5.isConditionalExpression(n) || ts5.isNonNullExpression(n);
+            ts5.isIdentifier(n) ||
+            ts5.isCallExpression(n) ||
+            ts5.isPropertyAccessExpression(n) ||
+            ts5.isObjectLiteralExpression(n) ||
+            ts5.isArrayLiteralExpression(n) ||
+            ts5.isTemplateExpression(n) ||
+            ts5.isAwaitExpression(n) ||
+            ts5.isBinaryExpression(n) ||
+            ts5.isElementAccessExpression(n) ||
+            ts5.isNewExpression(n) ||
+            ts5.isStringLiteral(n) ||
+            ts5.isNumericLiteral(n) ||
+            ts5.isConditionalExpression(n) ||
+            ts5.isNonNullExpression(n);
           if (!valueish) continue;
           if (ts5.isPartOfTypeNode(n)) continue; // finding 3's filter
           const t5 = w().c5.typeToString(w().c5.getTypeAtLocation(n));
@@ -211,7 +301,9 @@ for (const battery of ALL_BATTERIES) {
           const t7 = t7raw === undefined ? "<none>" : w().c7.typeToString(t7raw);
           if (t5.includes("unresolved")) continue; // error-type spellings differ
           if (canonTypeText(t5) !== canonTypeText(t7)) {
-            expect.fail(`${file}#${i} ${kindName5(n.kind)} '${n.getText().slice(0, 40)}': ts5='${t5}' adapter='${t7}'`);
+            expect.fail(
+              `${file}#${i} ${kindName5(n.kind)} '${n.getText().slice(0, 40)}': ts5='${t5}' adapter='${t7}'`,
+            );
           }
           compared++;
         }
@@ -240,7 +332,7 @@ for (const battery of ALL_BATTERIES) {
         if (s5[a] !== undefined && isFixtureSymbol(w(), s5[a]!) && s5[a]!.name !== "export=") {
           // finding 5: the module.exports receiver's symbol NAME differs in
           // JS files (5.9.3 "export=", tsgo "module") — pinned separately.
-          expect(s7[a]!.name, `${file}#${ids[a]} symbol name`).toBe(s5[a]!.name);
+          expect(symbolName(s7[a]!), `${file}#${ids[a]} symbol name`).toBe(s5[a]!.name);
         }
         for (let b = a + 1; b < ids.length; b++) {
           if (s5[a] === undefined || s5[b] === undefined) continue;
@@ -249,7 +341,9 @@ for (const battery of ALL_BATTERIES) {
           // finding 5: 5.9.3 folds `module` and `exports` receivers into one
           // export= symbol; tsgo keeps them distinct.
           if (s5[a]!.name === "export=" || s5[b]!.name === "export=") continue;
-          expect(s7[a] === s7[b], `${file}#${ids[a]}~${ids[b]} identity partition`).toBe(s5[a] === s5[b]);
+          expect(s7[a] === s7[b], `${file}#${ids[a]}~${ids[b]} identity partition`).toBe(
+            s5[a] === s5[b],
+          );
         }
       }
     }
@@ -264,7 +358,16 @@ test("isTupleType and isArrayType agree with 5.9.3 at value positions", () => {
   for (let i = 1; i < n5.length; i++) {
     const n = n5[i]!;
     if (ts5.isPartOfTypeNode(n)) continue; // finding 3
-    if (!(ts5.isIdentifier(n) || ts5.isArrayLiteralExpression(n) || ts5.isAsExpression(n) || ts5.isPropertyAccessExpression(n) || ts5.isCallExpression(n))) continue;
+    if (
+      !(
+        ts5.isIdentifier(n) ||
+        ts5.isArrayLiteralExpression(n) ||
+        ts5.isAsExpression(n) ||
+        ts5.isPropertyAccessExpression(n) ||
+        ts5.isCallExpression(n)
+      )
+    )
+      continue;
     const t5 = w.c5.getTypeAtLocation(n);
     const t7 = w.c7.getTypeAtLocation(n7[i]!);
     if (t7 === undefined) continue;
@@ -289,7 +392,9 @@ test("finding pinned: binding-pattern elisions are BindingElement in 7, OmittedE
     expect(ad.isOmittedExpression(n7[i]!)).toBe(false);
   }
   // Expression-position elisions still agree.
-  const exprElision = n5.findIndex((n) => ts5.isOmittedExpression(n) && !isBindingPatternElision(n));
+  const exprElision = n5.findIndex(
+    (n) => ts5.isOmittedExpression(n) && !isBindingPatternElision(n),
+  );
   expect(exprElision).toBeGreaterThanOrEqual(0);
   expect(ad.isOmittedExpression(n7[exprElision]!)).toBe(true);
 });
@@ -328,7 +433,7 @@ test("finding pinned: tsgo does not synthesize CJS expando members; module resol
   const moduleIdx = n5.findIndex((n) => ts5.isIdentifier(n) && n.getText() === "module");
   expect(moduleIdx).toBeGreaterThanOrEqual(0);
   expect(w.c5.getSymbolAtLocation(n5[moduleIdx]!)?.name).toBe("export=");
-  expect(w.c7.getSymbolAtLocation(n7[moduleIdx]!)?.name).toBe("module");
+  expect(symbolNameOf(w.c7.getSymbolAtLocation(n7[moduleIdx]!))).toBe("module");
 });
 
 test("getAwaitedType shim agrees with 5.9.3 across the async battery (pinned limitation aside)", () => {
@@ -358,7 +463,9 @@ test("getAwaitedType shim agrees with 5.9.3 across the async battery (pinned lim
         limitations.push(`#${i} '${n.getText().slice(0, 40)}' -> ts5 '${s5}'`);
         continue;
       }
-      expect.fail(`#${i} '${n.getText().slice(0, 40)}': ts5 awaited='${s5}' adapter awaited='${s7}'`);
+      expect.fail(
+        `#${i} '${n.getText().slice(0, 40)}': ts5 awaited='${s5}' adapter awaited='${s7}'`,
+      );
     }
     compared++;
   }
@@ -381,8 +488,8 @@ test("symbol declarations resolve back into the same client AST", () => {
   const sym7 = w.c7.getSymbolAtLocation(n7[i]!);
   expect(sym7).toBeDefined();
   const aliased = w.c7.getAliasedSymbol(sym7!);
-  expect(aliased.name).toBe("answer");
-  const declHandle = aliased.declarations[0];
+  expect(symbolName(aliased)).toBe("answer");
+  const declHandle = aliased.declarationHandles[0];
   expect(declHandle).toBeDefined();
   const decl = declHandle!.resolve(w.p7.project);
   expect(decl).toBeDefined();

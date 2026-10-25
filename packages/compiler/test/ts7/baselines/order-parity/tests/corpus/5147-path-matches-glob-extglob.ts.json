@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5147-path-matches-glob-extglob.ts"
+ ],
+ "diags": []
+}

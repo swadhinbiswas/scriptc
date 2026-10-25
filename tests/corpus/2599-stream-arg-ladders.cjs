@@ -1,11 +1,10 @@
 // The stream-surface validation ladders: finished() over a provably-non-
 // stream value answers Node's isNodeStream ERR_INVALID_ARG_TYPE (the
 // watcher never registers), socket write's two-argument encoding form
-// implements Node's stream_base typecheck — write(string, 'buffer') is
-// the synchronous "Second argument must be a buffer" TypeError on an
-// established socket, utf8 spellings are the plain write — and
-// Readable.toWeb's `type` option answers Node's one-of ladder before any
-// web-stream machinery.
+// implements Writable's encoding check — write(string, 'buffer') is
+// the synchronous ERR_UNKNOWN_ENCODING TypeError, utf8 spellings are the
+// plain write — and Readable.toWeb's `type` option answers Node's one-of
+// ladder before any web-stream machinery.
 'use strict';
 const net = require('net');
 const { Duplex, Readable, finished } = require('stream');

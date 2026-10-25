@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1451-instanceof-uint8array-unknown.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/const-enum-module-cycle/flags.ts",
+  "<repo>/tests/corpus/const-enum-module-cycle/rules.ts",
+  "<repo>/tests/corpus/const-enum-module-cycle/limits.ts",
+  "<repo>/tests/corpus/const-enum-module-cycle/main.ts"
+ ],
+ "diags": []
+}

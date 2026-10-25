@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/repeat-and-typed-read-errors.ts"
+ ],
+ "diags": []
+}

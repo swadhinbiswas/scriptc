@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3089-array-find-narrowing.ts"
+ ],
+ "diags": []
+}

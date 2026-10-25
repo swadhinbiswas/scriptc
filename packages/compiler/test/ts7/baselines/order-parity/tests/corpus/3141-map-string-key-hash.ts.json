@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3141-map-string-key-hash.ts"
+ ],
+ "diags": []
+}

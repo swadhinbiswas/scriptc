@@ -2,6 +2,11 @@
  * one runtime layout, including captured bindings for local classes. */
 #include "scr_runtime.h"
 
+/* The lifetime-region fiber hooks (scr_region.h) live in this always-linked
+ * unit: scr_async.c reads them, and some runtime test links take
+ * scr_async.c without scr_region.c. scr_region_create installs them. */
+_Atomic(const ScrRgnFiberHooks *) scr_region_fiber_hooks = NULL;
+
 void scr_classobj_trace_v(void *object, ScrTraceVisit visit, void *ctx) {
   ScrClassObj *c = object;
   for (size_t i = 0; i < c->ncaps; i++) visit(c->caps[i], ctx);
@@ -17,8 +22,8 @@ static void scr_classobj_gcfree(void *object) {
 ScrClassObj *scr_classobj_new(const ScrClassObj *template, size_t ncaps) {
   if (ncaps > (SIZE_MAX - sizeof(ScrClassObj)) / sizeof(ScrBox *))
     scr_trap("scriptc: class capture allocation overflow\n");
-  ScrClassObj *c = scr_cyc_alloc(sizeof(ScrClassObj) + ncaps * sizeof(ScrBox *),
-      &scr_classobj_trace_v, &scr_classobj_gcfree);
+  static ScrCycType cyc_type = { &scr_classobj_trace_v, &scr_classobj_gcfree, SCR_CYC_KIND_CLASS_OBJECT };
+  ScrClassObj *c = scr_cyc_alloc(sizeof(ScrClassObj) + ncaps * sizeof(ScrBox *), &cyc_type);
   c->rc = 1;
   c->pre = template->pre;
   c->post = template->post;
@@ -28,20 +33,27 @@ ScrClassObj *scr_classobj_new(const ScrClassObj *template, size_t ncaps) {
   c->length = template->length;
   c->prototype_data = NULL;
   c->static_data = NULL;
+  c->base_name = template->base_name;
+  c->own_static_fields = template->own_static_fields;
   scr_obj_alloc_note();
   return c;
+}
+
+static void scr_classobj_destroy(void *object) {
+  ScrClassObj *c = object;
+  for (size_t i = 0; i < c->ncaps; i++) scr_box_release(c->caps[i]);
+  scr_box_release(c->prototype_data);
+  scr_box_release(c->static_data);
+  scr_classobj_gcfree(c);
 }
 
 void scr_classobj_release(ScrClassObj *c) {
   if (!c || c->rc == SIZE_MAX) return;
   if (--c->rc == 0) {
-    scr_cyc_on_dead(c);
-    for (size_t i = 0; i < c->ncaps; i++) scr_box_release(c->caps[i]);
-    scr_box_release(c->prototype_data);
-    scr_box_release(c->static_data);
-    scr_classobj_gcfree(c);
+    scr_cyc_dead(c);
+    scr_rc_destroy(c, scr_classobj_destroy);
   } else {
-    scr_cyc_on_release(c);
+    scr_cyc_released(c);
   }
 }
 
@@ -82,10 +94,25 @@ void scr_record_key_miss(ScrStr *k) {
 
 #ifdef SCR_RC_AUDIT
 static SCR_TL long scr_live_objects = 0;
+/* ProgramLifetime instances (@scriptc/types) this thread created and no
+ * released lifetime region freed (scr_region.c): never freed by design, and
+ * neither is anything they hold (see the exit audit in scr_console.c). */
+static SCR_TL long scr_lifetime_objects = 0;
 long scr_obj_live_count(void) { return scr_live_objects; }
+long scr_obj_lifetime_count(void) { return scr_lifetime_objects; }
 void scr_obj_alloc_note(void) { scr_live_objects++; }
 void scr_obj_free_note(void) { scr_live_objects--; }
+/* Also an intentional LeakSanitizer root, like published objects: what the
+ * instance holds stays reachable. */
+void scr_obj_lifetime_note(const void *obj) {
+  scr_lifetime_objects++;
+  scr_lsan_immortal(obj);
+}
+void scr_obj_lifetime_forget(long n) { scr_lifetime_objects -= n; }
 #else
+#undef scr_obj_alloc_note
+#undef scr_obj_free_note
 void scr_obj_alloc_note(void) {}
 void scr_obj_free_note(void) {}
+void scr_obj_lifetime_note(const void *obj) { (void)obj; }
 #endif

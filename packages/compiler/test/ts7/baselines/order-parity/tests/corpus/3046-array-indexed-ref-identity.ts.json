@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3046-array-indexed-ref-identity.ts"
+ ],
+ "diags": []
+}

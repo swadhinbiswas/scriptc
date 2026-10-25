@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-checked-callback-results.mjs"
+ ],
+ "diags": []
+}

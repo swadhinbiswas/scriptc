@@ -1,4 +1,3 @@
-// @dynamic
 // The routed Object statics over island values held in 'unknown' (lane
 // dyn-routing-ops): keys/values/entries walk the ENGINE object (own-key
 // order) and answer NATIVE dyn arrays (keys are dyn strings, values wrap

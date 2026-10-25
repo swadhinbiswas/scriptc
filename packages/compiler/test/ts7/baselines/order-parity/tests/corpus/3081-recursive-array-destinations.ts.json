@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3081-recursive-array-destinations.ts"
+ ],
+ "diags": []
+}

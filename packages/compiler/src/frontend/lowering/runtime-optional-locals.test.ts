@@ -6,7 +6,9 @@ const local = (id: string): IrLocal => ({ id, name: id, type: F64, mutable: true
 
 test("scope exit restores entry facts and keeps surviving assignments", () => {
   const facts = new RuntimeOptionalLocals();
-  const outer = local("outer"), added = local("added"), temporary = local("temporary");
+  const outer = local("outer"),
+    added = local("added"),
+    temporary = local("temporary");
   facts.add(outer);
   facts.beginScope();
   expect(facts.delete(outer)).toBe(true);
@@ -72,7 +74,8 @@ test("nested operations agree with snapshot-and-union restoration", () => {
     } else {
       expect(facts.delete(value)).toBe(reference.delete(value));
     }
-    for (const entry of values) expect(facts.has(entry), `step ${step}, local ${entry.id}`).toBe(reference.has(entry));
+    for (const entry of values)
+      expect(facts.has(entry), `step ${step}, local ${entry.id}`).toBe(reference.has(entry));
   }
   while (snapshots.length > 0) {
     for (const entry of snapshots.pop()!) reference.add(entry);

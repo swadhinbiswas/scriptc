@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1521-fs-lstat-lock.ts"
+ ],
+ "diags": []
+}

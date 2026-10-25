@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2987-http-static-timeout-errors.ts"
+ ],
+ "diags": []
+}

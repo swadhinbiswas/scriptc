@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/212-string-aliasing-append.ts"
+ ],
+ "diags": []
+}

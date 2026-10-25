@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2042-mixin-modules/zoo.ts",
+  "<repo>/tests/corpus/2042-mixin-modules/main.ts"
+ ],
+ "diags": []
+}

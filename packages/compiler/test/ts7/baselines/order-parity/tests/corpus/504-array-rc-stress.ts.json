@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/504-array-rc-stress.ts"
+ ],
+ "diags": []
+}

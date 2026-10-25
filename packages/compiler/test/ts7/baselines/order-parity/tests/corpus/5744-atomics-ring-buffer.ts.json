@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5744-atomics-ring-buffer.ts"
+ ],
+ "diags": []
+}

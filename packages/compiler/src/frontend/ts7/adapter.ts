@@ -38,5 +38,5 @@ export * from "./semantic-types.js";
 
 /* No default export, deliberately: ESM cannot hang the TYPE side of the
  * census (ts.Expression, ts.Node, ...) off a default binding, so a default
- * would invite the one import form that silently loses the types. The port
+ * would invite the one import form that loses the types without an error. The port
  * swap is the namespace import above — same one-line change per file. */

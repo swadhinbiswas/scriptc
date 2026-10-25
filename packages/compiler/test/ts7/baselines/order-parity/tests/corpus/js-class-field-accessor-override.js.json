@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-class-field-accessor-override.js"
+ ],
+ "diags": []
+}

@@ -8,7 +8,6 @@ async function main(): Promise<void> {
   const result = await compile(request.entry, {
     outDir: request.workDir,
     outPath: request.binary,
-    dynamic: false,
     sanitize: request.sanitize,
     ...(request.backend === "default" ? {} : { backend: request.backend }),
   });

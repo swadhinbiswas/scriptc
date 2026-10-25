@@ -8,13 +8,16 @@ export async function waitForSandboxCommand(probe, { deadline, label, onPending 
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      throw new Error(`${label} did not confirm completion before its timeout`, { cause: lastError });
+      throw new Error(`${label} did not confirm completion before its timeout`, {
+        cause: lastError,
+      });
     }
     try {
       await probe(remaining);
       return;
     } catch (error) {
-      if (error.remoteExitCode !== undefined && error.remoteExitCode !== REMOTE_COMMAND_PENDING) throw error;
+      if (error.remoteExitCode !== undefined && error.remoteExitCode !== REMOTE_COMMAND_PENDING)
+        throw error;
       lastError = error;
       onPending(error);
       const delay = Math.min(1000, deadline - Date.now());

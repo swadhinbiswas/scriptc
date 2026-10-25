@@ -20,55 +20,67 @@ test("library identity source stays private and cannot overwrite a sidecar", asy
   const profilePath = join(dir, "profile.json");
   try {
     await mkdir(cacheRoot, { mode: 0o700 });
-    await writeFile(join(dir, "helper.ts"), [
-      "export function initialValue(): number {",
-      "  return 1;",
-      "}",
-      "",
-    ].join("\n"));
-    await writeFile(join(dir, "lib.ts"), [
-      "export interface Model { value: number; }",
-      "export type Msg = { kind: \"noop\" } | { kind: \"set\"; value: number };",
-      "export function init(): Model { return { value: 1 }; }",
-      "export function update(model: Model, msg: Msg): Model {",
-      "  return msg.kind === \"set\" ? { value: msg.value } : model;",
-      "}",
-      "export function boot(): number { return init().value; }",
-      "",
-    ].join("\n"));
-
-    const writeProfile = (sidecarPath: string): Promise<void> => writeFile(
-      profilePath,
-      `${JSON.stringify({
-        profile_format: 1,
-        name: "cli-library-output",
-        entry: "lib.ts",
-        emission: "llvm",
-        abi: {
-          prefix: "clo_",
-          init_symbol: "clo_init",
-          sink_register_symbol: "clo_set_panic_sink",
-          collect_symbol: null,
-          result_reset_symbol: null,
-        },
-        exports: [{ export: "boot", symbol: "clo_boot", params: [], returns: "f64" }],
-        sidecar: {
-          path: sidecarPath,
-          wire_version: 1,
-          abi_version: 1,
-          snapshot_format: 1,
-          build_id_symbol: "clo_build_id",
-          abi_version_symbol: "clo_abi_version",
-          model: "Model",
-          msg: "Msg",
-        },
-      }, null, 2)}\n`,
+    await writeFile(
+      join(dir, "helper.ts"),
+      ["export function initialValue(): number {", "  return 1;", "}", ""].join("\n"),
     );
+    await writeFile(
+      join(dir, "lib.ts"),
+      [
+        "export interface Model { value: number; }",
+        'export type Msg = { kind: "noop" } | { kind: "set"; value: number };',
+        "export function init(): Model { return { value: 1 }; }",
+        "export function update(model: Model, msg: Msg): Model {",
+        '  return msg.kind === "set" ? { value: msg.value } : model;',
+        "}",
+        "export function boot(): number { return init().value; }",
+        "",
+      ].join("\n"),
+    );
+
+    const writeProfile = (sidecarPath: string): Promise<void> =>
+      writeFile(
+        profilePath,
+        `${JSON.stringify(
+          {
+            profile_format: 1,
+            name: "cli-library-output",
+            entry: "lib.ts",
+            emission: "llvm",
+            abi: {
+              prefix: "clo_",
+              init_symbol: "clo_init",
+              sink_register_symbol: "clo_set_panic_sink",
+              collect_symbol: null,
+              result_reset_symbol: null,
+            },
+            exports: [{ export: "boot", symbol: "clo_boot", params: [], returns: "f64" }],
+            sidecar: {
+              path: sidecarPath,
+              wire_version: 1,
+              abi_version: 1,
+              snapshot_format: 1,
+              build_id_symbol: "clo_build_id",
+              abi_version_symbol: "clo_abi_version",
+              model: "Model",
+              msg: "Msg",
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
     const runBuild = async (keepLlvm = false, emitIr = false): Promise<{ stderr: string }> => {
       return execFileAsync(
         process.execPath,
         [
-          "--import", tsxLoader, cliEntry, "build", "--lib", "--profile", profilePath,
+          "--import",
+          tsxLoader,
+          cliEntry,
+          "build",
+          "--lib",
+          "--profile",
+          profilePath,
           ...(keepLlvm ? [] : ["--no-keep-llvm"]),
           ...(emitIr ? ["--emit-ir"] : []),
         ],
@@ -106,10 +118,10 @@ test("library identity source stays private and cannot overwrite a sidecar", asy
 
     // A line-shifting edit must preserve the same LLVM artifact as a
     // forced frontend miss.
-    await writeFile(join(dir, "lib.ts"), [
-      "// line-shifting rebuild comment",
-      await readFile(join(dir, "lib.ts"), "utf8"),
-    ].join("\n"));
+    await writeFile(
+      join(dir, "lib.ts"),
+      ["// line-shifting rebuild comment", await readFile(join(dir, "lib.ts"), "utf8")].join("\n"),
+    );
     await runBuild(true);
     const shiftedLlvm = await readFile(join(outDir, "lib.lib.ll"), "utf8");
     await rm(join(cacheRoot, "early-lib"), { recursive: true, force: true });
@@ -118,17 +130,20 @@ test("library identity source stays private and cannot overwrite a sidecar", asy
 
     // Imported trivia edits in a multi-source graph must also produce
     // the same LLVM artifact as a forced frontend miss.
-    await writeFile(join(dir, "lib.ts"), (await readFile(join(dir, "lib.ts"), "utf8"))
-      .replace(
-        "export interface Model",
-        "import { initialValue } from \"./helper.js\";\nexport interface Model",
-      )
-      .replace("value: 1", "value: initialValue()"));
+    await writeFile(
+      join(dir, "lib.ts"),
+      (await readFile(join(dir, "lib.ts"), "utf8"))
+        .replace(
+          "export interface Model",
+          'import { initialValue } from "./helper.js";\nexport interface Model',
+        )
+        .replace("value: 1", "value: initialValue()"),
+    );
     await runBuild(true);
-    await writeFile(join(dir, "helper.ts"), [
-      "// harmless helper comment",
-      await readFile(join(dir, "helper.ts"), "utf8"),
-    ].join("\n"));
+    await writeFile(
+      join(dir, "helper.ts"),
+      ["// harmless helper comment", await readFile(join(dir, "helper.ts"), "utf8")].join("\n"),
+    );
     await runBuild(true);
     const savedLlvm = await readFile(join(outDir, "lib.lib.ll"), "utf8");
     await rm(join(cacheRoot, "early-lib"), { recursive: true, force: true });

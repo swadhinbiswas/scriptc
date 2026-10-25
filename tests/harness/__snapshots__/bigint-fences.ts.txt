@@ -1,6 +1,42 @@
-bigint-fences.ts:10:29 - error SC0001: Expected 1 arguments, but got 2.
+bigint-fences.ts:3:7 - error SC2020: 'BigInt64Array<ArrayBuffer>' is part of the standard library types but has no scriptc lowering yet
 
-   9 | import { statSync } from "node:fs";
-  10 | const stats = statSync(".", { bigint: true });
-     |                             ^~~~~~~~~~~~~~~~
-  11 | console.log(stats.size);
+  2 | // explicit refusals until their own coherent families land.
+  3 | const typed = new BigInt64Array(4);
+    |       ^~~~~
+  4 | const dynamicValue: unknown = 1n;
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+bigint-fences.ts:3:15 - error SC2020: 'new BigInt64Array' is part of the standard library types but has no scriptc lowering yet
+
+  2 | // explicit refusals until their own coherent families land.
+  3 | const typed = new BigInt64Array(4);
+    |               ^~~~~~~~~~~~~~~~~~~~
+  4 | const dynamicValue: unknown = 1n;
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+bigint-fences.ts:8:28 - error SC1090: JSON.stringify of 'bigint' values (only number, string, boolean, records, arrays, unions of those, and 'unknown' stringify) are not supported yet
+
+  7 | keyed.set(1n, "one");
+  8 | console.log(JSON.stringify(1n));
+    |                            ^~
+  9 | 
+
+bigint-fences.ts:11:39 - error SC2020: 'statSync with bigint: true' is part of the standard library types but has no scriptc lowering yet
+
+  10 | import { statSync } from "node:fs";
+  11 | const stats = statSync(".", { bigint: true });
+     |                                       ^~~~
+  12 | console.log(stats.size);
+
+  hint: BigIntStats has no lowering; omit bigint for Stats
+
+bigint-fences.ts:14:6 - error SC2004: uses of 'typed' inherit the blocker on its declaration
+
+  13 | 
+  14 | void typed;
+     |      ^~~~~
+  15 | void dynamicValue;
+
+  hint: the declaration of 'typed' did not compile — fix the diagnostic reported there and these sites clear with it

@@ -1,0 +1,20 @@
+const raw = new Uint32Array([0x3f800000, 0x7fc01234, 0x80000000, 0x40000000]);
+const floats = new Float32Array(raw.buffer, 4, 3);
+const reversed = floats.toReversed();
+console.log(new Uint32Array(reversed.buffer).join(","));
+console.log(Object.is(reversed[1], -0), Number.isNaN(reversed[2]), raw[1]);
+reversed[0] = 9;
+console.log(floats[2], reversed[0]);
+
+const words = new Uint32Array([0x00001234, 0x7ff80000, 0, 0x80000000]);
+const doubles = new Float64Array(words.buffer).toReversed();
+console.log(new Uint32Array(doubles.buffer).join(","));
+console.log(Object.is(doubles[0], -0), Number.isNaN(doubles[1]));
+console.log(new Int8Array([-128, 0, 127]).toReversed().join(","));
+console.log(new Uint8Array([0, 128, 255]).toReversed().join(","));
+console.log(new Uint8ClampedArray([-3, 1.5, 256]).toReversed().join(","));
+console.log(new Int16Array([-32768, 0, 32767]).toReversed().join(","));
+console.log(new Uint16Array([0, 32768, 65535]).subarray(1).toReversed().join(","));
+console.log(new Int32Array([-2147483648, 0, 2147483647]).toReversed().join(","));
+console.log(new Uint32Array([0, 2147483648, 4294967295]).toReversed().join(","));
+console.log(new Float64Array(0).toReversed().length);

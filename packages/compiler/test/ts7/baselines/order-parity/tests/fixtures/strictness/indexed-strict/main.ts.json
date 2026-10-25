@@ -1,0 +1,16 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/strictness/indexed-strict/main.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "'picked' is possibly 'undefined'.",
+   "loc": {
+    "file": "<repo>/tests/fixtures/strictness/indexed-strict/main.ts",
+    "start": 360,
+    "end": 366
+   }
+  }
+ ]
+}

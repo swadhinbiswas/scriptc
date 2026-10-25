@@ -10,11 +10,11 @@
  *
  * Ratified shape (the ratified library-mode design §5.1 + the ABI ratification session):
  *   {
- *     "profile_format": 1,
+ *     "profile_format": 1 | 2,              // 2 adds the cstring class
  *     "name": "<embedder identity string>",
  *     "entry": "src/lib.ts",                  // ONE module, profile-relative
  *     "emission": "llvm",                // pins the emission; no fallback
- *     "optimization": "release" | "dev",       // optional; default release
+ *     "optimization": "release" | "dev" | "speed", // optional; default release
  *     "abi": {
  *       "prefix": "<prefix>_",
  *       "init_symbol": "<prefix>_init",
@@ -122,7 +122,7 @@
  *     only through the embedder's own byte/record marshalling.
  *
  * Off by default: an absent or false `localize_runtime` produces the
- * classic artifact, byte-for-byte. Localization follows the archive's
+ * classic artifact, unchanged. Localization follows the archive's
  * object format: ELF and COFF archives localize on any supported host
  * (native or cross); Mach-O localization runs the macOS host linker, so
  * macos and ios targets build on darwin hosts and refuse elsewhere with
@@ -165,8 +165,8 @@
  *
  * Independent of `localize_runtime`, and composable with it: a thread-
  * instanced archive that must coexist with OTHER archives in one process
- * declares both. Off by default; non-opted builds are byte-for-byte
- * unchanged.
+ * declares both. Off by default; non-opted builds are identical to
+ * builds without the option.
  *
  * Host-callback channels (`callbacks` + `abi.callback_register_symbol`):
  * the mode's outbound seam. A library's default outbound channels are
@@ -244,14 +244,19 @@
  * — the root included (the anti-inert posture: profiles pin per compiler
  * release, so an unknown root key is a typo or a misplaced section, never
  * forward-compat surface; the ask-5 key names at the root refuse with a
- * pointer to their `determinism.*` home, since a silently inert `fences`
- * array is exactly the footgun the fence machinery refuses everywhere
+ * pointer to their `determinism.*` home, since an inert `fences` array
+ * that reports no diagnostic is exactly the footgun the fence machinery refuses everywhere
  * else). Only the INTERIOR of `determinism` keeps a reserved-and-ignored
  * surface beyond the three ask-5 keys. */
+import { isNativeOptimization, type NativeOptimization } from "../backend/optimization.js";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
-import { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence } from "./fence-eval.js";
+import {
+  resolveLibraryFences,
+  type LibraryFenceDecl,
+  type ResolvedLibraryFence,
+} from "./fence-eval.js";
 
 /** Marshalling classes legal in PARAMETER position: the v1 classes plus
  * ask 4's declared integer boundary classes. An i64/u64 PARAMETER is an
@@ -259,7 +264,18 @@ import { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence 
  * marshalled wrapper (values past ±(2^53−1) cannot ride f64 exactly — the
  * SC4012 host-contract trap), and internal call sites must PROVE the
  * argument whole-in-range at compile time (library/int-infer.ts). */
-export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32", "i64", "u64"] as const;
+export const LIB_PARAM_CLASSES = [
+  "f64",
+  "bool",
+  "string",
+  "cstring",
+  "bytes",
+  "u8",
+  "u32",
+  "i32",
+  "i64",
+  "u64",
+] as const;
 /** Marshalling classes legal in RETURN position: the value classes, void,
  * and ask 4's i64/u64 — an integer RETURN compiles only when every value
  * reaching it is PROVEN whole and in range (prove-or-refuse; the wrapper's
@@ -267,7 +283,16 @@ export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32",
  * u8/u32/i32 plumbing classes stay param-only: they were ratified as
  * inbound plumbing, and outbound integers are the proven classes'
  * business. */
-export const LIB_RETURN_CLASSES = ["f64", "bool", "string", "bytes", "void", "i64", "u64"] as const;
+export const LIB_RETURN_CLASSES = [
+  "f64",
+  "bool",
+  "string",
+  "cstring",
+  "bytes",
+  "void",
+  "i64",
+  "u64",
+] as const;
 
 /** Ask 4's declared integer classes (the prove-or-refuse pair). */
 export type LibIntClass = "i64" | "u64";
@@ -282,7 +307,16 @@ export type LibReturnClass = (typeof LIB_RETURN_CLASSES)[number];
  * declared integer classes stay export-map surface: an outbound i64/u64
  * demands the prove-or-refuse machinery, which is scoped to export
  * returns today. */
-const LIB_CALLBACK_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
+const LIB_CALLBACK_PARAM_CLASSES = [
+  "f64",
+  "bool",
+  "string",
+  "cstring",
+  "bytes",
+  "u8",
+  "u32",
+  "i32",
+] as const;
 /** Marshalling classes legal in a CALLBACK RETURN position (inbound: host
  * → compiled code). Scalars only — every conversion to f64 is exact by
  * construction; a buffer return would need an ownership contract the mode
@@ -362,7 +396,7 @@ export interface LibrarySidecarConfig {
 }
 
 export interface LibraryProfile {
-  profileFormat: 1;
+  profileFormat: 1 | 2;
   name: string;
   /** The profile file that produced this configuration. Semantic
    * designation errors anchor here, where the offending name is written. */
@@ -373,7 +407,7 @@ export interface LibraryProfile {
   emission: "llvm";
   /** Native optimizer posture. release preserves the production -O2 archive;
    * dev uses -O0 for fast iterative embedding builds. */
-  optimization: "release" | "dev";
+  optimization: NativeOptimization;
   /** Explicit source-inference attempts, including packages without declarations. */
   npmStatic: string[];
   prefix: string;
@@ -442,7 +476,13 @@ class ProfileError extends Error {
 }
 
 function req<T>(v: unknown, path: string, kind: "string" | "number" | "boolean"): T {
-  if (!(kind === "string" ? typeof v === "string" : kind === "number" ? typeof v === "number" : typeof v === "boolean")) {
+  if (
+    !(kind === "string"
+      ? typeof v === "string"
+      : kind === "number"
+        ? typeof v === "number"
+        : typeof v === "boolean")
+  ) {
     throw new ProfileError(`'${path}' must be a ${kind}${v === undefined ? " (missing)" : ""}`);
   }
   return v as T;
@@ -461,7 +501,9 @@ function symbolField(v: unknown, path: string, prefix: string, nullable: boolean
 function rejectUnknownKeys(obj: object, path: string, known: readonly string[]): void {
   for (const k of Object.keys(obj)) {
     if (!known.includes(k)) {
-      throw new ProfileError(`unknown field '${path}.${k}' (a typo here would change the ABI; remove it)`);
+      throw new ProfileError(
+        `unknown field '${path}.${k}' (a typo here would change the ABI; remove it)`,
+      );
     }
   }
 }
@@ -493,25 +535,59 @@ export function loadLibraryProfile(
     }
     const p = raw as Record<string, unknown>;
     const format = req<number>(p["profile_format"], "profile_format", "number");
-    if (format !== 1) throw new ProfileError(`unsupported profile_format ${format} (this scriptc reads format 1)`);
+    if (format !== 1 && format !== 2)
+      throw new ProfileError(
+        `unsupported profile_format ${format} (this scriptc reads formats 1 and 2)`,
+      );
+    // The cstring class (a NUL-terminated `const char *`) is format 2.
+    const cstringClass = (cls: string, path: string): void => {
+      if (cls === "cstring" && format < 2) {
+        throw new ProfileError(`'${path}' class 'cstring' requires profile_format 2`);
+      }
+    };
     // Root keys are strict (checked AFTER the format gate, so a future
     // format's profile refuses as the wrong format, not as a typo). The
     // ask-5 key names get the pointed message: a `fences` array pasted at
-    // the root would otherwise be silently inert — the exact footgun the
-    // fence machinery refuses everywhere else.
+    // the root would otherwise be inert without a diagnostic — the exact
+    // footgun the fence machinery refuses everywhere else.
     for (const k of Object.keys(p)) {
-      if (["profile_format", "name", "entry", "emission", "optimization", "npm_static", "abi", "exports", "callbacks", "sidecar", "determinism"].includes(k)) continue;
+      if (
+        [
+          "profile_format",
+          "name",
+          "entry",
+          "emission",
+          "optimization",
+          "npm_static",
+          "abi",
+          "exports",
+          "callbacks",
+          "sidecar",
+          "determinism",
+        ].includes(k)
+      )
+        continue;
       if (k === "fences" || k === "teachings" || k === "remediations") {
         throw new ProfileError(
           `'${k}' at the profile root does nothing — the ask-5 determinism surface lives under 'determinism.${k}'; move it there`,
         );
       }
-      throw new ProfileError(`unknown field '${k}' (root keys are strict: a typo here would silently change the build; remove it)`);
+      throw new ProfileError(
+        `unknown field '${k}' (root keys are strict: an ignored typo here would change the build; remove it)`,
+      );
     }
     const name = req<string>(p["name"], "name", "string");
     const npmStaticRaw = p["npm_static"] === undefined ? [] : p["npm_static"];
-    if (!Array.isArray(npmStaticRaw) || npmStaticRaw.some((name) => typeof name !== "string" || !/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_][a-z0-9_.-]*$/.test(name))) {
-      throw new ProfileError("'npm_static' must be an array of npm package names (not subpath specifiers)");
+    if (
+      !Array.isArray(npmStaticRaw) ||
+      npmStaticRaw.some(
+        (name) =>
+          typeof name !== "string" || !/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_][a-z0-9_.-]*$/.test(name),
+      )
+    ) {
+      throw new ProfileError(
+        "'npm_static' must be an array of npm package names (not subpath specifiers)",
+      );
     }
     const npmStatic = [...new Set(npmStaticRaw as string[])];
     if (name === "") throw new ProfileError("'name' must be a non-empty identity string");
@@ -519,28 +595,52 @@ export function loadLibraryProfile(
     if (entryRel === "") throw new ProfileError("'entry' must name the profile's one entry module");
     const emission = req<string>(p["emission"], "emission", "string");
     if (emission !== "llvm") {
-      throw new ProfileError(`'emission' must be "llvm"; C emission has been removed, got '${emission}'`);
+      throw new ProfileError(
+        `'emission' must be "llvm"; C emission has been removed, got '${emission}'`,
+      );
     }
-    const optimization = p["optimization"] === undefined
-      ? "release"
-      : req<string>(p["optimization"], "optimization", "string");
-    if (optimization !== "release" && optimization !== "dev") {
-      throw new ProfileError(`'optimization' must be "release" or "dev", got '${optimization}'`);
+    const optimization =
+      p["optimization"] === undefined
+        ? "release"
+        : req<string>(p["optimization"], "optimization", "string");
+    if (!isNativeOptimization(optimization)) {
+      throw new ProfileError(
+        `'optimization' must be "release", "dev", or "speed", got '${optimization}'`,
+      );
     }
     const abi = p["abi"];
     if (abi === null || typeof abi !== "object" || Array.isArray(abi)) {
       throw new ProfileError("'abi' must be an object");
     }
-    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread", "callback_register_symbol"]);
+    rejectUnknownKeys(abi, "abi", [
+      "prefix",
+      "init_symbol",
+      "sink_register_symbol",
+      "collect_symbol",
+      "result_reset_symbol",
+      "localize_runtime",
+      "instance_per_thread",
+      "callback_register_symbol",
+    ]);
     const a = abi as Record<string, unknown>;
     const prefix = req<string>(a["prefix"], "abi.prefix", "string");
     if (!C_IDENT.test(prefix)) {
       throw new ProfileError(`'abi.prefix' is not a valid C identifier fragment: '${prefix}'`);
     }
     const initSymbol = symbolField(a["init_symbol"], "abi.init_symbol", prefix, false)!;
-    const sinkRegisterSymbol = symbolField(a["sink_register_symbol"], "abi.sink_register_symbol", prefix, false)!;
+    const sinkRegisterSymbol = symbolField(
+      a["sink_register_symbol"],
+      "abi.sink_register_symbol",
+      prefix,
+      false,
+    )!;
     const collectSymbol = symbolField(a["collect_symbol"], "abi.collect_symbol", prefix, true);
-    const resultResetSymbol = symbolField(a["result_reset_symbol"], "abi.result_reset_symbol", prefix, true);
+    const resultResetSymbol = symbolField(
+      a["result_reset_symbol"],
+      "abi.result_reset_symbol",
+      prefix,
+      true,
+    );
     // Multi-instance library mode: strictly boolean when present (the field
     // gates the artifact's whole link surface, so a truthy non-boolean is a
     // refusal, never a coercion).
@@ -554,7 +654,12 @@ export function loadLibraryProfile(
       a["instance_per_thread"] === undefined
         ? false
         : req<boolean>(a["instance_per_thread"], "abi.instance_per_thread", "boolean");
-    const callbackRegisterSymbol = symbolField(a["callback_register_symbol"], "abi.callback_register_symbol", prefix, true);
+    const callbackRegisterSymbol = symbolField(
+      a["callback_register_symbol"],
+      "abi.callback_register_symbol",
+      prefix,
+      true,
+    );
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
@@ -567,7 +672,8 @@ export function loadLibraryProfile(
       rejectUnknownKeys(e, path, ["export", "symbol", "params", "returns"]);
       const ee = e as Record<string, unknown>;
       const exportName = req<string>(ee["export"], `${path}.export`, "string");
-      if (exportName === "") throw new ProfileError(`'${path}.export' must be a non-empty export name`);
+      if (exportName === "")
+        throw new ProfileError(`'${path}.export' must be a non-empty export name`);
       const symbol = symbolField(ee["symbol"], `${path}.symbol`, prefix, false)!;
       const paramsRaw = ee["params"];
       if (!Array.isArray(paramsRaw)) throw new ProfileError(`'${path}.params' must be an array`);
@@ -577,6 +683,7 @@ export function loadLibraryProfile(
             `'${path}.params[${j}]' must be one of ${LIB_PARAM_CLASSES.join("/")}, got ${JSON.stringify(c)}`,
           );
         }
+        cstringClass(c, `${path}.params[${j}]`);
         return c as LibParamClass;
       });
       const returns = req<string>(ee["returns"], `${path}.returns`, "string");
@@ -587,6 +694,7 @@ export function loadLibraryProfile(
             : `'${path}.returns' must be one of ${LIB_RETURN_CLASSES.join("/")}, got '${returns}'`;
         throw new ProfileError(detail);
       }
+      cstringClass(returns, `${path}.returns`);
       entries.push({ export: exportName, symbol, params, returns: returns as LibReturnClass });
     });
 
@@ -622,22 +730,30 @@ export function loadLibraryProfile(
               `'${path}.params[${j}]': the declared integer classes are export-map surface — an outbound callback scalar is f64 (whole values ride exactly to ±(2^53 − 1)) or one of the u8/u32/i32 plumbing classes (JS ToUint32/ToInt32 semantics)`,
             );
           }
-          if (typeof cls !== "string" || !(LIB_CALLBACK_PARAM_CLASSES as readonly string[]).includes(cls)) {
+          if (
+            typeof cls !== "string" ||
+            !(LIB_CALLBACK_PARAM_CLASSES as readonly string[]).includes(cls)
+          ) {
             throw new ProfileError(
               `'${path}.params[${j}]' must be one of ${LIB_CALLBACK_PARAM_CLASSES.join("/")}, got ${JSON.stringify(cls)}`,
             );
           }
+          cstringClass(cls, `${path}.params[${j}]`);
           return cls as LibCallbackParamClass;
         });
         const cbReturns = req<string>(cc["returns"], `${path}.returns`, "string");
         if (!(LIB_CALLBACK_RETURN_CLASSES as readonly string[]).includes(cbReturns)) {
           const detail =
-            cbReturns === "string" || cbReturns === "bytes"
+            cbReturns === "string" || cbReturns === "cstring" || cbReturns === "bytes"
               ? `'${path}.returns': a callback return stays scalar — a buffer flowing host → library needs an ownership contract the mode does not define; pass buffers as callback parameters (library → host, borrowed for the call) or entry parameters instead`
               : `'${path}.returns' must be one of ${LIB_CALLBACK_RETURN_CLASSES.join("/")}, got '${cbReturns}'`;
           throw new ProfileError(detail);
         }
-        callbacks.push({ name: cbName, params: cbParams, returns: cbReturns as LibCallbackReturnClass });
+        callbacks.push({
+          name: cbName,
+          params: cbParams,
+          returns: cbReturns as LibCallbackReturnClass,
+        });
       });
       if (callbacks.length > LIB_MAX_CALLBACKS) {
         throw new ProfileError(
@@ -662,7 +778,8 @@ export function loadLibraryProfile(
     {
       const seen = new Set<string>();
       for (const cb of callbacks) {
-        if (seen.has(cb.name)) throw new ProfileError(`callback channel '${cb.name}' is declared twice`);
+        if (seen.has(cb.name))
+          throw new ProfileError(`callback channel '${cb.name}' is declared twice`);
         seen.add(cb.name);
       }
       for (const e of entries) {
@@ -676,15 +793,25 @@ export function loadLibraryProfile(
 
     // The ask-2 sidecar section: presence turns contract emission on.
     // Unknown fields inside it are refused like abi's (a typo here would
-    // silently change the emitted contract).
+    // change the emitted contract without a diagnostic).
     let sidecar: LibrarySidecarConfig | null = null;
     const sc = p["sidecar"];
     if (sc !== undefined && sc !== null) {
-      if (typeof sc !== "object" || Array.isArray(sc)) throw new ProfileError("'sidecar' must be an object");
+      if (typeof sc !== "object" || Array.isArray(sc))
+        throw new ProfileError("'sidecar' must be an object");
       rejectUnknownKeys(sc, "sidecar", [
-        "path", "wire_version", "abi_version", "snapshot_format",
-        "build_id_symbol", "abi_version_symbol", "model", "msg",
-        "init_export", "update_export", "subscriptions_export", "source_hash",
+        "path",
+        "wire_version",
+        "abi_version",
+        "snapshot_format",
+        "build_id_symbol",
+        "abi_version_symbol",
+        "model",
+        "msg",
+        "init_export",
+        "update_export",
+        "subscriptions_export",
+        "source_hash",
         "integer_slots",
       ]);
       const s = sc as Record<string, unknown>;
@@ -706,11 +833,16 @@ export function loadLibraryProfile(
         const v = req<string>(s["path"], "sidecar.path", "string");
         if (v === "") throw new ProfileError("'sidecar.path' must be a non-empty relative path");
         if (isAbsolute(v)) {
-          throw new ProfileError("'sidecar.path' must be relative (the sidecar is written beside the archive)");
+          throw new ProfileError(
+            "'sidecar.path' must be relative (the sidecar is written beside the archive)",
+          );
         }
         path = v;
       }
-      const sourceHash = s["source_hash"] === undefined ? "module-graph" : req<string>(s["source_hash"], "sidecar.source_hash", "string");
+      const sourceHash =
+        s["source_hash"] === undefined
+          ? "module-graph"
+          : req<string>(s["source_hash"], "sidecar.source_hash", "string");
       if (sourceHash !== "module-graph") {
         throw new ProfileError(
           `'sidecar.source_hash' names an unknown hashing contract '${sourceHash}' (this scriptc implements "module-graph")`,
@@ -720,11 +852,12 @@ export function loadLibraryProfile(
       // contract slot by its sidecar path and picks the integer class.
       // Path RESOLUTION happens at sidecar build (the contract must
       // exist first); here the shape is pinned — a typo'd key or class
-      // would silently change an ABI obligation.
+      // would change an ABI obligation without a diagnostic.
       const integerSlots: { slot: string; cls: "i64" | "u64" }[] = [];
       const isRaw = s["integer_slots"];
       if (isRaw !== undefined && isRaw !== null) {
-        if (!Array.isArray(isRaw)) throw new ProfileError("'sidecar.integer_slots' must be an array");
+        if (!Array.isArray(isRaw))
+          throw new ProfileError("'sidecar.integer_slots' must be an array");
         const seenSlots = new Set<string>();
         isRaw.forEach((entry, i) => {
           const epath = `sidecar.integer_slots[${i}]`;
@@ -739,7 +872,8 @@ export function loadLibraryProfile(
           if (cls !== "i64" && cls !== "u64") {
             throw new ProfileError(`'${epath}.class' must be "i64" or "u64", got '${cls}'`);
           }
-          if (seenSlots.has(slot)) throw new ProfileError(`'${epath}.slot' repeats slot path '${slot}'`);
+          if (seenSlots.has(slot))
+            throw new ProfileError(`'${epath}.slot' repeats slot path '${slot}'`);
           seenSlots.add(slot);
           integerSlots.push({ slot, cls });
         });
@@ -750,7 +884,12 @@ export function loadLibraryProfile(
         abiVersion: intField("abi_version"),
         snapshotFormat: intField("snapshot_format"),
         buildIdSymbol: symbolField(s["build_id_symbol"], "sidecar.build_id_symbol", prefix, false)!,
-        abiVersionSymbol: symbolField(s["abi_version_symbol"], "sidecar.abi_version_symbol", prefix, false)!,
+        abiVersionSymbol: symbolField(
+          s["abi_version_symbol"],
+          "sidecar.abi_version_symbol",
+          prefix,
+          false,
+        )!,
         model: nameField("model", null),
         msg: nameField("msg", null),
         initExport: nameField("init_export", "init"),
@@ -761,7 +900,9 @@ export function loadLibraryProfile(
         integerSlots,
       };
       if (sidecar.model === sidecar.msg) {
-        throw new ProfileError(`'sidecar.msg' must differ from 'sidecar.model' ('${sidecar.model}')`);
+        throw new ProfileError(
+          `'sidecar.msg' must differ from 'sidecar.model' ('${sidecar.model}')`,
+        );
       }
     }
 
@@ -772,7 +913,9 @@ export function loadLibraryProfile(
       if (sym === null) return;
       const prev = all.get(sym);
       if (prev !== undefined) {
-        throw new ProfileError(`symbol '${sym}' is declared twice (${prev} and ${path}); symbols must be pairwise distinct`);
+        throw new ProfileError(
+          `symbol '${sym}' is declared twice (${prev} and ${path}); symbols must be pairwise distinct`,
+        );
       }
       all.set(sym, path);
     };
@@ -808,8 +951,10 @@ export function loadLibraryProfile(
     const teachings: Record<string, string> = {};
     const remediations: Record<string, string> = {};
     let fences: ResolvedLibraryFence[] = [];
+    /* oxlint-disable no-control-regex -- Reject the reserved control-byte encoding. */
     const RESERVED_TEXT = /[\u0000-\u0009\u000b-\u001f]/;
     const RESERVED_KEY = /[\u0000-\u001f]/;
+    /* oxlint-enable no-control-regex */
     const checkRiderText = (v: string, path: string): void => {
       if (RESERVED_TEXT.test(v)) {
         throw new ProfileError(
@@ -818,12 +963,17 @@ export function loadLibraryProfile(
       }
       const bytes = new TextEncoder().encode(v).length;
       if (bytes > 512) {
-        throw new ProfileError(`'${path}' is ${bytes} bytes — teaching and remediation strings cap at 512 bytes`);
+        throw new ProfileError(
+          `'${path}' is ${bytes} bytes — teaching and remediation strings cap at 512 bytes`,
+        );
       }
     };
     const det = p["determinism"];
     if (det !== undefined && det !== null && typeof det === "object" && !Array.isArray(det)) {
-      const readRider = (rider: "teachings" | "remediations", into: Record<string, string>): void => {
+      const readRider = (
+        rider: "teachings" | "remediations",
+        into: Record<string, string>,
+      ): void => {
         const t = (det as Record<string, unknown>)[rider];
         if (t === undefined || t === null || typeof t !== "object" || Array.isArray(t)) return;
         for (const [k, v] of Object.entries(t as Record<string, unknown>)) {
@@ -842,12 +992,13 @@ export function loadLibraryProfile(
 
       // The fences array (spec §1): each entry exactly one of id/prefix
       // plus optional teaching/remediation, unknown fields refused (a typo
-      // here silently disarms a denial), and the selector resolved against
-      // this release's surface manifest — unknown ids/prefixes refuse
-      // loudly (ratified: fence profiles pin per compiler release).
+      // here disarms a denial without a diagnostic), and the selector resolved
+      // against this release's surface manifest — unknown ids/prefixes throw
+      // a ProfileError (ratified: fence profiles pin per compiler release).
       const fencesRaw = (det as Record<string, unknown>)["fences"];
       if (fencesRaw !== undefined && fencesRaw !== null) {
-        if (!Array.isArray(fencesRaw)) throw new ProfileError("'determinism.fences' must be an array");
+        if (!Array.isArray(fencesRaw))
+          throw new ProfileError("'determinism.fences' must be an array");
         const decls: LibraryFenceDecl[] = fencesRaw.map((f, i) => {
           const path = `determinism.fences[${i}]`;
           if (f === null || typeof f !== "object" || Array.isArray(f)) {
@@ -861,11 +1012,13 @@ export function loadLibraryProfile(
           const decl: LibraryFenceDecl = { path };
           if (ff["id"] !== undefined) {
             const id = req<string>(ff["id"], `${path}.id`, "string");
-            if (id === "") throw new ProfileError(`'${path}.id' must be a non-empty manifest entry id`);
+            if (id === "")
+              throw new ProfileError(`'${path}.id' must be a non-empty manifest entry id`);
             decl.id = id;
           } else {
             const prefix = req<string>(ff["prefix"], `${path}.prefix`, "string");
-            if (prefix === "") throw new ProfileError(`'${path}.prefix' must be a non-empty manifest id prefix`);
+            if (prefix === "")
+              throw new ProfileError(`'${path}.prefix' must be a non-empty manifest id prefix`);
             decl.prefix = prefix;
           }
           for (const rider of ["teaching", "remediation"] as ("teaching" | "remediation")[]) {
@@ -887,7 +1040,7 @@ export function loadLibraryProfile(
     return {
       ok: true,
       profile: {
-        profileFormat: 1,
+        profileFormat: format as 1 | 2,
         name,
         profilePath,
         entry,
@@ -921,7 +1074,10 @@ export function loadLibraryProfile(
  * SC4004/SC4005 carry profile-supplied guidance naming the embedder's
  * sanctioned alternative). Falls back to the shared "async" key. */
 export function profileTeaching(profile: LibraryProfile, code: string): string | undefined {
-  return profile.teachings[code] ?? (code === "SC4004" || code === "SC4005" ? profile.teachings["async"] : undefined);
+  return (
+    profile.teachings[code] ??
+    (code === "SC4004" || code === "SC4005" ? profile.teachings["async"] : undefined)
+  );
 }
 
 /** The profile's remediation text for one code — the structured

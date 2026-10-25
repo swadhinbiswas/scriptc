@@ -10,6 +10,7 @@
  */
 #include "scr_runtime.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
@@ -37,23 +38,132 @@ _Noreturn void scr_trap_fmt(const char *fmt, ...) {
 #endif /* !SCR_LIB */
 
 static SCR_TL ScrExcCell scr_main_exc; /* fiber zero (the main stack) */
-#if defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+/* The active cell is exported so executables can test its kind inline at
+ * every exception poll and call scr_exc_pending only on the slow path; the
+ * kind is the cell's first field. */
+#if (defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)) || defined(SCR_WORKERS)
 /* A thread-local pointer cannot be initialized with &scr_main_exc — the
  * address of a thread-local is not a constant expression — so NULL stands
- * for the main cell and every read resolves it. Fibers never exist in
- * library artifacts, so the cell only ever IS the main cell here. */
-static SCR_TL ScrExcCell *scr_cur;
-#define SCR_EXC_CUR() (scr_cur ? scr_cur : &scr_main_exc)
+ * for the main cell and every read resolves it. Worker executables also
+ * switch this pointer as fibers enter and leave their own exception cells,
+ * and scr_init points it at the context's main cell before program code
+ * runs, so generated inline polls never read NULL. */
+SCR_TL ScrExcCell *scr_exc_active;
+#define SCR_EXC_CUR() (scr_exc_active ? scr_exc_active : &scr_main_exc)
 #else
-static ScrExcCell *scr_cur = &scr_main_exc;
-#define SCR_EXC_CUR() (scr_cur)
+ScrExcCell *scr_exc_active = &scr_main_exc;
+/* What scr_exc_swap_cell(NULL) selects; the inline swap reads it. */
+ScrExcCell *const scr_exc_main_cell = &scr_main_exc;
+#define SCR_EXC_CUR() (scr_exc_active)
+#endif
+
+/* The running stack's overflow guard (scr_runtime.h). It lives beside the
+ * exception cell so fiber switching can maintain it whenever scr_async.c is
+ * linked; scr_context.c installs it per thread. The explicit initializer
+ * keeps it an ordinary definition rather than a common symbol, which a
+ * localized library archive would otherwise leave shared. */
+SCR_TL uintptr_t scr_stack_guard = 0;
+
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(SCR_EXC_FLAG)
+/* The thread's exact pending word, tested inline by every emitted pending
+ * check in ELF worker executables (one %fs/tpidr-relative load: the word is
+ * in the executable's static TLS block). Nonzero means the running code
+ * must unwind, so the emitted check needs no out-of-line answer:
+ *
+ * - SCR_EXC_FLAG_PENDING mirrors `active cell kind != NONE` exactly. Only
+ *   the owner thread writes it, at every change of its active cell (throws,
+ *   rethrows, take/clear, fiber switches, payload moves, the termination
+ *   sentinel), because a stale bit would unwind a normal path.
+ * - SCR_EXC_FLAG_STOP means the context must stop. worker.terminate() sets
+ *   it from the owner's thread (scr_exc_flag_request_stop, through the
+ *   pointer the worker registers while its script runs), scr_context_stop
+ *   sets it for process.exit() and fatal paths, and nothing clears it.
+ *
+ * A set STOP bit unwinds while the active cell may still be NONE: the
+ * TERMINATE sentinel is installed by whoever consumes the unwind before it
+ * inspects the cell. scr_exc_pending and scr_context_checkpoint do that,
+ * emitted try regions test the bit before entering a handler, and the
+ * runtime's unwind consumers (fiber completion, the uncaught reporters,
+ * exit listeners) checkpoint first. */
+SCR_TL _Atomic uint32_t scr_exc_flag;
+
+static inline void scr_exc_flag_pending(bool pending) {
+  uint32_t word = atomic_load_explicit(&scr_exc_flag, memory_order_relaxed);
+  if (((word & SCR_EXC_FLAG_PENDING) != 0) == pending) return;
+  if (pending) atomic_fetch_or_explicit(&scr_exc_flag, SCR_EXC_FLAG_PENDING, memory_order_relaxed);
+  else atomic_fetch_and_explicit(&scr_exc_flag, ~SCR_EXC_FLAG_PENDING, memory_order_relaxed);
+}
+
+void scr_exc_flag_request_stop(_Atomic uint32_t *flag) {
+  /* Release: a thread that observes the bit also observes the requester's
+   * earlier writes (the worker's cancel flag). */
+  atomic_fetch_or_explicit(flag, SCR_EXC_FLAG_STOP, memory_order_release);
+}
+
+/* The active cell, or the context's stop state, may have changed. */
+void scr_exc_cell_changed(void) {
+  if (!scr_context_quiet() &&
+      !(atomic_load_explicit(&scr_exc_flag, memory_order_relaxed) & SCR_EXC_FLAG_STOP))
+    atomic_fetch_or_explicit(&scr_exc_flag, SCR_EXC_FLAG_STOP, memory_order_relaxed);
+  scr_exc_flag_pending(SCR_EXC_CUR()->kind != SCR_EXC_NONE);
+}
+
+void scr_exc_alert_thread_exit(void) {}
+#define SCR_EXC_RAISED() scr_exc_flag_pending(true)
+#elif defined(SCR_WORKERS) && !defined(SCR_LIB)
+/* The process-wide exception alert, tested inline by every emitted pending
+ * check in worker executables: one ordinary load, where reading the active
+ * cell would be a thread-local access (a call on Darwin). It counts the
+ * script threads whose active cell may hold a pending exception or which
+ * must stop, plus one reference per outstanding worker.terminate() request
+ * (scr_worker.c). Zero proves that no thread has anything pending, so the
+ * check falls through; otherwise the out-of-line scr_exc_pending answers for
+ * the calling thread. A thread raises its share whenever its active cell may
+ * have become pending (throws, rethrows, the termination sentinel, fiber
+ * switches and moves into the active cell) and drops it once that cell is
+ * clear again (take, clear, the slow path), so an exception in flight in one
+ * thread costs the others slow-path calls only until it is caught. Only its
+ * owner changes a thread's share, so a thread's own raise is visible to all
+ * of its later checks. */
+_Alignas(64) _Atomic uint32_t scr_exc_alert = 0;
+static SCR_TL bool scr_exc_alerted;
+
+void scr_exc_alert_add(int delta) {
+  atomic_fetch_add_explicit(&scr_exc_alert, (uint32_t)delta, memory_order_release);
+}
+
+static void scr_exc_alert_raise(void) {
+  if (scr_exc_alerted) return;
+  scr_exc_alerted = true;
+  atomic_fetch_add_explicit(&scr_exc_alert, 1, memory_order_relaxed);
+}
+
+static void scr_exc_alert_drop(void) {
+  if (!scr_exc_alerted) return;
+  scr_exc_alerted = false;
+  atomic_fetch_sub_explicit(&scr_exc_alert, 1, memory_order_relaxed);
+}
+
+/* The active cell, or the context's stop state, may have changed. */
+void scr_exc_cell_changed(void) {
+  if (SCR_EXC_CUR()->kind != SCR_EXC_NONE || !scr_context_quiet()) scr_exc_alert_raise();
+  else scr_exc_alert_drop();
+}
+
+/* A worker thread's script execution has ended for good. */
+void scr_exc_alert_thread_exit(void) { scr_exc_alert_drop(); }
+#define SCR_EXC_RAISED() scr_exc_alert_raise()
+#else
+void scr_exc_cell_changed(void) {}
+#define SCR_EXC_RAISED() ((void)0)
 #endif
 
 /* Fiber switching (scr_async.c) points the exception machinery at the
  * incoming fiber's cell; returns the previous cell. */
-ScrExcCell *scr_exc_swap_cell(ScrExcCell *cell) {
+ScrExcCell *(scr_exc_swap_cell)(ScrExcCell *cell) {
   ScrExcCell *prev = SCR_EXC_CUR();
-  scr_cur = cell ? cell : &scr_main_exc;
+  scr_exc_active = cell ? cell : &scr_main_exc;
+  scr_exc_cell_changed();
   return prev;
 }
 
@@ -117,7 +227,22 @@ ScrStr *scr_stack_capture(void) {
 #define scr_exc_release_fn (SCR_EXC_CUR()->release_fn)
 #define scr_exc_trace_fn (SCR_EXC_CUR()->trace_fn)
 
-bool scr_exc_pending(void) { return scr_exc_kind != SCR_EXC_NONE; }
+/* Parenthesized: scr_runtime.h maps runtime-internal calls to an inline
+ * test with a function-like macro; this keeps the exported symbol. */
+bool(scr_exc_pending)(void) {
+#ifdef SCR_WORKERS
+  if (scr_context_checkpoint()) return true;
+#endif
+  bool pending = scr_exc_kind != SCR_EXC_NONE;
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(SCR_EXC_FLAG)
+  /* The pending bit is exact; settling it here is only a safety net. */
+  scr_exc_flag_pending(pending);
+#elif defined(SCR_WORKERS) && !defined(SCR_LIB)
+  /* The slow path of the alert test: settle this thread's share. */
+  if (pending != scr_exc_alerted) scr_exc_cell_changed();
+#endif
+  return pending;
+}
 
 /* Release the current payload (if any) and reset to NONE. Shared by clear,
  * the uncaught printer, and every throw (replace semantics). */
@@ -135,7 +260,10 @@ static void scr_exc_reset(void) {
   scr_exc_trace_fn = NULL;
 }
 
-void scr_exc_clear(void) { scr_exc_reset(); }
+void scr_exc_clear(void) {
+  scr_exc_reset();
+  scr_exc_cell_changed();
+}
 
 /* ── catch bindings (ScrCaught — contract in scr_runtime.h) ──────────── */
 
@@ -156,7 +284,8 @@ static void scr_caught_gcfree(void *object) {
 }
 
 ScrCaught *scr_exc_take(void) {
-  ScrCaught *c = scr_cyc_alloc(sizeof *c, scr_caught_trace_v, scr_caught_gcfree);
+  static ScrCycType cyc_type = { &scr_caught_trace_v, &scr_caught_gcfree, SCR_CYC_KIND_CAUGHT };
+  ScrCaught *c = scr_cyc_alloc(sizeof *c, &cyc_type);
   c->rc = 1;
   c->kind = scr_exc_kind;
   c->f64 = scr_exc_f64;
@@ -170,6 +299,7 @@ ScrCaught *scr_exc_take(void) {
   scr_exc_retain_fn = NULL;
   scr_exc_release_fn = NULL;
   scr_exc_trace_fn = NULL;
+  scr_exc_cell_changed();
   scr_obj_alloc_note();
   return c;
 }
@@ -182,7 +312,7 @@ ScrCaught *scr_caught_retain(ScrCaught *c) {
 void scr_caught_release(ScrCaught *c) {
   if (!c) return;
   if (--c->rc == 0) {
-    scr_cyc_on_dead(c);
+    scr_cyc_dead(c);
     if (c->kind == SCR_EXC_STR) {
       scr_str_release((ScrStr *)c->payload);
     } else if (c->kind == SCR_EXC_REF || c->kind == SCR_EXC_OBJ ||
@@ -192,7 +322,7 @@ void scr_caught_release(ScrCaught *c) {
     scr_obj_free_note();
     scr_cyc_free(c);
   } else {
-    scr_cyc_on_release(c);
+    scr_cyc_released(c);
   }
 }
 
@@ -212,20 +342,64 @@ void scr_rethrow(const ScrCaught *c) {
     break;
   case SCR_EXC_NONE:
     break; /* unreachable: take() never stores NONE */
+  case SCR_EXC_TERMINATE:
   case SCR_EXC_GENRET:
     /* The generator-return sentinel, stashed across an exception-path
      * finally (emitTryCatch): re-raising restores the bare kind — no
      * payload exists. */
     scr_exc_reset();
-    scr_exc_kind = SCR_EXC_GENRET;
+    scr_exc_kind = c->kind;
+    SCR_EXC_RAISED();
     break;
   }
 }
 
-/* Explicit resource management's error merge. The full JavaScript object
- * exposes `.error` and `.suppressed`; the static catch surface currently
- * exposes Error name/message, so retain Node's externally visible identity
- * and ordering while consuming both snapshots exactly once. */
+/* Explicit resource management's error merge: a SuppressedError whose
+ * `error` is the disposal error and whose `suppressed` is the body error.
+ * The snapshots wait in this table for the error's dyn view, so programs
+ * that never read them link no checked-dynamic code. */
+typedef struct ScrSuppressedEntry {
+  const void *error_object;
+  ScrCaught *error;
+  ScrCaught *suppressed;
+} ScrSuppressedEntry;
+static SCR_TL ScrSuppressedEntry *scr_suppressed_entries = NULL;
+static SCR_TL size_t scr_suppressed_len = 0;
+static SCR_TL size_t scr_suppressed_cap = 0;
+
+bool scr_exc_suppressed_values(const void *error_object, const ScrCaught **error,
+                               const ScrCaught **suppressed) {
+  for (size_t i = 0; i < scr_suppressed_len; i++) {
+    if (scr_suppressed_entries[i].error_object != error_object) continue;
+    *error = scr_suppressed_entries[i].error;
+    *suppressed = scr_suppressed_entries[i].suppressed;
+    return true;
+  }
+  return false;
+}
+
+void scr_exc_suppressed_forget(const void *error_object) {
+  for (size_t i = 0; i < scr_suppressed_len; i++) {
+    if (scr_suppressed_entries[i].error_object != error_object) continue;
+    ScrSuppressedEntry entry = scr_suppressed_entries[i];
+    scr_suppressed_entries[i] = scr_suppressed_entries[--scr_suppressed_len];
+    scr_caught_release(entry.error);
+    scr_caught_release(entry.suppressed);
+    return;
+  }
+}
+
+void scr_exc_keep_first(ScrCaught *first) {
+  if (first->kind == SCR_EXC_GENRET) {
+    scr_caught_release(first);
+    return;
+  }
+  ScrCaught *dropped = scr_exc_take();
+  if (dropped) scr_caught_release(dropped);
+  scr_rethrow(first);
+  scr_caught_release(first);
+}
+
 void scr_exc_suppress(ScrCaught *suppressed) {
   if (suppressed->kind == SCR_EXC_GENRET) {
     /* A generator .return() is a return completion, not a thrown error.
@@ -239,11 +413,22 @@ void scr_exc_suppress(ScrCaught *suppressed) {
     scr_caught_release(suppressed);
     return;
   }
-  scr_caught_release(error);
-  scr_caught_release(suppressed);
-  scr_throw_error_named(
-      scr_str_new("SuppressedError", sizeof("SuppressedError") - 1),
-      scr_str_new("An error was suppressed during disposal", sizeof("An error was suppressed during disposal") - 1));
+  static const char text[] = "An error was suppressed during disposal";
+  ScrStr *message = scr_str_new(text, sizeof text - 1);
+  ScrError *e = scr_error_new(SCR_ERR_SUPPRESSED, message);
+  scr_str_release(message);
+  if (scr_suppressed_len == scr_suppressed_cap) {
+    size_t cap = scr_suppressed_cap ? scr_suppressed_cap * 2 : 4;
+    ScrSuppressedEntry *entries = realloc(scr_suppressed_entries, cap * sizeof *entries);
+    if (!entries) {
+      fputs("scriptc: out of memory\n", stderr);
+      abort();
+    }
+    scr_suppressed_entries = entries;
+    scr_suppressed_cap = cap;
+  }
+  scr_suppressed_entries[scr_suppressed_len++] = (ScrSuppressedEntry){e, error, suppressed};
+  scr_throw_obj(e, &scr_error_retain_v, &scr_error_release_v, scr_error_trace_arg());
 }
 
 bool scr_caught_instanceof(const ScrCaught *c, size_t pre, size_t post) {
@@ -274,11 +459,13 @@ ScrStr *scr_caught_to_string(const ScrCaught *c) {
   case SCR_EXC_REF:
   case SCR_EXC_PRIMITIVE_REF:
     if (c->retain_fn == scr_dyn_retain_v) return scr_dyn_string_constructor(c->payload);
-    /* Object.prototype.toString — exact for thrown records and class
-     * instances without a toString override; thrown arrays/closures/union
-     * boxes print this too where Node would vary (SEMANTICS.md). */
+    /* Object.prototype.toString — exact for thrown class instances
+     * without a toString override; thrown closures and union boxes print
+     * this too where Node would vary. Thrown records and arrays arrive as
+     * checked-dynamic values (above). */
     return scr_str_new("[object Object]", 15);
   case SCR_EXC_NONE:
+  case SCR_EXC_TERMINATE:
   case SCR_EXC_GENRET: /* unreachable: take() never stores NONE/the sentinel */
     break;
   }
@@ -377,18 +564,21 @@ void scr_throw_f64(double v) {
   scr_exc_reset();
   scr_exc_kind = SCR_EXC_F64;
   scr_exc_f64 = v;
+  SCR_EXC_RAISED();
 }
 
 void scr_throw_bool(bool v) {
   scr_exc_reset();
   scr_exc_kind = SCR_EXC_BOOL;
   scr_exc_bool = v;
+  SCR_EXC_RAISED();
 }
 
 void scr_throw_str(ScrStr *v) {
   scr_exc_reset();
   scr_exc_kind = SCR_EXC_STR;
   scr_exc_payload = v; /* ownership moves in */
+  SCR_EXC_RAISED();
 }
 
 void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
@@ -399,6 +589,7 @@ void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
   scr_exc_retain_fn = retain;
   scr_exc_release_fn = release;
   scr_exc_trace_fn = trace;
+  SCR_EXC_RAISED();
 }
 
 void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
@@ -428,10 +619,15 @@ static SCR_TL int scr_exit_code_hint = 0;
 void scr_exit_code_note(int code) { scr_exit_code_hint = code; }
 int scr_exit_code_hint_get(void) { return scr_exit_code_hint; }
 
-int (*scr_uncaught_exception_hook)(bool from_promise) = NULL;
-static bool scr_uncaught_handler_failed = false;
+SCR_TL int (*scr_uncaught_exception_hook)(bool from_promise) = NULL;
+static SCR_TL bool scr_uncaught_handler_failed = false;
 
 bool scr_exc_handle_uncaught(bool from_promise) {
+#ifdef SCR_WORKERS
+  /* Checkpoint, not just test: the unwind that brought control here may
+   * have been a stop request the cell does not show yet. */
+  if (scr_context_checkpoint()) return false;
+#endif
   if (!scr_exc_pending()) return true;
   if (!scr_uncaught_exception_hook || scr_uncaught_handler_failed) return false;
   int result = scr_uncaught_exception_hook(from_promise);
@@ -439,7 +635,51 @@ bool scr_exc_handle_uncaught(bool from_promise) {
   return result > 0;
 }
 
+static bool scr_uncaught_print_dyn_primitive(const ScrDyn *d) {
+  switch (d->kind) {
+  case SCR_DYN_STR:
+    fwrite(d->v.str->data, 1, d->v.str->len, stderr);
+    return true;
+  case SCR_DYN_NUM: {
+    char buf[32];
+    size_t len = scr_f64_to_str(d->v.num, buf);
+    fwrite(buf, 1, len, stderr);
+    return true;
+  }
+  case SCR_DYN_BOOL:
+    fputs(d->v.b ? "true" : "false", stderr);
+    return true;
+  case SCR_DYN_NULL:
+    fputs("null", stderr);
+    return true;
+  case SCR_DYN_UNDEF:
+    fputs("undefined", stderr);
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* An SC diagnostic code ("SC" and four digits) that `text` does not
+ * already name as "[SCnnnn". */
+static bool scr_uncaught_unnamed_sc_code(const ScrStr *code, const ScrStr *text) {
+  if (code == NULL || code->len != 6 || code->data[0] != 'S' || code->data[1] != 'C') return false;
+  for (size_t i = 2; i < 6; i++)
+    if (code->data[i] < '0' || code->data[i] > '9') return false;
+  for (size_t i = 0; i + 7 <= text->len; i++)
+    if (text->data[i] == '[' && memcmp(text->data + i + 1, code->data, 6) == 0) return false;
+  return true;
+}
+
 void scr_exc_print_uncaught(void) {
+#ifdef SCR_WORKERS
+  if (scr_context_checkpoint()) { scr_exc_clear(); return; }
+  if (scr_context_report_error) {
+    scr_exit_code_note(scr_uncaught_handler_failed ? 7 : 1);
+    scr_context_report_error();
+    return;
+  }
+#endif
   scr_exit_code_note(scr_uncaught_handler_failed ? 7 : 1);
   /* Settle any runtime-internal stdout fragment before the stderr line when
    * both share an fd. JavaScript-visible writes already flush themselves. */
@@ -465,21 +705,35 @@ void scr_exc_print_uncaught(void) {
      * line: "name: message" (toString rules for the empty halves). Node
      * appends a stack trace; scriptc has none (documented divergence). */
     if (scr_error_is(scr_exc_payload)) {
+      const ScrError *error = (const ScrError *)scr_exc_payload;
       ScrStr *s = scr_error_to_string((ScrError *)scr_exc_payload);
       fwrite(s->data, 1, s->len, stderr);
+      /* A runtime refusal carries its scriptc diagnostic code on `code`;
+       * name it unless the message already does, as deferred compile-time
+       * refusals' "[SC1090 at file:line]" suffix does. */
+      if (scr_uncaught_unnamed_sc_code(error->code, s))
+        fprintf(stderr, " [%.*s]", (int)error->code->len, error->code->data);
       scr_str_release(s);
       break;
     }
     /* fall through: non-Error hierarchy objects render like other refs */
   case SCR_EXC_REF:
   case SCR_EXC_PRIMITIVE_REF:
+    /* A checked-dynamic value (`throw v` with v: unknown) prints its
+     * primitive the way Node's uncaught report does — a string's own
+     * text, numbers/booleans/null/undefined by their names. */
+    if (scr_exc_release_fn == scr_dyn_release_v && scr_exc_payload != NULL &&
+        scr_uncaught_print_dyn_primitive((const ScrDyn *)scr_exc_payload))
+      break;
     fputs("[object]", stderr);
     break;
   case SCR_EXC_NONE: /* main only calls this when pending */
   case SCR_EXC_GENRET: /* unreachable: the trampoline consumes the sentinel */
+  case SCR_EXC_TERMINATE:
     fputs("(no exception)", stderr);
     break;
   }
   fputc('\n', stderr);
   scr_exc_reset(); /* the payload counts as live until released */
+  scr_exc_cell_changed();
 }

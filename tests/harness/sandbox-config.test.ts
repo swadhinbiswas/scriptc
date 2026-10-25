@@ -47,11 +47,20 @@ test("runner settings retain their documented defaults", () => {
 });
 
 test("the local command deadline follows the configured Sandbox duration", () => {
-  for (const [duration, milliseconds] of [["120m", 7_200_000], ["2h", 7_200_000], ["30 s", 30_000], ["500ms", 500]] as const) {
-    expect(sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration }).sandboxTimeoutMs).toBe(milliseconds);
+  for (const [duration, milliseconds] of [
+    ["120m", 7_200_000],
+    ["2h", 7_200_000],
+    ["30 s", 30_000],
+    ["500ms", 500],
+  ] as const) {
+    expect(sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration }).sandboxTimeoutMs).toBe(
+      milliseconds,
+    );
   }
   for (const duration of ["0m", "-1h", "forever", "1.5m", "999999999h"]) {
-    expect(() => sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration })).toThrow("positive duration");
+    expect(() => sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration })).toThrow(
+      "positive duration",
+    );
   }
 });
 
@@ -76,7 +85,10 @@ test("the managed image bootstraps the ScriptC native toolchain and workspace", 
 });
 
 test("the managed-image bootstrap pins the custom image's Node, pnpm, and LLVM", () => {
-  const bootstrap = readFileSync(new URL("../../scripts/sandbox-bootstrap.sh", import.meta.url), "utf8");
+  const bootstrap = readFileSync(
+    new URL("../../scripts/sandbox-bootstrap.sh", import.meta.url),
+    "utf8",
+  );
   expect(bootstrap).toContain("< .node-version");
   expect(bootstrap).toContain("ARG PNPM_VERSION=");
   expect(bootstrap).toContain("llvm-toolchain-${llvm_distro}-22");
@@ -110,20 +122,36 @@ test("custom images must be fully qualified VCR references", () => {
 test("prepared snapshots select the snapshot CLI source without changing project scope", () => {
   const config = sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: " snap_ABC123 " });
   expect(config).toEqual({
-    prepared: true, reference: "snap_ABC123", description: "prepared snapshot", createArgs: ["--snapshot", "snap_ABC123"],
+    prepared: true,
+    reference: "snap_ABC123",
+    description: "prepared snapshot",
+    createArgs: ["--snapshot", "snap_ABC123"],
   });
   expect(sandboxBootstrapCommand(config.prepared)).toBeUndefined();
 });
 
 test("test sources retain managed and custom image preparation", () => {
-  expect(sandboxTestSourceConfig({})).toMatchObject({ prepared: false, createArgs: ["--image", defaultSandboxImage] });
+  expect(sandboxTestSourceConfig({})).toMatchObject({
+    prepared: false,
+    createArgs: ["--image", defaultSandboxImage],
+  });
   const image = "vcr.vercel.com/team/project/tests:node24";
-  expect(sandboxTestSourceConfig({ SCRIPTC_SANDBOX_IMAGE: image })).toMatchObject({ prepared: true, createArgs: ["--image", image] });
+  expect(sandboxTestSourceConfig({ SCRIPTC_SANDBOX_IMAGE: image })).toMatchObject({
+    prepared: true,
+    createArgs: ["--image", image],
+  });
 });
 
 test("ambiguous or malformed snapshot sources fail before creating workers", () => {
-  expect(() => sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: "snap_ABC123", SCRIPTC_SANDBOX_IMAGE: "image" })).toThrow("Set only one");
-  expect(() => sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: "wrong-id" })).toThrow("snapshot ID");
+  expect(() =>
+    sandboxTestSourceConfig({
+      SCRIPTC_SANDBOX_SNAPSHOT: "snap_ABC123",
+      SCRIPTC_SANDBOX_IMAGE: "image",
+    }),
+  ).toThrow("Set only one");
+  expect(() => sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: "wrong-id" })).toThrow(
+    "snapshot ID",
+  );
 });
 
 test("OIDC authentication wins and supplies its own Sandbox scope", () => {
@@ -307,7 +335,9 @@ test("isolated Effect concurrency stays within the budget and only uses large Sa
         const plan = sandboxEffectWorkerAllocation(workers, sideTasks, vcpus);
         expect(plan.caseWorkers).toBeGreaterThanOrEqual(1);
         const extraCompilers = Math.min(2, plan.caseWorkers) * (plan.effectConcurrency - 1);
-        expect(plan.caseWorkers + plan.sideConcurrency + extraCompilers).toBeLessThanOrEqual(workers);
+        expect(plan.caseWorkers + plan.sideConcurrency + extraCompilers).toBeLessThanOrEqual(
+          workers,
+        );
         expect(plan.sideConcurrency).toBeLessThanOrEqual(sideTasks);
         expect(plan.effectConcurrency === 2).toBe(vcpus === 32 && workers >= 4);
       }

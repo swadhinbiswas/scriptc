@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5318-set-iterate-after-deletes.ts"
+ ],
+ "diags": []
+}

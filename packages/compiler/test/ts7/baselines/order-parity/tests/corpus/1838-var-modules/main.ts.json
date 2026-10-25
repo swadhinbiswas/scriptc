@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1838-var-modules/dep.ts",
+  "<repo>/tests/corpus/1838-var-modules/main.ts"
+ ],
+ "diags": []
+}

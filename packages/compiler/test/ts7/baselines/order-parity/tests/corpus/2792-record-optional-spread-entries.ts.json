@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2792-record-optional-spread-entries.ts"
+ ],
+ "diags": []
+}

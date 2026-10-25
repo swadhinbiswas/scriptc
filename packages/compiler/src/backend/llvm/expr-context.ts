@@ -3,6 +3,7 @@
  * class to a record of closures. Layout stages use explicit callback hosts. */
 import type { IrExpr, IrLibFn, IrType } from "../../ir/ir.js";
 import type { LlEmitter } from "./emitter.js";
+import type { IntegerRange } from "../../ir/integer-ranges.js";
 
 export type LlvmEmitterContext = LlEmitter;
 
@@ -11,9 +12,27 @@ export interface LlValue {
   type: IrType;
   /** An i32 SSA value equal to ToUint32 of this snapshotted number. */
   uint32?: string;
+  /** An exact integer snapshot, excluding negative zero, with no discarded
+   * high bits and the proven range of its original value. */
+  integer?: { name: string; type: "i32" | "i64"; signed: boolean; range: IntegerRange };
+  /** An i64 holding the exact integer that the arithmetic producing this
+   * number computes, when that integer has no proven safe range: its
+   * absolute value is at most `bound`, and the double equals it whenever
+   * its absolute value is below `below` (a zero may be -0). Index consumers
+   * use it in place of a round trip (integer-values.ts `indexInteger`). */
+  wideInteger?: WideInteger;
   slot?: boolean;
   /** A sequence local held in a capture box; release the box itself. */
   boxed?: boolean;
+}
+
+export interface WideInteger {
+  name: string;
+  below: number;
+  bound: number;
+  /** The double is the integer rounded once: the result of one operation on
+   * operands that always equal their doubles. */
+  single?: true;
 }
 
 export type ExprOf<K extends IrExpr["kind"]> = Extract<IrExpr, { kind: K }>;
@@ -24,4 +43,13 @@ export type LibCallPrefix = LibCallPrefixOf<IrLibFn>;
 export interface LlStreamTypedRefAdapter {
   snapshot: string;
   commit: string;
+  /** `@sym` of the ScrDynTypedArrayOps table for live array capsules. */
+  arrayOps?: string;
+  /** `@sym` of the ScrDynTypedRecordOps table for live record capsules. */
+  recordOps?: string;
+  /** `@sym` of the ScrDynTypedClassOps table for class instance capsules. */
+  classOps?: string;
+  /** `@sym` of the ScrDynTypedBagClassOps table for capsules of bag-tracked
+   * class instances whose views inherit from prototype data. */
+  bagClassOps?: string;
 }

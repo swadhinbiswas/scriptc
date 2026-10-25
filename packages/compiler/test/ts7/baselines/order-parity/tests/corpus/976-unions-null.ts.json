@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/976-unions-null.ts"
+ ],
+ "diags": []
+}

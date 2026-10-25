@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/js-primitive-union-addition.js"
+ ],
+ "diags": []
+}

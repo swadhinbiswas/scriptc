@@ -1,0 +1,13 @@
+deferred-class-receiver/main.ts:4:10 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  3 | function label(name: string): string {
+  4 |   return new Shelf(name).describe();
+    |          ^~~~~~~~~~~~~~~
+  5 | }
+
+deferred-class-receiver/shelf.ts:3:20 - error SC1090: 'MapIterator<string>'-typed class fields are not supported yet
+
+  2 |   readonly name: string;
+  3 |   private readonly cursor = new Map<string, number>().keys();
+    |                    ^~~~~~
+  4 |   constructor(name: string) {

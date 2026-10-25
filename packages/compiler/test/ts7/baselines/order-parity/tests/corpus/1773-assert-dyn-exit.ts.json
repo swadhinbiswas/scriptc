@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1773-assert-dyn-exit.ts"
+ ],
+ "diags": []
+}

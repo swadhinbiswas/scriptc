@@ -1,9 +1,19 @@
 import { readFileSync } from "node:fs";
-import { deserializeModule, serializeModule } from "../../../packages/compiler/src/ir/serialize.js";
+import {
+  deserializeModule,
+  deserializeModuleBytes,
+  serializeModule,
+  serializeModuleParts,
+} from "../../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../../packages/compiler/src/ir/validate.js";
 
 try {
-  const mod = deserializeModule(readFileSync(process.argv[2]!, "utf8"));
+  // "bytes" exercises the compiler-scale path: per-function decoding and
+  // compact parts, as the native compiler uses for its own IR.
+  const bytes = process.argv[3] === "bytes";
+  const mod = bytes
+    ? deserializeModuleBytes(readFileSync(process.argv[2]!))
+    : deserializeModule(readFileSync(process.argv[2]!, "utf8"));
   const errors = validateModule(mod);
   if (errors.length > 0) {
     console.log(JSON.stringify(errors));
@@ -15,7 +25,10 @@ try {
       const statement = mod.functions[0]!.body[0];
       if (statement?.kind === "exprStmt" && statement.expr.kind === "numLit") statement.expr.value = NaN;
     }
-    console.log(serializeModule(mod, process.argv[3] === "compact"));
+    if (bytes) {
+      for (const part of serializeModuleParts(mod)) process.stdout.write(part);
+      process.stdout.write("\n");
+    } else console.log(serializeModule(mod, process.argv[3] === "compact"));
   }
 } catch (error) {
   if (error instanceof Error) console.log(error.name + ": " + error.message);

@@ -8,8 +8,12 @@ export async function parallelMap(items, width, task) {
   const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
     while (!failed && next < items.length) {
       const index = next++;
-      try { results[index] = await task(items[index]); }
-      catch (error) { failed = true; throw error; }
+      try {
+        results[index] = await task(items[index]);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
     }
   });
   const settled = await Promise.allSettled(workers);

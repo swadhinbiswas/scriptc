@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5719-int32-fields-dynamic-operators.ts"
+ ],
+ "diags": []
+}

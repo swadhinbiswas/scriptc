@@ -9,15 +9,23 @@ test("Set iterator seeds refuse different declared reference layouts", () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-set-iterator-layout-"));
   try {
     const entry = join(dir, "main.ts");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
       const records = new Map<string, { id: number; label: string }>();
       console.log(new Set<{ id: number }>(records.values()).size);
-    `);
-    const { coverage } = analyze(entry, { dynamic: false });
+    `,
+    );
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
-    expect(coverage.diagnostics).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "SC2020", message: expect.stringContaining("new Set(values)") }),
-    ]));
+    expect(coverage.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "SC2020",
+          message: expect.stringContaining("new Set(values)"),
+        }),
+      ]),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -27,7 +35,9 @@ test("Set iterator seeds cannot hide identity copies behind annotations", async 
   const dir = mkdtempSync(join(tmpdir(), "scriptc-set-iterator-identity-"));
   try {
     const entry = join(dir, "main.ts");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
       interface Key { id: number }
       const wide = { id: 1, label: "original" };
       const source = new Map<string, typeof wide>([["key", wide]]);
@@ -49,12 +59,16 @@ test("Set iterator seeds cannot hide identity copies behind annotations", async 
         console.log("array", error instanceof TypeError, String(error).includes("original layout"));
       }
       console.log("source", source.get("key") === wide, wide.label);
-    `);
+    `,
+    );
     const result = await compile(entry, {
-      dynamic: false, optimization: "dev", sanitize: process.env["SCRIPTC_SAN"] === "1",
-      outDir: dir, outPath: join(dir, process.platform === "win32" ? "test.exe" : "test"),
+      optimization: "dev",
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+      outDir: dir,
+      outPath: join(dir, process.platform === "win32" ? "test.exe" : "test"),
     });
-    if (!result.ok) throw new Error(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
+    if (!result.ok)
+      throw new Error(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
     expect(execFileSync(result.binaryPath, { encoding: "utf8", timeout: 10_000 })).toBe(
       "record true true\nunion true true\ntuple true true\narray true true\nsource true original\n",
     );

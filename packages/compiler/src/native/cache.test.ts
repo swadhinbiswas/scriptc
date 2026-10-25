@@ -1,8 +1,17 @@
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { contentDigest, NativeCache, openNativeCache } from "./cache.js";
+import { contentDigest, fileDigest, NativeCache, openNativeCache } from "./cache.js";
 
 const directories: string[] = [];
 function directory(): string {
@@ -10,9 +19,22 @@ function directory(): string {
   directories.push(path);
   return path;
 }
+function* generate(parts: readonly string[]): Generator<string> {
+  yield* parts;
+}
 afterEach(() => {
   vi.unstubAllEnvs();
   for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+test("a file's digest read in blocks is the digest of its bytes", () => {
+  const path = join(directory(), "module.ll");
+  const bytes = Buffer.alloc(3 * 1024 * 1024 + 17);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = (index * 31) & 0xff;
+  writeFileSync(path, bytes);
+  expect(fileDigest(path)).toBe(contentDigest(bytes));
+  writeFileSync(path, "");
+  expect(fileDigest(path)).toBe(contentDigest(""));
 });
 
 test("cache hits require an intact payload and digest", () => {
@@ -27,6 +49,21 @@ test("cache hits require an intact payload and digest", () => {
   cache.write("object", key, content);
   rmSync(path + ".sha256");
   expect(cache.read("object", key)).toBeNull();
+});
+
+test("text parts publish one digest-checked entry and oversized reads are misses", () => {
+  const cache = new NativeCache(directory());
+  const key = contentDigest("parts identity");
+  const parts = ['{"a":', '"\u00e9é😀"', ",", "", '"b":1}'];
+  // Parts are generated while they are written, and hashed in the same pass.
+  cache.writeParts("frontend", key, generate(parts));
+  const bytes = cache.read("frontend", key);
+  expect(bytes?.toString("utf8")).toBe(parts.join(""));
+  expect(readFileSync(join(cache.root, "frontend", key + ".sha256"), "utf8").trim()).toBe(
+    contentDigest(parts.join("")),
+  );
+  expect(cache.read("frontend", key, bytes!.length)).toEqual(bytes);
+  expect(cache.read("frontend", key, bytes!.length - 1)).toBeNull();
 });
 
 test("a failed cache publication does not fail the build or replace unrelated files", () => {
@@ -51,6 +88,27 @@ test("eviction removes oldest complete entries and leaves unrelated paths alone"
   expect(cache.read("frontend", oldKey)).toBeNull();
   expect(cache.read("object", newKey)?.length).toBe(700);
   expect(readFileSync(unrelated, "utf8")).toBe("keep");
+});
+
+test("eviction also ages helper partition entries", () => {
+  const cache = new NativeCache(directory());
+  const partitions = cache.partitionDirectory("helper identity")!;
+  expect(partitions).toBe(cache.partitionDirectory("helper identity"));
+  expect(statSync(partitions).mode & 0o777).toBe(0o700);
+  const bucket = join(partitions, "ab");
+  mkdirSync(bucket);
+  const oldEntry = join(bucket, `${contentDigest("old")}.o`);
+  const newEntry = join(bucket, `${contentDigest("new")}.bc`);
+  const pending = join(bucket, ".tmp-pending");
+  writeFileSync(oldEntry, "a".repeat(700));
+  writeFileSync(newEntry, "b".repeat(700));
+  writeFileSync(pending, "c".repeat(700));
+  utimesSync(oldEntry, new Date(0), new Date(0));
+  vi.stubEnv("SCRIPTC_CACHE_MAX_MB", String(1000 / (1024 * 1024)));
+  cache.prune();
+  expect(existsSync(oldEntry)).toBe(false);
+  expect(readFileSync(newEntry, "utf8")).toHaveLength(700);
+  expect(readFileSync(pending, "utf8")).toHaveLength(700);
 });
 
 test("private-directory admission and cache disable options fail closed", () => {

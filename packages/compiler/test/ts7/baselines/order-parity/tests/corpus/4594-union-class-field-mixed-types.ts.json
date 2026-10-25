@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4594-union-class-field-mixed-types.ts"
+ ],
+ "diags": []
+}

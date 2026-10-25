@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/nonnull-element-arguments.ts"
+ ],
+ "diags": []
+}

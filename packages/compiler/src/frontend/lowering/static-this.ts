@@ -13,31 +13,43 @@ export function rejectStaticThis(
 ): void {
   const visit = (node: ts.Node): void => {
     if (
-      ts.isFunctionExpression(node) || ts.isFunctionDeclaration(node) ||
-      ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) ||
-      ts.isGetAccessor(node) || ts.isSetAccessor(node) ||
-      ts.isClassDeclaration(node) || ts.isClassExpression(node)
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessor(node) ||
+      ts.isSetAccessor(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
     ) {
       return;
     }
-    if ((node.kind === ts.SyntaxKind.ThisKeyword && !allowThis) || node.kind === ts.SyntaxKind.SuperKeyword) {
+    if (
+      (node.kind === ts.SyntaxKind.ThisKeyword && !allowThis) ||
+      node.kind === ts.SyntaxKind.SuperKeyword
+    ) {
       const keyword = node.kind === ts.SyntaxKind.ThisKeyword ? "this" : "super";
       lowerer.unsupported("SC1090", node, message(keyword));
     }
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
   if (includeRoot) visit(root);
-  else root.forEachChild(visit);
+  else ts.forEachChild(root, visit);
 }
 
 export function hasStaticThis(root: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (node.kind === ts.SyntaxKind.ThisKeyword) found = true;
-    if ((ts.isFunctionLike(node) && !ts.isArrowFunction(node)) || ts.isClassDeclaration(node) || ts.isClassExpression(node)) return;
-    node.forEachChild(visit);
+    if (
+      (ts.isFunctionLike(node) && !ts.isArrowFunction(node)) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    )
+      return;
+    ts.forEachChild(node, visit);
   };
-  root.forEachChild(visit);
+  ts.forEachChild(root, visit);
   return found;
 }
 
@@ -48,8 +60,8 @@ export function hasLexicalPrivateReference(root: ts.Node): boolean {
   const visit = (node: ts.Node): void => {
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return;
     if (ts.isPrivateIdentifier(node)) found = true;
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  root.forEachChild(visit);
+  ts.forEachChild(root, visit);
   return found;
 }

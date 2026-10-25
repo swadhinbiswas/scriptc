@@ -58,6 +58,7 @@ import { basename, dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary } from "@scriptc/compiler";
 
+import { nmDefined } from "./nm-defined.js";
 const enabled = process.env["SCRIPTC_CROSS"] === "1";
 
 const repoRoot = join(import.meta.dirname, "../..");
@@ -190,7 +191,7 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
     }
     return set;
   };
-  const defined = parse(execFileSync("nm", ["-gU", archive], { encoding: "utf8" }));
+  const defined = parse(nmDefined(archive));
   const undef = parse(execFileSync("nm", ["-u", archive], { encoding: "utf8" }));
   return { defined, undef };
 }
@@ -204,12 +205,14 @@ function linkProbe(fixture: string, archive: string, outDir: string, target: Tar
   execFileSync("zig", [
     "cc",
     "-std=c11",
-    "-target", target,
+    "-target",
+    target,
     join(fixtureRoot, fixture, "probe.c"),
     archive,
     "-lm",
     ...(target.includes("windows") ? WIN32_EMBEDDER_LIBS : []),
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
@@ -232,15 +235,18 @@ plumb: 40000254995
  * spelling and the COFF dllimport spelling (`__imp_<name>`, which the
  * shared underscore-strip renders `_imp_<name>`). */
 const BANNED_AMBIENT = ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"];
-const LOOPISH = /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
+const LOOPISH =
+  /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
 
 describe.skipIf(!enabled)("cross-target library conformance", () => {
   test("zig is on PATH", () => {
-    // Fail loudly, not skip: SCRIPTC_CROSS=1 promises a cross verdict.
+    // Fail instead of skipping: SCRIPTC_CROSS=1 promises a cross verdict.
     try {
       execFileSync("zig", ["version"], { encoding: "utf8" });
     } catch {
-      throw new Error("SCRIPTC_CROSS=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.");
+      throw new Error(
+        "SCRIPTC_CROSS=1 needs zig on PATH (zigup) — the lane cross-compiles with `zig cc`.",
+      );
     }
   });
 
@@ -290,19 +296,22 @@ describe.skipIf(!enabled)("cross-target library conformance", () => {
    * daemon (SCRIPTC_LINUX=1), the windows leg the ssh box (SCRIPTC_WIN=1).
    * Each leg builds the scalars archive fresh for its triple (both
    * emissions), links the K2 probe, executes it on the target, and
-   * compares the full scripted round-trip byte-for-byte. */
+   * requires the full scripted round-trip to be identical. */
   describe("K2 execution probes", () => {
     const linuxOn = process.env["SCRIPTC_LINUX"] === "1";
     const winOn = process.env["SCRIPTC_WIN"] === "1";
     const nodeVersion = (): string => readFileSync(join(repoRoot, ".node-version"), "utf8").trim();
 
     test.skipIf(!linuxOn).for(
-      EMISSIONS.flatMap((e) => [
-        [`aarch64-linux-gnu.2.36 ${e}`, "aarch64-linux-gnu.2.36", e],
-        [`x86_64-linux-gnu.2.36 ${e}`, "x86_64-linux-gnu.2.36", e],
-        [`aarch64-linux-musl ${e}`, "aarch64-linux-musl", e],
-        [`x86_64-linux-musl ${e}`, "x86_64-linux-musl", e],
-      ] as const),
+      EMISSIONS.flatMap(
+        (e) =>
+          [
+            [`aarch64-linux-gnu.2.36 ${e}`, "aarch64-linux-gnu.2.36", e],
+            [`x86_64-linux-gnu.2.36 ${e}`, "x86_64-linux-gnu.2.36", e],
+            [`aarch64-linux-musl ${e}`, "aarch64-linux-musl", e],
+            [`x86_64-linux-musl ${e}`, "x86_64-linux-musl", e],
+          ] as const,
+      ),
     )(
       "scalar round-trip in the container (%s)",
       async ([, target, emission]) => {
@@ -317,9 +326,12 @@ describe.skipIf(!enabled)("cross-target library conformance", () => {
         const out = execFileSync(
           "docker",
           [
-            "run", "--rm",
-            "--platform", target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
-            "-v", `${repoRoot}:${repoRoot}`,
+            "run",
+            "--rm",
+            "--platform",
+            target.startsWith("x86_64") ? "linux/amd64" : "linux/arm64",
+            "-v",
+            `${repoRoot}:${repoRoot}`,
             `node:${nodeVersion()}-${distro}`,
             probe,
           ],
@@ -341,12 +353,19 @@ describe.skipIf(!enabled)("cross-target library conformance", () => {
         const { archive, outDir } = await buildLibrary("scalars", emission, "x86_64-windows-gnu");
         const probe = linkProbe("scalars", archive, outDir, "x86_64-windows-gnu");
         const ssh = (cmd: string): string =>
-          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], { encoding: "utf8", timeout: 120_000 });
-        try {
-          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
-          execFileSync("scp", ["-q", probe, `${host}:${dirWin.replaceAll("\\", "/")}/probe-${emission}.exe`], {
+          execFileSync("ssh", ["-o", "ConnectTimeout=15", host, cmd], {
+            encoding: "utf8",
             timeout: 120_000,
           });
+        try {
+          ssh(`cmd /c if not exist ${dirWin} mkdir ${dirWin}`);
+          execFileSync(
+            "scp",
+            ["-q", probe, `${host}:${dirWin.replaceAll("\\", "/")}/probe-${emission}.exe`],
+            {
+              timeout: 120_000,
+            },
+          );
           const out = ssh(`cd /d ${dirWin} && probe-${emission}.exe`);
           // The PROBE's own printf rides the mingw CRT's text-mode stdout,
           // so its lines arrive CRLF — a plain-C embedder host fact, not a

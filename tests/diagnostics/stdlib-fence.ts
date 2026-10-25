@@ -20,25 +20,20 @@ const parsedMs = Date.parse;
 const fmt = new Intl.NumberFormat();
 
 // Constructors.
-const d = new Date(2024, 0); // the local-time year/month field constructor stays fenced
-const mutableDate = new Date(0);
-mutableDate.setUTCFullYear(2024); // mutation is outside the read-only Date slice
-const sameDate = mutableDate === mutableDate; // scalar storage must not fake object identity
+const d = new Date(...([2024, 0] as const)); // spread field arguments stay fenced
 const wr = new WeakRef({});
 const px = new Proxy({ a: 1 }, {});
 const buf = new ArrayBuffer(8);
 const st = new Set(new Set([1, 2])); // string and array seeds lower; Set-valued seeds stay fenced
-// (new Error / TypeError / RangeError / SyntaxError now LOWER — the error
-// battery lives in the corpus; what stays fenced is the rest of the family
-// and the unlowered members of lowered error objects.)
-const agg = new AggregateError([]);
+// (new Error / TypeError / RangeError / SyntaxError / AggregateError now
+// LOWER — the error battery lives in the corpus; what stays fenced is the
+// unlowered members of lowered error objects.)
 const stack = new Error("boom").stack;
 // Unlowered members on lowered containers.
 const sinhMethod = Math.sinh; // fixed-arity Math function values now lower
-// (n-ary Math.min/max LOWER now — the variadic battery lives in the
-// corpus; the mixed spread/positional list is the form that stays fenced.)
-const clamped = Math.min(1, ...[2, 3]);
-const entries = [1, 2].entries();
+// (n-ary Math.min/max, with spreads among the arguments, LOWER now — the
+// variadic battery lives in the corpus.)
+const entries = [1, 2].entries(); // array iterators lower now
 const arrAt = [1, 2].at(0);
 const norm = "abc".normalize();
 const limited = "a,b,c".split(Math.random() ? "," : /,/, 2); // union separators stay fenced; limits lower
@@ -72,23 +67,25 @@ const resolved = Promise.resolve(1);
 // unions needing narrowing.
 const dynIs = Object.is(JSON.parse("1") as unknown, 1);
 function pick(a: string | number, b: number | boolean): boolean {
-  return Object.is(a, b); // partially-overlapping unions: narrow first
+  return Object.is(a, b); // partially-overlapping primitive unions are supported
 }
 const picked = pick(1, 2);
 
-// Date values deliberately have no tagged-union payload yet. Nullable
-// Date positions must fence in the frontend instead of reaching a backend
-// scalar/ref mismatch.
-function optionalDate(value: Date | undefined): number {
-  return value === undefined ? -1 : value.getTime();
+// Related classes may store one object under different union tags. A
+// structural arm beside them leaves no identity-preserving comparison.
+class FenceBase {
+  id = 1;
 }
-optionalDate(undefined);
-function throwDate(): void {
-  throw new Date(0); // the exception cell cannot preserve Date's object kind
+class FenceSub extends FenceBase {
+  extra = 2;
 }
-throwDate();
-function* dateGenerator(): Generator<number, void, unknown> {
-  yield 1;
+type FenceValue = FenceBase | FenceSub | { label: string };
+function relatedStrict(a: FenceValue, b: FenceValue): boolean {
+  return a === b;
 }
-dateGenerator().throw(new Date(0));
+function relatedSameValue(a: FenceValue, b: FenceSub): boolean {
+  return Object.is(a, b);
+}
+relatedStrict(new FenceSub(), { label: "x" });
+relatedSameValue(new FenceSub(), new FenceSub());
 // End of the diagnostic fixture.

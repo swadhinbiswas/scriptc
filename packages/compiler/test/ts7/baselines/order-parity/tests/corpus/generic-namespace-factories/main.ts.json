@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/generic-namespace-factories/pair.ts",
+  "<repo>/tests/corpus/generic-namespace-factories/main.ts"
+ ],
+ "diags": []
+}

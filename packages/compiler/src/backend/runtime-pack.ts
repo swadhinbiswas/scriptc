@@ -1,3 +1,4 @@
+import type { NativeOptimization } from "./optimization.js";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -5,27 +6,37 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { compilerReleaseVersion } from "../library/sidecar.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
-import {
-  nativeArtifactDependenciesStillMatch,
-  type NativeArtifactDependency,
-} from "./native-toolchain.js";
+import { nativeArtifactDependenciesStillMatch } from "./native/artifact-stamps.js";
+import { type NativeArtifactDependency } from "./native/contracts.js";
 import type { NativeTargetSpec } from "./targets.js";
 
 import {
-  RuntimePackError, parseRuntimePackManifest, selectRuntimePackArtifacts, validateRuntimePackIdentity,
-  type RuntimePackArtifact, type RuntimePackManifest, type RuntimeFeatureSet, type RuntimePackMode,
+  RuntimePackError,
+  parseRuntimePackManifest,
+  selectRuntimePackArtifacts,
+  validateRuntimePackIdentity,
+  type RuntimePackArtifact,
+  type RuntimePackManifest,
+  type RuntimeFeatureSet,
+  type RuntimePackMode,
 } from "./runtime-pack-core.js";
 export {
-  RUNTIME_PACK_SCHEMA, RUNTIME_PACK_FORMAT, RuntimePackError, parseRuntimePackManifest,
-  effectiveRuntimeFeatures, evaluateRuntimePredicate,
-  type RuntimePackManifest, type RuntimePredicate, type RuntimeFeatureSet,
+  RUNTIME_PACK_SCHEMA,
+  RUNTIME_PACK_FORMAT,
+  RuntimePackError,
+  parseRuntimePackManifest,
+  effectiveRuntimeFeatures,
+  evaluateRuntimePredicate,
+  type RuntimePackManifest,
+  type RuntimePredicate,
+  type RuntimeFeatureSet,
 } from "./runtime-pack-core.js";
 
 export interface RuntimePackSelection {
   root: string;
   manifestPath: string;
   manifest: RuntimePackManifest;
-  flavor: "release" | "dev";
+  flavor: NativeOptimization;
   features: RuntimeFeatureSet;
   runtimeObjects: string[];
   archives: string[];
@@ -45,7 +56,10 @@ async function verifyArtifact(root: string, artifact: RuntimePackArtifact): Prom
   } catch {
     throw new RuntimePackError(`runtime pack artifact is missing: ${artifact.path}`, "invalid");
   }
-  if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
+  if (
+    bytes.length !== artifact.size ||
+    createHash("sha256").update(bytes).digest("hex") !== artifact.sha256
+  ) {
     throw new RuntimePackError(`runtime pack artifact hash mismatch: ${artifact.path}`, "invalid");
   }
   return path;
@@ -54,63 +68,82 @@ async function verifyArtifact(root: string, artifact: RuntimePackArtifact): Prom
 async function snapshotDependencies(paths: readonly string[]): Promise<NativeArtifactDependency[]> {
   const { lstat, realpath, stat } = await import("node:fs/promises");
   const { resolve } = await import("node:path");
-  return Promise.all([...new Set(paths.map((path) => resolve(path)))].sort().map(async (path) => {
-    const info = await lstat(path);
-    const kind = info.isFile() ? "file" : info.isDirectory() ? "directory" : "symlink";
-    const dependency: NativeArtifactDependency = {
-      path,
-      kind,
-      dev: Number(info.dev), ino: Number(info.ino), size: Number(info.size),
-      mtimeMs: Number(info.mtimeMs), ctimeMs: Number(info.ctimeMs),
-    };
-    if (kind === "symlink") {
-      const targetPath = await realpath(path);
-      const target = await stat(path);
-      const targetKind = target.isFile() ? "file" : target.isDirectory() ? "directory" : null;
-      if (targetKind === null) throw new Error(`unsupported runtime-pack dependency: ${path}`);
-      dependency.targetPath = targetPath;
-      dependency.targetKind = targetKind;
-      dependency.targetDev = Number(target.dev);
-      dependency.targetIno = Number(target.ino);
-      dependency.targetSize = Number(target.size);
-      dependency.targetMtimeMs = Number(target.mtimeMs);
-      dependency.targetCtimeMs = Number(target.ctimeMs);
-    }
-    return dependency;
-  }));
+  return Promise.all(
+    [...new Set(paths.map((path) => resolve(path)))].sort().map(async (path) => {
+      const info = await lstat(path);
+      const kind = info.isFile() ? "file" : info.isDirectory() ? "directory" : "symlink";
+      const dependency: NativeArtifactDependency = {
+        path,
+        kind,
+        dev: Number(info.dev),
+        ino: Number(info.ino),
+        size: Number(info.size),
+        mtimeMs: Number(info.mtimeMs),
+        ctimeMs: Number(info.ctimeMs),
+      };
+      if (kind === "symlink") {
+        const targetPath = await realpath(path);
+        const target = await stat(path);
+        const targetKind = target.isFile() ? "file" : target.isDirectory() ? "directory" : null;
+        if (targetKind === null) throw new Error(`unsupported runtime-pack dependency: ${path}`);
+        dependency.targetPath = targetPath;
+        dependency.targetKind = targetKind;
+        dependency.targetDev = Number(target.dev);
+        dependency.targetIno = Number(target.ino);
+        dependency.targetSize = Number(target.size);
+        dependency.targetMtimeMs = Number(target.mtimeMs);
+        dependency.targetCtimeMs = Number(target.ctimeMs);
+      }
+      return dependency;
+    }),
+  );
 }
 
 export async function stageRuntimePackArtifacts(selection: RuntimePackSelection): Promise<{
   root: string;
   replacements: Map<string, string>;
 }> {
-  if (!(await nativeArtifactDependenciesStillMatch(selection.sourceDependencies).catch(() => false))) {
+  if (
+    !(await nativeArtifactDependenciesStillMatch(selection.sourceDependencies).catch(() => false))
+  ) {
     throw new RuntimePackError("runtime pack changed after artifact selection", "invalid");
   }
   const stageRoot = await mkdtemp(join(tmpdir(), "scriptc-runtime-pack-link-"));
   try {
     const replacements = new Map<string, string>();
-    await Promise.all([
-      ...selection.selectedRuntimeArtifacts,
-      ...selection.selectedArchiveArtifacts,
-    ].map(async (artifact) => {
-      const source = join(selection.root, artifact.path);
-      const destination = join(stageRoot, artifact.path);
-      const bytes = await readFile(source).catch(() => {
-        throw new RuntimePackError(`runtime pack artifact is missing: ${artifact.path}`, "invalid");
-      });
-      if (
-        bytes.length !== artifact.size ||
-        createHash("sha256").update(bytes).digest("hex") !== artifact.sha256
-      ) {
-        throw new RuntimePackError(`runtime pack artifact hash mismatch: ${artifact.path}`, "invalid");
-      }
-      await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, bytes, { flag: "wx", mode: 0o400 });
-      replacements.set(source, destination);
-    }));
-    if (!(await nativeArtifactDependenciesStillMatch(selection.sourceDependencies).catch(() => false))) {
-      throw new RuntimePackError("runtime pack changed while staging verified artifacts", "invalid");
+    await Promise.all(
+      [...selection.selectedRuntimeArtifacts, ...selection.selectedArchiveArtifacts].map(
+        async (artifact) => {
+          const source = join(selection.root, artifact.path);
+          const destination = join(stageRoot, artifact.path);
+          const bytes = await readFile(source).catch(() => {
+            throw new RuntimePackError(
+              `runtime pack artifact is missing: ${artifact.path}`,
+              "invalid",
+            );
+          });
+          if (
+            bytes.length !== artifact.size ||
+            createHash("sha256").update(bytes).digest("hex") !== artifact.sha256
+          ) {
+            throw new RuntimePackError(
+              `runtime pack artifact hash mismatch: ${artifact.path}`,
+              "invalid",
+            );
+          }
+          await mkdir(dirname(destination), { recursive: true });
+          await writeFile(destination, bytes, { flag: "wx", mode: 0o400 });
+          replacements.set(source, destination);
+        },
+      ),
+    );
+    if (
+      !(await nativeArtifactDependenciesStillMatch(selection.sourceDependencies).catch(() => false))
+    ) {
+      throw new RuntimePackError(
+        "runtime pack changed while staging verified artifacts",
+        "invalid",
+      );
     }
     return { root: stageRoot, replacements };
   } catch (error) {
@@ -122,13 +155,14 @@ export async function stageRuntimePackArtifacts(selection: RuntimePackSelection)
 export async function loadRuntimePack(options: {
   target: NativeTargetSpec;
   features: NativeLinkFeatures;
-  optimization: "release" | "dev";
+  optimization: NativeOptimization;
   mode?: RuntimePackMode;
   env?: NodeJS.ProcessEnv;
   resolver?: (specifier: string) => string;
 }): Promise<RuntimePackSelection> {
   const packageName = options.target.runtimePackPackage;
-  const resolvePackageJson = options.resolver ?? ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
+  const resolvePackageJson =
+    options.resolver ?? ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
   let packagePath: string;
   try {
     packagePath = resolvePackageJson(`${packageName}/package.json`);
@@ -157,16 +191,27 @@ export async function loadRuntimePack(options: {
     if (error instanceof RuntimePackError) throw error;
     throw new RuntimePackError(`could not read ${packageName}/runtime-pack.json`, "invalid");
   }
-  validateRuntimePackIdentity(manifest, packageManifest.name, packageManifest.version, options.target, compilerReleaseVersion());
+  validateRuntimePackIdentity(
+    manifest,
+    packageManifest.name,
+    packageManifest.version,
+    options.target,
+    compilerReleaseVersion(),
+  );
   const flavor = options.optimization;
-  const selected = selectRuntimePackArtifacts(manifest, options.features, flavor, options.env, options.mode);
+  const selected = selectRuntimePackArtifacts(
+    manifest,
+    options.features,
+    flavor,
+    options.env,
+    options.mode,
+  );
   const features = selected.features;
   const selectedVariants = selected.runtime;
   const selectedArchives = selected.archives;
-  const selectedArtifactPaths = [
-    ...selectedVariants,
-    ...selectedArchives,
-  ].map((artifact) => join(root, artifact.path));
+  const selectedArtifactPaths = [...selectedVariants, ...selectedArchives].map((artifact) =>
+    join(root, artifact.path),
+  );
   let artifactDependencies: NativeArtifactDependency[];
   try {
     artifactDependencies = await snapshotDependencies(selectedArtifactPaths);
@@ -177,12 +222,17 @@ export async function loadRuntimePack(options: {
     Promise.all(selectedVariants.map((artifact) => verifyArtifact(root, artifact))),
     Promise.all(selectedArchives.map((artifact) => verifyArtifact(root, artifact))),
   ]);
-  await Promise.all(manifest.licenses.map((license) => readFile(join(root, license.path)))).catch(() => {
-    throw new RuntimePackError("runtime pack license payload is incomplete", "invalid");
-  });
+  await Promise.all(manifest.licenses.map((license) => readFile(join(root, license.path)))).catch(
+    () => {
+      throw new RuntimePackError("runtime pack license payload is incomplete", "invalid");
+    },
+  );
   const sourceDependencies = [...identityDependencies, ...artifactDependencies];
   if (!(await nativeArtifactDependenciesStillMatch(sourceDependencies).catch(() => false))) {
-    throw new RuntimePackError("runtime pack changed while verifying selected artifacts", "invalid");
+    throw new RuntimePackError(
+      "runtime pack changed while verifying selected artifacts",
+      "invalid",
+    );
   }
   return {
     root,

@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3068-debug-variables/other.ts",
+  "<repo>/tests/corpus/3068-debug-variables/main.ts"
+ ],
+ "diags": []
+}

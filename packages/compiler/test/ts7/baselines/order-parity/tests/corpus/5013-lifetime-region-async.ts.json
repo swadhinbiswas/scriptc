@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5013-lifetime-region-async.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/113-promise-checked-exits.ts"
+ ],
+ "diags": []
+}

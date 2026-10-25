@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2676-top-level-await-ambiguous/main.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/1461-process-pid-getuid-kill.ts"
+ ],
+ "diags": []
+}

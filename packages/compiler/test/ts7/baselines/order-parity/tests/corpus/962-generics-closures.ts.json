@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/962-generics-closures.ts"
+ ],
+ "diags": []
+}

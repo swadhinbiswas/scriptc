@@ -5,9 +5,8 @@
 // listeners receive the warning object (name/message/code/detail), the
 // default stderr report prints "(node:pid) [CODE] Name: message" with
 // the detail on its own line, wrong kinds throw ERR_INVALID_ARG_TYPE,
-// and off() removes by identity. Emission here is SYNCHRONOUS where
-// Node defers a tick (SEMANTICS.md) — the emits sit last in the turn so
-// the transcripts agree. The default report carries the pid, which can
+// and off() removes by identity. Warnings are emitted on the next tick,
+// before the immediate that exits. The default report carries the pid, which can
 // never byte-match — the @exit directive (line 1: the harness reads the
 // two-line head) keeps stderr out of the comparison (the 1651 precedent).
 'use strict';
@@ -38,7 +37,6 @@ process.emitWarning(e, 'IgnoredType');
 process.on('exit', () => {
   console.log(seen.join(' ; '));
 });
-// Node fires the deferred warnings before the immediate; the compiled
-// runtime already dispatched them synchronously — either way the exit
-// listener sees the full transcript.
+// The deferred warnings fire before the immediate, so the exit listener
+// sees the full transcript.
 setImmediate(() => process.exit(1));

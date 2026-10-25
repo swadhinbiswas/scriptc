@@ -10,24 +10,35 @@ import { platformLinkerSupportsPersistentCache } from "../../compiler/src/backen
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../../..");
 const bootstrap = join(repoRoot, "packages/cli/dist/bootstrap.js");
-const runtimePackHost = process.platform === "darwin" && process.arch === "arm64" &&
+const runtimePackHost =
+  process.platform === "darwin" &&
+  process.arch === "arm64" &&
   Number.parseInt(osRelease().split(".", 1)[0] ?? "", 10) >= 24;
 const helperTarget = precompiledRuntimePackTarget();
-const persistentExecutable = helperTarget === null || platformLinkerSupportsPersistentCache(process.env, helperTarget);
+const persistentExecutable =
+  helperTarget === null || platformLinkerSupportsPersistentCache(process.env, helperTarget);
 
 test("bootstrap serves version and help without loading the compiler graph", async () => {
   const preloadDir = await mkdtemp(join(tmpdir(), "scriptc-bootstrap-preload-"));
   const preload = join(preloadDir, "preload.mjs");
   try {
-    await writeFile(preload, [
-      "import { registerHooks } from 'node:module';",
-      "registerHooks({ load(url, context, nextLoad) {",
-      "  if (url.includes('/packages/compiler/dist/index.js')) throw new Error('compiler graph loaded');",
-      "  return nextLoad(url, context);",
-      "}});",
-      "",
-    ].join("\n"));
-    const version = await execFileAsync(process.execPath, ["--import", preload, bootstrap, "--version"]);
+    await writeFile(
+      preload,
+      [
+        "import { registerHooks } from 'node:module';",
+        "registerHooks({ load(url, context, nextLoad) {",
+        "  if (url.includes('/packages/compiler/dist/index.js')) throw new Error('compiler graph loaded');",
+        "  return nextLoad(url, context);",
+        "}});",
+        "",
+      ].join("\n"),
+    );
+    const version = await execFileAsync(process.execPath, [
+      "--import",
+      preload,
+      bootstrap,
+      "--version",
+    ]);
     expect(version.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
     const help = await execFileAsync(process.execPath, ["--import", preload, bootstrap, "--help"]);
     expect(help.stdout).toContain("scriptc build <file.ts|.js>");
@@ -45,27 +56,29 @@ test("bootstrap exact builds use the routed cache and source edits fall through"
   const preload = join(dir, "reject-full-compiler.mjs");
   const env = { ...process.env, SCRIPTC_CACHE_DIR: cacheRoot, SCRIPTC_TIMING: "1" };
   const build = (rejectFullCompiler = false): Promise<{ stderr: string }> =>
-    execFileAsync(process.execPath, [
-      ...(rejectFullCompiler ? ["--import", preload] : []),
-      bootstrap,
-      "build",
-      entry,
-    ], {
-      env,
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    execFileAsync(
+      process.execPath,
+      [...(rejectFullCompiler ? ["--import", preload] : []), bootstrap, "build", entry],
+      {
+        env,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
   try {
     await mkdir(cacheRoot, { mode: 0o700 });
     await Promise.all([
       writeFile(entry, 'console.log("one");\n'),
-      writeFile(preload, [
-        "import { registerHooks } from 'node:module';",
-        "registerHooks({ load(url, context, nextLoad) {",
-        "  if (url.includes('/packages/compiler/dist/index.js')) throw new Error('compiler graph loaded');",
-        "  return nextLoad(url, context);",
-        "}});",
-        "",
-      ].join("\n")),
+      writeFile(
+        preload,
+        [
+          "import { registerHooks } from 'node:module';",
+          "registerHooks({ load(url, context, nextLoad) {",
+          "  if (url.includes('/packages/compiler/dist/index.js')) throw new Error('compiler graph loaded');",
+          "  return nextLoad(url, context);",
+          "}});",
+          "",
+        ].join("\n"),
+      ),
     ]);
     expect((await build()).stderr).toContain("scriptc lowering");
     expect((await build()).stderr).not.toContain("scriptc lowering");
@@ -93,7 +106,9 @@ test("bootstrap exact builds use the routed cache and source edits fall through"
     } else {
       // This target intentionally lacks a persistent native dependency proof.
       // It must enter the full compiler to relink, even on a frontend hit.
-      await expect(build(true)).rejects.toMatchObject({ stderr: expect.stringContaining("compiler graph loaded") });
+      await expect(build(true)).rejects.toMatchObject({
+        stderr: expect.stringContaining("compiler graph loaded"),
+      });
       expect((await build()).stderr).not.toContain("scriptc lowering");
       expect((await execFileAsync(outPath)).stdout).toBe("one\n");
     }
@@ -122,11 +137,11 @@ test.skipIf(!runtimePackHost)(
       SCRIPTC_TIMING: "1",
     };
     delete env.SCRIPTC_NO_CACHE;
-    const build = () => execFileAsync(
-      process.execPath,
-      [bootstrap, "build", entry, "-o", outPath],
-      { env, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const build = () =>
+      execFileAsync(process.execPath, [bootstrap, "build", entry, "-o", outPath], {
+        env,
+        maxBuffer: 4 * 1024 * 1024,
+      });
     try {
       await writeFile(entry, 'console.log("LLVM cache");\n');
       const first = await build();
@@ -153,28 +168,36 @@ test.skipIf(!runtimePackHost)(
     const preload = join(dir, "count-probes.mjs");
     const env = { ...process.env, SCRIPTC_CACHE_DIR: join(dir, "cache") };
     delete env.SCRIPTC_NO_CACHE;
-    const build = () => execFileAsync(process.execPath, ["--import", preload, bootstrap, "build", entry, "-o", outPath], { env });
+    const build = () =>
+      execFileAsync(
+        process.execPath,
+        ["--import", preload, bootstrap, "build", entry, "-o", outPath],
+        { env },
+      );
     try {
       await Promise.all([
         writeFile(entry, 'console.log("one");\n'),
-        writeFile(preload, [
-          'import childProcess from "node:child_process";',
-          'import { appendFileSync } from "node:fs";',
-          'import { syncBuiltinESMExports } from "node:module";',
-          'import { promisify } from "node:util";',
-          'const original = childProcess.execFile;',
-          `const record = (args) => { if (args?.includes("-print-prog-name=clang")) appendFileSync(${JSON.stringify(probes)}, "probe\\n"); };`,
-          'childProcess.execFile = function (file, args, ...rest) {',
-          '  record(args);',
-          '  return original.call(this, file, args, ...rest);',
-          '};',
-          'childProcess.execFile[promisify.custom] = function (file, args, ...rest) {',
-          '  record(args);',
-          '  return promisify(original).call(this, file, args, ...rest);',
-          '};',
-          'syncBuiltinESMExports();',
-          '',
-        ].join("\n")),
+        writeFile(
+          preload,
+          [
+            'import childProcess from "node:child_process";',
+            'import { appendFileSync } from "node:fs";',
+            'import { syncBuiltinESMExports } from "node:module";',
+            'import { promisify } from "node:util";',
+            "const original = childProcess.execFile;",
+            `const record = (args) => { if (args?.includes("-print-prog-name=clang")) appendFileSync(${JSON.stringify(probes)}, "probe\\n"); };`,
+            "childProcess.execFile = function (file, args, ...rest) {",
+            "  record(args);",
+            "  return original.call(this, file, args, ...rest);",
+            "};",
+            "childProcess.execFile[promisify.custom] = function (file, args, ...rest) {",
+            "  record(args);",
+            "  return promisify(original).call(this, file, args, ...rest);",
+            "};",
+            "syncBuiltinESMExports();",
+            "",
+          ].join("\n"),
+        ),
       ]);
       await build();
       expect(await readFile(probes, "utf8")).toBe("probe\n");
@@ -191,3 +214,39 @@ test.skipIf(!runtimePackHost)(
   },
   120_000,
 );
+
+test("bootstrap replays an unchanged coverage verdict without loading the compiler graph", async () => {
+  const work = await mkdtemp(join(tmpdir(), "scriptc-bootstrap-coverage-"));
+  const preload = join(work, "preload.mjs");
+  const entry = join(work, "main.ts");
+  const env = { ...process.env, SCRIPTC_CACHE_DIR: join(work, "cache") };
+  try {
+    await writeFile(
+      preload,
+      [
+        "import { registerHooks } from 'node:module';",
+        "registerHooks({ load(url, context, nextLoad) {",
+        "  if (url.includes('/packages/compiler/dist/index.js')) throw new Error('compiler graph loaded');",
+        "  return nextLoad(url, context);",
+        "}});",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(entry, "const [[a]] = [[1]] as number[][];\nconsole.log(a);\n");
+    const first = await execFileAsync(process.execPath, [bootstrap, "coverage", entry], { env });
+    expect(first.stdout).toContain("statements analyzed");
+    const replayed = await execFileAsync(
+      process.execPath,
+      ["--import", preload, bootstrap, "coverage", entry],
+      { env },
+    );
+    expect(replayed.stdout).toBe(first.stdout);
+    // A changed source must load the compiler again.
+    await writeFile(entry, "console.log(1);\n");
+    await expect(
+      execFileAsync(process.execPath, ["--import", preload, bootstrap, "coverage", entry], { env }),
+    ).rejects.toThrow("compiler graph loaded");
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
+});

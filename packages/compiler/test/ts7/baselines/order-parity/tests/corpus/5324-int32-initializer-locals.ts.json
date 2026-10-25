@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5324-int32-initializer-locals.ts"
+ ],
+ "diags": []
+}

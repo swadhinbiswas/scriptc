@@ -1,0 +1,25 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/jsdoc-import-require.js"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "'from' expected.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/jsdoc-import-require.js",
+    "start": 14,
+    "end": 15
+   }
+  },
+  {
+   "code": "SC0001",
+   "message": "String literal expected.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/jsdoc-import-require.js",
+    "start": 14,
+    "end": 33
+   }
+  }
+ ]
+}

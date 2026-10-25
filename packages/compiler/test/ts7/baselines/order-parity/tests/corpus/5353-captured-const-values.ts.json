@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5353-captured-const-values.ts"
+ ],
+ "diags": []
+}

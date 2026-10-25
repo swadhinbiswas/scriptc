@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/830-let-uninitialized.ts"
+ ],
+ "diags": []
+}

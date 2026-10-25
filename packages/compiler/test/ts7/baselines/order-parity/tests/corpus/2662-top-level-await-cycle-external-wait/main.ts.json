@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2662-top-level-await-cycle-external-wait/b.ts",
+  "<repo>/tests/corpus/2662-top-level-await-cycle-external-wait/a.ts",
+  "<repo>/tests/corpus/2662-top-level-await-cycle-external-wait/waiter.ts",
+  "<repo>/tests/corpus/2662-top-level-await-cycle-external-wait/main.ts"
+ ],
+ "diags": []
+}

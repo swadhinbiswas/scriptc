@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5830-timers-promises-signal.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5316-map-lru-eviction.ts"
+ ],
+ "diags": []
+}

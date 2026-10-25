@@ -2,251 +2,294 @@
 title: "Limitations"
 ---
 
-scriptc supports a subset of JavaScript, TypeScript, and Node.js APIs. This page describes current compilation limits and runtime behavior that differs from Node.js.
+<include>../limitations/introduction.mdx</include>
 
-Use [`scriptc coverage`](/docs/coverage) to identify unsupported operations in your program. `scriptc build` reports compilation errors with `SC` codes, source locations, and rewrite hints where available. The [Node.js compatibility reference](/compatibility) lists API support separately for static code and code running in the embedded JavaScript engine. Enabling `--dynamic` does not add support for an unsupported statically typed call.
+<span id="static-compilation" />
 
-## Native debugging
+## Language and API restrictions
 
-Executable builds with `--optimization=dev` support source breakpoints and native stack frames for statically compiled TypeScript and JavaScript. LLVM builds include source names and lexical scopes for locals, parameters, captured bindings, and module globals. Release builds and builds with `--strip` omit these source mappings. On macOS, executable builds produce an adjacent `.dSYM` bundle using the Command Line Tools' `dsymutil`.
-
-Debugger values use native representations. Numbers and booleans display directly. Strings expose their `ScrStr` layout, including UTF-8 `data` and byte `len`; tagged unions expose their `tag` and `slot` fields. Other heap values and scalar bindings captured before initialization can appear as opaque pointers.
-
-TypeScript expression evaluation, JavaScript object formatting, and stepping through code in the embedded JavaScript engine are not supported.
-
-## Static compilation
-
-The following sections describe supported forms and their remaining restrictions. They are not an exhaustive list; use the compiler's diagnostics to check a specific program.
+<include>../limitations/language-and-api-restrictions.mdx</include>
 
 ### Language features
 
-- **Error causes:** Accessor constructor options and explicit subclass redeclarations of `cause` are unsupported. `Error`, `TypeError`, `RangeError`, and `SyntaxError` otherwise accept `{ cause }`, including through inherited constructors. Reads, writes, deletion, and `"cause" in error` distinguish an absent cause from an explicitly undefined cause. Constructor causes are non-enumerable; assignment to an absent cause creates an enumerable property. Property descriptors and checked-value aliases share the cause, including getters and setters installed after construction.
-- **Class reflection:** `JSON.stringify` and `Object.keys` require every declared field to have a representation that can pass through runtime-checked storage. They raise an error for classes with opaque fields such as native Maps. Class fields, inherited accessors, and added properties retain identity through untyped values.
-- **Method values:** Borrowing a class method onto an unrelated object is unsupported. Detached methods that use `this`, builtin method values, abstract declarations, unspecialized generic methods, and incompatible override signatures produce runtime errors or compilation diagnostics. Supported class methods can be stored and passed as unbound functions. A field call supplies its containing instance as `this`; `call`, `apply`, and `bind` work when the signature supports runtime-checked conversion. Extracted overrides retain the selected method, and receiver validation accepts the declaring class and its subclasses.
-- **Loose equality:** Object-to-primitive `==` and `!=` comparisons are unsupported because `valueOf` and `toString` can execute user code. Convert the object explicitly before comparing. Comparisons between represented primitives and primitive unions support number, string, boolean, and BigInt coercions, including `x == null` and `x != null`.
-- **Resource disposal:** Top-level and switch-clause `using` declarations, disposal through an engine-held package value, and `DisposableStack` constructors are unsupported. Block- and function-scoped `using` and `await using` support compiled classes with zero-parameter disposal methods and supported FileHandle, timer, immediate, child-process, and readline handles. Array `for (using ... of ...)` loops also compile. Caught `SuppressedError` values expose `name` and `message`, but not `error` or `suppressed` payloads.
-- **Async iteration:** Async `yield*` delegation, stored Web or Node iterator handles, and general structural async-iterator objects are unsupported. Typed async generators support lazy execution, `await`, direct `yield`, queued `.next()`/`.return()`/`.throw()` requests, and `for await`. `for await` also accepts Node `Readable` streams, Web `ReadableStream` values, and compiled class iterators whose zero-parameter `next()` returns a promise of a `{ value, done? }` record. Abrupt completion runs cleanup, including literal `destroyOnReturn` and `preventCancel` options. The `node:timers/promises` `setInterval(delay, value)` iterator compiles without AbortSignal options.
-- **Generics:** Generic functions declared inside other functions, generic class expressions, generic classes whose base depends on their own type parameters, and generic methods requiring dynamic dispatch are unsupported. Other generic calls compile when the target resolves statically. Generic function values require a concrete signature at use and a binding that is never reassigned.
-- **Function values:** Immutable aliases of overloaded program functions retain per-call overload resolution and identity. Typed rest-parameter functions can be stored and called indirectly. Builtin function values have API-specific restrictions; see [Builtin function values](#builtin-function-values).
-- **Argument spreads:** Non-empty fixed tuples can spread into fixed signatures; arrays, Sets, and compiled class iterables can spread into typed rest parameters. Runtime-length spreads into fixed or rest parameters require types that support checked `unknown` conversion. Other JavaScript calls use the checked-value or embedded-engine path; unsupported static forms produce a diagnostic. Calls with no native parameter slot are unsupported for runtime-length spreads. Arguments evaluate once, in source order, before defaults run, including surplus arguments.
-- **Dynamic imports:** Computed specifiers, import attributes, CommonJS namespace synthesis, and imports of shipped JavaScript packages are unsupported in static code or require `--dynamic`. Literal `import()` of compiled ESM/TypeScript modules and supported Node builtins compiles without the engine. Evaluation is lazy and microtask-delayed, top-level `await` is honored, repeated imports share namespace identity, exported mutable bindings stay live, and namespace keys use Node's sorted order.
+<include>../limitations/language-features/error-causes.mdx</include>
+
+<include>../limitations/language-features/class-reflection.mdx</include>
+
+<include>../limitations/language-features/method-values.mdx</include>
+
+<include>../limitations/language-features/loose-equality.mdx</include>
+
+<include>../limitations/language-features/resource-disposal.mdx</include>
+
+<include>../limitations/language-features/async-iteration.mdx</include>
+
+<include>../limitations/language-features/iterable-values.mdx</include>
+
+<include>../limitations/language-features/generics.mdx</include>
+
+<include>../limitations/language-features/function-values.mdx</include>
+
+<include>../limitations/language-features/argument-spreads.mdx</include>
+
+<include>../limitations/language-features/dynamic-imports.mdx</include>
+
+<include>../limitations/language-features/commonjs-require.mdx</include>
+
+<include>../limitations/language-features/jsx.mdx</include>
 
 ### Types and class definitions
 
-- **BigInt:** `BigInt64Array`, `BigUint64Array`, BigInt filesystem stats, other statically typed BigInt collection keys, and native BigInts crossing into the embedded engine are unsupported. Arbitrary-precision BigInts otherwise support literals, operators, conversions, arrays, records, classes, closures, unions, promises, Buffer 64-bit reads/writes, and DataView 64-bit access. Native `unknown` and JavaScript `any` storage preserve BigInts, including checked Map keys and Set elements. JSON serialization throws a `TypeError` unless a replacer converts the value.
-- **Record shapes:** Records use exact native layouts. Passing `{ a, b }` where `{ a }` is expected can produce `SC2002`. Accepted flows into a strict field-subset shape copy the record; see [Record identity and property order](#record-identity-and-property-order).
-- **Unions:** Narrow a union before an operation whose members require incompatible native representations, such as reading `u.length` on `string | string[]`. Some union-to-union widening and unions combining function and data members are unsupported. Same-representation methods on class unions, `map` and `forEach` on array unions, and shared or joinable field reads compile. `console.log(u)` supports printing a whole union.
-- **Null and optional values:** `undefined` and `null` compile as standalone values and union members. Optional record and class fields and optional, default, and rest parameters also compile.
-- **Static field updates:** Numeric static fields support `++` and `--` through the declaring class or an immutable alias. Updates through a subclass name are unsupported because JavaScript creates a separate property on the subclass.
-- **Local class expressions:** Static members, decorators, private brands, generic members, explicitly generic factories returning local constructors, and references through the class's internal name are unsupported. Supported expressions preserve fresh constructor identity and shared captures across constructors, methods, accessors, and arrow fields. Local inheritance requires a compiled base class. Constructors retain identity, `typeof`, `name`, and `length` through `unknown`; cast back to their exact type before construction. Construction and static-member access directly through `unknown` are unsupported.
-- **Constructor-function inheritance:** Module-level JavaScript classes can extend compiled ordinary constructor functions. Constructors that return replacement objects, spread `super` arguments, and reflective static inheritance are unsupported. Supported `super` calls preserve receiver and field initialization order and capture the base prototype at class evaluation.
-- **Symbol fields:** Instance fields require a stable module-level `Symbol()` or `Symbol.for()` binding with a literal description or constant string binding. Reassigned keys, runtime-computed descriptions, distinct symbols with the same description in one class, and copying symbol fields with rest bindings or `Object.assign` are unsupported. JavaScript object spreads copy represented own symbol fields. Equal registry keys share a field across modules. Uninitialized JavaScript fields start as `undefined`; TypeScript fields require an initializer or unconditional constructor assignment. Represented symbol fields and methods, including inherited members, remain accessible through checked values.
+<include>../limitations/types-and-class-definitions/bigint.mdx</include>
 
-`Promise.all([work(1), work(2)])` infers a tuple. Some tuple operations, such as `.join()`, are unsupported. If you need array operations on the result, declare the input as an array:
+<include>../limitations/types-and-class-definitions/interfaces.mdx</include>
 
-```ts
-const jobs: Promise<number>[] = [work(1), work(2), work(3)];
-const results = await Promise.all(jobs); // number[]
-```
+<include>../limitations/types-and-class-definitions/record-shapes.mdx</include>
+
+<include>../limitations/types-and-class-definitions/unions.mdx</include>
+
+<include>../limitations/types-and-class-definitions/null-and-optional-values.mdx</include>
+
+<include>../limitations/types-and-class-definitions/static-field-updates.mdx</include>
+
+<include>../limitations/types-and-class-definitions/local-class-expressions.mdx</include>
+
+<include>../limitations/types-and-class-definitions/constructor-function-inheritance.mdx</include>
+
+<include>../limitations/types-and-class-definitions/symbol-fields.mdx</include>
+
+<include>../limitations/types-and-class-definitions.mdx</include>
 
 ### Builtin APIs
 
-A declaration in the standard library does not guarantee that an API compiles. Unsupported declared APIs produce `SC2020`, with alternatives where available. Check the [Node.js compatibility reference](/compatibility) for API-level support.
+<include>../limitations/builtin-apis.mdx</include>
 
-- **Text encoding:** `TextEncoder` and `TextDecoder` can be stored in fields, arguments, return values, arrays, and closures. Encoding supports UTF-8, including `encodeInto` into a Uint8Array or Buffer view. Codec properties expose the canonical encoding and decoder flags. Decoding accepts recognized WHATWG labels, including runtime labels and omitted or undefined encodings. Literal constructor options support `fatal` and `ignoreBOM`; literal decode options support streaming UTF-8, UTF-16, and single-byte encodings. Other legacy streaming encodings, runtime options objects, inspection, JSON/engine conversion, and module-scope declarations using `var` or lacking an initializer are unsupported. Use initialized `let` or `const` bindings for stored codecs. Byte arrays passed from native code into embedded packages are copied; writes inside the package do not update the original native array.
-- **EventEmitter:** Literal event names use fixed argument tuples. Computed string names require a constant prefix or suffix that excludes `error`, meta events, and stream-internal events; their arguments must match the exact arity and support checked conversion. Unrestricted names, symbols, names that may reach internal events, and typed `listeners()`/`rawListeners()` results for names with possible computed registrations are unsupported.
-- **CommonJS metadata:** The module graph is fixed at build time. Cache deletion or reloading, metadata writes, `module.paths` mutation, and `require.extensions` are unsupported. Read-only access to `module.id`, `filename`, `path`, `paths`, `loaded`, `isPreloading`, `parent`, `children`, `require.main`, and `require.cache` lookup/enumeration compiles.
-- **ESM metadata:** Native `import.meta.url`, `filename`, `dirname`, and `main` support dot access, statically known keys, and destructuring selected fields. Storing or mutating the metadata object, rest bindings, runtime keys, and stored `resolve` callbacks are unsupported. Native `import.meta.resolve()` requires a literal specifier. Embedded file modules provide mutable metadata with escaped file URLs and module-relative resolution. Embedded module instances distinguished by URL query strings or fragments are unsupported.
-- **Date:** Date unions, year/month constructors, setters, statically typed TypeScript identity comparisons, thrown Date values, and locale/string formatters are unsupported. Zero-argument and single number/string constructors, storage and passing, `getTime`, `valueOf`, `toISOString`, calendar getters, `getTimezoneOffset`, and single-string `Date.parse` compile. JavaScript Dates retain identity through checked storage and support Date-copy construction and JSON serialization. See [Dates and timezones](#dates-and-timezones) for parsing restrictions.
-- **URL:** Non-ASCII or percent-escaped hosts are unsupported. Absolute inputs and relative inputs with runtime string or URL bases, including optional bases, compile. `URL.canParse`, `URL.parse`, `toString()`, and `toJSON()` compile; the factories use the same parser as construction, returning `false` or `null` for rejected inputs while preserving conversion errors. `href`, `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, and `hash` support assignment in native and embedded code. Invalid component writes are ignored except for invalid `href` values, which throw; credentials are percent-encoded and ports accept valid leading digits. Native URL assignments require statically known property keys; `+=` accepts primitive operands, while other assignment operators and object operands for `+=` are refused. `origin` is read-only. `searchParams` is a live view whose identity survives query and URL replacement. Opaque paths retain their input bytes without WHATWG C0 encoding.
-- **Filesystem flags:** `fs.openSync` supports inline bitwise OR expressions of `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_EXCL`, `O_NOFOLLOW`, `O_NONBLOCK`, `O_TRUNC`, and `O_APPEND`, with an optional creation mode. Computed numeric flags are unsupported because bit values vary by target. `fstatSync`, `fchmodSync`, `fsyncSync`, and `linkSync` support direct calls. On Windows, numeric opens with `O_NOFOLLOW` and calls to `fchmodSync` throw `ENOSYS`; use a POSIX target if you require these operations.
-- **FileHandle and descriptor I/O:** Static reads and writes accept Buffer and Uint8Array windows, numeric positions, and UTF-8 strings. FileHandle reads also accept options records and allocate a buffer when omitted. Vector I/O, truncation, syncing, and permission changes compile. FileHandle streams, `readLines`, ownership changes, timestamps, and bigint Stats remain unsupported. Dynamic descriptor I/O accepts other ArrayBuffer views and Buffer encodings; read positions outside the safe integer range are refused. File operations complete synchronously before their callbacks or promise continuations. Descriptor permission changes on Windows throw `ENOSYS`.
-- **Crypto:** Hashing, HMAC, PBKDF2, and HKDF support MD5, SHA-1, SHA-224, SHA-256, SHA-384, and SHA-512. Scrypt supports its default parameters, numeric options, aliases, and memory limit. Both KDFs accept strings, Buffers, numeric typed arrays, DataViews, and fixed-length ArrayBuffers. KeyObject inputs, other digests, and cipher or public-key operations remain unsupported. Native derivations finish before their deferred callbacks, so computation blocks the caller.
-- **Exit status:** Numeric `process.exitCode = value` writes in statement position set the implicit exit status, which `process.exit()` uses when called without an argument. Reads, resets, and assignments used as values are unsupported.
-- **Builtin module lookup:** `process.getBuiltinModule()` exposes native subsets of `path`, `path/posix`, `path/win32`, `os`, and main-thread `worker_threads` metadata. Stored module references and functions retain identity. Other modules and exports, including `Worker`, throw `SC2020`. `process.versions` is a shared dictionary containing `node` and `openssl`; other component versions are absent unless defined by the program.
-- **ArrayBuffers and typed arrays:** Fixed-length ArrayBuffers support shared typed-array and DataView storage. Resizing, transferring, Float16 arrays, and BigInt arrays are unsupported. Numeric typed arrays and Buffers preserve their kind and shared storage through `unknown`, including when nested in records and arrays. Numeric typed-array constructors can be stored and used with `new`, including constructors read from an array's `constructor` property. JavaScript numeric-array parameters and returns preserve typed-array storage.
-- **Prototypes:** Named properties and methods on program class prototypes support replacement, inheritance, and deletion. Bare prototype reflection, accessor replacement, and prototype storage on local, generic, mixin, or runtime-provided classes are unsupported.
-- **Intl.Segmenter:** Default Unicode grapheme segmentation, iteration, and `containing()` compile. Locale negotiation, word and sentence segmentation, `resolvedOptions()`, and detached methods are unsupported.
-- **Globals:** Stored `globalThis` references support identity and probes for absent capabilities. Most builtin members require direct global access; access through a stored global object can raise `SC2020`.
-- **Map and Set:** Keys and elements support numbers and strings by value, and records, classes, arrays, symbols, server handles, and unions of these reference types by identity. `unknown` slots use native checked values, comparing supported primitives by value and retaining supported object references. Typed nested collections other than `Map<unknown, unknown>` and `Set<unknown>`, and promises requiring payload adapters, cannot pass into these slots. `Promise<unknown>` retains its native representation. Stored `keys()`, `values()`, and `entries()` iterators compile without an embedded engine, retain element identity, and observe live collection mutations until exhausted. They support `.next()`, `for...of`, array spreads, and mapper-less `Array.from`. Detached collection methods and iterator helper methods such as `.map()` and `.take()` are unsupported.
-- **Compression:** `zlib.deflateSync`, `deflateRawSync`, and `gzipSync` accept default options or an inline `{ level: n }` with an integer literal from `-1` through `9`. Other options and runtime-valued levels are unsupported.
-- **Synchronous iteration:** Checked `for...of` follows live iterator methods, including compiled class methods and abrupt-completion cleanup. Mapper-less checked `Array.from` accepts those iterators and plain array-like objects. Sparse checked arrays and general borrowed iterator factories are unsupported. Direct statically typed class loops also restrict iterator `return` and `throw` methods.
-- **Regular expressions:** Native checked storage preserves identity, `source`, `flags`, flag properties, and stateful `test`. Static `exec`, global `match`, and numeric `lastIndex` access use the native matcher. Runtime constructors accept checked strings and native regex copies; string replacement accepts checked regex values with string templates. Non-numeric `lastIndex`, detached methods, and `exec` through an untyped receiver are unsupported.
-- **Object freezing:** `Object.freeze` and `Object.isFrozen` support plain checked dictionaries and primitives. Freezing is shallow and preserves accessors. Aliased typed records, arrays, proxies, and other native objects cannot be frozen.
+<include>../limitations/builtin-apis/text-encoding.mdx</include>
+
+<include>../limitations/builtin-apis/eventemitter.mdx</include>
+
+<include>../limitations/builtin-apis/asynclocalstorage.mdx</include>
+
+<include>../limitations/builtin-apis/streams-and-readline.mdx</include>
+
+<include>../limitations/builtin-apis/commonjs-metadata.mdx</include>
+
+<include>../limitations/builtin-apis/esm-metadata.mdx</include>
+
+<include>../limitations/builtin-apis/date.mdx</include>
+
+<include>../limitations/builtin-apis/url.mdx</include>
+
+<include>../limitations/builtin-apis/legacy-url-api.mdx</include>
+
+<include>../limitations/builtin-apis/deprecated-modules.mdx</include>
+
+<include>../limitations/builtin-apis/filesystem-flags.mdx</include>
+
+<include>../limitations/builtin-apis/filesystem-url-paths.mdx</include>
+
+<include>../limitations/builtin-apis/copy.mdx</include>
+
+<include>../limitations/builtin-apis/glob.mdx</include>
+
+<include>../limitations/builtin-apis/filehandle-and-descriptor-i-o.mdx</include>
+
+<include>../limitations/builtin-apis/file-streams.mdx</include>
+
+<include>../limitations/builtin-apis/crypto.mdx</include>
+
+<include>../limitations/builtin-apis/assertions.mdx</include>
+
+<include>../limitations/builtin-apis/test-runner.mdx</include>
+
+<include>../limitations/builtin-apis/test-mocks.mdx</include>
+
+<include>../limitations/builtin-apis/exit-status.mdx</include>
+
+<include>../limitations/builtin-apis/process-memory.mdx</include>
+
+<include>../limitations/builtin-apis/v8.mdx</include>
+
+<include>../limitations/builtin-apis/performance-entries.mdx</include>
+
+<include>../limitations/builtin-apis/builtin-module-lookup.mdx</include>
+
+<include>../limitations/builtin-apis/arraybuffers-and-typed-arrays.mdx</include>
+
+<include>../limitations/builtin-apis/blob-and-file.mdx</include>
+
+<include>../limitations/builtin-apis/prototypes.mdx</include>
+
+<include>../limitations/builtin-apis/intl-segmenter.mdx</include>
+
+<include>../limitations/builtin-apis/globals.mdx</include>
+
+<include>../limitations/builtin-apis/map-and-set.mdx</include>
+
+<include>../limitations/builtin-apis/compression.mdx</include>
+
+<include>../limitations/builtin-apis/synchronous-iteration.mdx</include>
+
+<include>../limitations/builtin-apis/iterator-helpers.mdx</include>
+
+<include>../limitations/builtin-apis/regular-expressions.mdx</include>
+
+<include>../limitations/builtin-apis/object-freezing.mdx</include>
 
 ### Builtin function values
 
-Some builtins can be stored and passed as functions:
+<include>../limitations/builtin-function-values.mdx</include>
 
-- Lowered `node:path` functions across the bare, POSIX, and win32 modules, including optional `basename` and variadic `join`/`resolve`.
-- Supported zero-argument `node:os` functions and `querystring.escape`/`unescape`.
-- `util.isDeepStrictEqual`, `styleText`, `stripVTControlCharacters`, and `toUSVString`.
-- `fs.existsSync`, `unlinkSync`, `chmodSync`, `chownSync`, `renameSync`, and `closeSync`, and `fs/promises.unlink`, `chmod`, and `rename`.
+### Native worker threads
 
-Other immutable aliases of table-backed Node builtins support direct calls, but cannot be passed elsewhere. `util.promisify` supports compile-time conversions of `child_process.execFile` and UTF-8 `fs.readFile`.
-
-`util.styleText` supports standard formats and aliases, arrays of formats, nested ANSI resets, and explicit color enabling with `{ validateStream: false }`. Native calls accept standard process streams; custom native streams and mutations to `util.inspect.colors` remain unsupported. Embedded calls use the stream and terminal metadata supplied by the embedded runtime.
-
-`util.isDeepStrictEqual` supports primitives, ordinary records and arrays, cycles, enumerable string and symbol properties, and byte views in static code. Its optional third argument skips prototype and constructor comparisons. Structural comparisons of native Maps, Sets, class instances, Errors, proxies, accessor properties, and function-valued own `constructor` properties remain refused. Comparisons running inside the embedded JavaScript engine support a wider range of object and collection types.
-
-Synchronous and promise filesystem APIs with trailing arguments that affect behavior remain call-only. This includes writers, open, directory creation/removal, metadata readers, and directory readers. Passing them as values could discard modes, flags, encodings, or options during function-signature adaptation.
-
-Native error-first filesystem callbacks can be stored and passed to platform adapters. Reads support Buffer and UTF-8 results; writes preserve string flags and modes; copy supports regular files and recursive directories. Reads and writes reject already-aborted signals, but native file operations complete synchronously before the deferred callback, so cancellation cannot interrupt I/O in progress. Symbolic-link copy, copy filters and clone modes, recursive glob patterns, glob exclusions, recursive directory reads, and Dirent results report a native limitation.
+<include>../limitations/native-worker-threads.mdx</include>
 
 ### Child-process workers
 
-`child_process.fork()` requires a worker path resolved at build time from `new URL("./worker.ts", import.meta.url)` or `fileURLToPath(new URL("./worker.ts", import.meta.url))`. Never-reassigned `const` aliases and statically resolvable template parts are accepted. The worker and its imports are embedded in the executable, which re-executes itself to start that module. Worker arguments begin at `process.argv[2]`.
-
-Supported options are default inherited stdio or an inline object with `cwd`, `env`, `silent`, `windowsHide`, or `[stdin, stdout, stderr, "ipc"]`. `execArgv` is accepted but has no native effect. Runtime worker paths, custom `execPath`, advanced serialization, transferred sockets or servers, uid/gid, timeout/signal options, and other stdio arrays are unsupported.
-
-Parent and child channels support `send(message, callback?)`, `connected`, `disconnect()`, and `on`/`once` for `message` and `disconnect`. Message listeners may return `void` or `Promise<void>`. Messages use newline-delimited JSON, so their static types must be JSON-stringifiable or `unknown` backed by a checked JSON tree. `send()` returns the channel's backpressure state and invokes its callback later with `null` or an `Error`. `disconnect()` changes `connected` synchronously, before the later disconnect events.
+<include>../limitations/child-process-workers.mdx</include>
 
 ### Untyped values
 
-Most uses of `any` require `--dynamic`; otherwise they produce `SC2011`. Use `unknown` with a checked cast for native storage. Native Map and Set type arguments may use `any`, with the same checked storage as `unknown`, without an engine.
-
-Locals, parameters, and returns can carry untyped values; record and tuple fields can hold `unknown`. JavaScript instance fields can also hold native checked values. Bare fields start as `undefined`, and redeclaring a field with the same checked-value type resets it in initialization order. Explicit TypeScript `any`/`unknown` class fields, static checked-value fields, statically typed array elements, and union members are unsupported in static builds.
-
-Program class instances retain identity through `unknown` and casts back to their exact class or a base class, including classes with internal collections. Inspecting dynamic properties throws a catchable `TypeError` if the class's fields cannot pass through checked storage. Supported native handles also retain identity. JavaScript argument and return conversions preserve native array references; other JSON-shaped record and array conversions can copy values.
-
-Supported operations on `unknown` include truthiness, `typeof` narrowing, property access, `+`, `switch`, and `throw`. Cast before using other operations.
+<include>../limitations/untyped-values.mdx</include>
 
 ### Type checking
 
-scriptc checks programs against the `es2025` standard library and its own ambient declarations. Some declarations differ from TypeScript's standard library or `@types/node`: `JSON.parse` returns `unknown`, and a Promise executor's reject reason is typed as `Error`.
+<include>../limitations/type-checking.mdx</include>
 
-A program that passes its project's TypeScript check may still use unsupported operations. A second preflight using the project's declarations distinguishes those sites from ordinary type errors and reports scriptc diagnostics with rewrite hints. Declared APIs without a compiler implementation, such as unsupported console members, produce `SC2020`.
+### Contract types
+
+<include>../limitations/contract-types.mdx</include>
 
 ### three.js
 
-With `--npm-static=three`, native and WASI builds support published package imports and tested CPU workflows for math, bounds, procedural geometry, curves, shapes, extrusion, text geometry, scene graphs, cameras, lights, materials, textures, and render-target data. Mesh workflows include instancing, batching, morph targets, skeletal deformation, LOD, and sprites. Raycasting includes mesh intersections, sorted results, recursive traversal, layers, distance limits, camera rays, lines, and points.
-
-Animation coverage includes tracks, clips, property binding, mixer playback, blending, and fading. In-memory loading covers scene, material, geometry, and animation JSON, OBJ, STL, PLY, and self-contained glTF/GLB scenes with buffers, PBR material data, and animation. This establishes the exercised workflows, not every loader extension or overload.
-
-Tested CPU graph construction from `three/webgpu` and `three/tsl` includes scalar/vector nodes, mutable uniforms, `Fn` layouts and calls, and `MeshBasicNodeMaterial` data.
-
-WebGL/WebGPU rendering, DOM controls, image and video resources, audio, and worker-based decoders require external host bindings. A browser or native application can render geometry and material state produced by a compiled library and receive its resource lifecycle notifications. Compressed model and texture decoding belongs to that host; shader execution and rendered output are outside the CPU coverage described here.
+<include>../limitations/three-js.mdx</include>
 
 ## Runtime differences from Node.js
 
-Compiled code has runtime behavior that can differ from Node.js. Account for the following differences when porting a program.
+<include>../limitations/runtime-differences-from-node-js.mdx</include>
 
 ### Array bounds and runtime errors
 
-Statically typed numeric reads from typed arrays abort the process for invalid indexes. Node.js returns `undefined` for these reads. Invalid numeric indexed writes are ignored, while the assignment expression retains its original value.
-
-Ordinary arrays track holes separately from present `undefined` values. Missing reads and empty `pop()`/`shift()` return `undefined`, indexed writes can grow the array, and length growth creates holes.
-
-Runtime traps cannot be caught. User-thrown values and supported exceptions, including JSON parse, checked-cast, filesystem, and regex errors, can be caught; hard traps such as invalid typed-array reads terminate the process.
+<include>../limitations/array-bounds-and-runtime-errors.mdx</include>
 
 ### Runtime type checks
 
-Casts from dynamic data validate the value. For example, `JSON.parse(s) as Config` throws a catchable error if the data does not match `Config`, identifying the offending path, such as `expected number at $.port, got string`. A TypeScript assertion alone does not perform this validation when run under Node.js.
-
-A Promise converted from `unknown` to a typed result validates its fulfilled value. A mismatch rejects with a `TypeError`. Rejection reasons and reference equality are preserved across conversions.
+<include>../limitations/runtime-type-checks.mdx</include>
 
 ### Record identity and property order
 
-A record converted to a strict field-subset shape is copied. Mutations through the narrower reference do not affect the original. Empty record layouts are also snapshots because they have no property storage.
-
-Typed records with declared fields, indexed records, and arrays retain identity and mutations through native checked storage. Class instances retain identity at their exact type or a base class. Dense array literals created directly in checked storage preserve identity, and supported native handles pass by reference.
-
-`Object.keys`, `Object.values`, `Object.entries`, and `JSON.stringify` use a record's declaration order rather than per-object insertion order. Their order matches Node.js when objects are built in declaration order.
+<include>../limitations/record-identity-and-property-order.mdx</include>
 
 ### Buffer construction
 
-`Buffer.from` accepts untyped strings, byte arrays, arrays, and plain array-like or Buffer JSON objects. Encoding arguments must be supported literals. Custom input `valueOf` hooks and opaque class or native-handle inputs throw an unsupported-operation error.
+<include>../limitations/buffer-construction.mdx</include>
+
+### readable-stream
+
+<include>../limitations/readable-stream.mdx</include>
+
+### HTTP headers
+
+<include>../limitations/http-headers.mdx</include>
 
 ### JSON callbacks
 
-Function replacers and two-argument revivers support nested replacements, object-property deletion, and thrown exceptions. Omitting the root through a replacer returns `undefined`. Stored `JSON.stringify` functions accept numeric and string indentation; direct calls require literal indentation.
-
-Replacer property lists and reviver source contexts are unsupported. A reviver that deletes an array element throws because checked-dynamic arrays cannot represent holes.
-
-Callback values use checked storage. Typed records and arrays retain identity and mutations; record fields use declaration order; typed-array views retain backing storage and brands. `Buffer.isBuffer` preserves the Buffer brand through `unknown`. JavaScript callbacks receive the holder as `this`; TypeScript callbacks that access dynamic `this` are unsupported.
+<include>../limitations/json-callbacks.mdx</include>
 
 ### Strings and sorting
 
-Strings are stored as UTF-8. Length and string methods use UTF-16 semantics, but relational comparisons such as `<` and `>` use code-point order. Operations that split a surrogate pair produce U+FFFD. `localeCompare` compares code units without ICU collation.
+<include>../limitations/strings-and-sorting.mdx</include>
 
-`sort` and `toSorted` use stable bottom-up merge sort, while V8 uses TimSort. Consistent comparators produce the same sorted results, but comparator call order and count can differ. Ordered inputs use a linear number of comparator calls; merge-buffer movement remains O(n log n).
+### Published graphs
+
+<include>../limitations/published-graphs.mdx</include>
 
 ### Dates and timezones
 
-String constructors and `Date.parse` accept ECMAScript date-only forms, date-times with an explicit `Z` or numeric offset, and GMT certificate-validity strings from the supported X509 APIs. Other V8-specific forms and offset-less local date-times produce an Invalid Date or `NaN`.
-
-Local calendar getters use the operating system's timezone database. Historical results can differ from Node.js when timezone data differs. For valid extreme years outside a platform calendar API's range, scriptc uses a calendar-equivalent year in the 400-year Gregorian cycle to obtain the timezone rule.
+<include>../limitations/dates-and-timezones.mdx</include>
 
 ### Weak collections and memory
 
-`WeakMap` and `WeakSet` accept checked native objects and arrays, functions, numeric typed arrays, ArrayBuffers, native weak collections, and typed records, arrays, tuples, and classes that preserve identity through checked storage. Copied values, other native handles, and symbol keys are unsupported. Constructor seeds support arrays; custom iterators and detached methods are unsupported. Weak collections do not retain their keys, but values that refer back to a key can keep it alive until deletion or collection release.
-
-Memory uses reference counting. Acyclic values are freed deterministically, and cycles are collected at defined collection points. Native checked objects, arrays, Sets, and captured closures participate in cycle collection. Cycles through opaque native capsules or across the static/engine boundary can remain allocated.
+<include>../limitations/weak-collections-and-memory.mdx</include>
 
 ### Foreign-thread callbacks
 
-FFI format 5 accepts retained, context-bearing `void` callbacks invoked by library-owned threads. The native callback copies arguments and queues work; the script closure runs on the event loop at least one turn later. These callbacks are not suitable for real-time execution.
+<include>../limitations/foreign-thread-callbacks.mdx</include>
 
-Value-returning callbacks and direct script execution on foreign threads are unsupported. Reference counting and exception state belong to the script thread, and waiting for the event loop can deadlock.
+### TLS ciphers
+
+<include>../limitations/tls-ciphers.mdx</include>
+
+### TLS certificates
+
+<include>../limitations/tls-certificates.mdx</include>
+
+### TLS sessions
+
+<include>../limitations/tls-sessions.mdx</include>
 
 ### Console and process streams
 
-`console.log`, `info`, and `debug` write to stdout; `error` and `warn` write to stderr. They accept `unknown`, printing strings verbatim and other values through native `util.inspect`. Direct calls support global `console` and `node:console` imports. Stored global console values and detached output methods retain identity and accept ordinary arguments. Stored methods do not support format specifiers with substitution arguments. Other stored console APIs, custom `Console` instances, and console mutation are unsupported.
+<include>../limitations/console-and-process-streams.mdx</include>
 
-JavaScript can store `process.stdin`, `stdout`, and `stderr`, replace output `write` methods, and call saved methods with their stream receiver. Input supports data/end/error listeners, pause/resume, buffered reads, and TTY raw mode. Output writes are synchronous, with successful callbacks on the next-tick queue; queued backpressure is not modeled. Stored streams do not support piping, encoding changes, arbitrary properties, or other events. TypeScript output parameters support `write(string)`.
+### graceful-fs
+
+<include>../limitations/graceful-fs.mdx</include>
+
+### DNS lookup errors
+
+<include>../limitations/dns-lookup-errors.mdx</include>
+
+### Socket data encoding
+
+<include>../limitations/socket-data-encoding.mdx</include>
+
+### UDP socket options
+
+<include>../limitations/udp-socket-options.mdx</include>
+
+### Unix domain sockets and request options
+
+<include>../limitations/unix-domain-sockets.mdx</include>
 
 ### Process arguments and errors
 
-`process.argv[0]` is `"scriptc"`, `process.argv[1]` is the binary's path, and program arguments begin at index 2.
+<include>../limitations/process-arguments-and-errors.mdx</include>
 
-Uncaught exceptions print `Uncaught <value>` to stderr instead of Node.js's stack-trace block. Exit codes and output written before the exception are preserved. Runtime errors expose `message` and Node's `code`, but not `errno`, `syscall`, or `path`.
+### Module path globals
 
-## Embedded JavaScript engine
+<include>../limitations/module-path-globals.mdx</include>
 
-`--dynamic` uses [quickjs-ng](https://github.com/quickjs-ng/quickjs) to run embedded dependency code. Node builtin modules are provided by shims with their own supported APIs; the [coverage report](/docs/coverage) lists the builtins used by the embedded dependency graph.
+<span id="embedded-javascript-engine" />
 
-In a TypeScript `--dynamic` build, `const host: any = globalThis` or `(globalThis as any).TextDecoder` accesses the engine's global object. Its Node globals use those shims even without an embedded npm package. For example, the engine's `TextDecoder` supports UTF-8 labels only. Optional capabilities such as `fetch` are installed only when the build links their bridge.
+## Runtime code evaluation
 
-Embedded Web Streams support default readable and writable streams, their reader, writer, and controller APIs, count and byte-length queuing strategies, transform streams, and UTF-8 encoder/decoder streams. Writable sinks serialize queued writes and wait for asynchronous start/close/abort callbacks. Transforms honor readable-side backpressure and asynchronous start/transform/flush/cancel callbacks. Default-stream `pipeTo()` and `pipeThrough()` honor `preventClose`, `preventAbort`, `preventCancel`, and AbortSignal, propagate cleanup errors, and release their locks when piping settles. Default-stream `tee()` shares chunks between two branches and cancels the source only when both branches cancel. Byte streams, BYOB readers, and stream transfer remain unsupported. These embedded APIs do not broaden the separate static Web Streams surface.
-
-Static tasks drain before engine jobs run at event-loop quiescence. A static `await` racing a package promise can therefore resolve in a different order from Node.js.
-
-Top-level `await` is unsupported in embedded ESM packages. It is supported in the program's own ESM graph and packages compiled through `--npm-static`.
-
-TypeScript runtime sources in embedded packages are emitted in isolation using the package's module format. Package compiler configuration is not applied, and type-only dependencies must use explicit `import type`, `export type`, or inline `type` specifiers. Declaration files and TSX runtime entries are rejected during the build.
-
-`--npm-static` and `--provenance-sources` are experimental. See [npm Dependencies](/docs/dependencies) for their current restrictions.
+<include>../limitations/runtime-code-evaluation.mdx</include>
 
 ## Process events
 
-Static signal listeners resolve names on the target platform, including `SIGWINCH` on POSIX. `on`, `once`, `off`, and `removeListener` accept computed signal names and deliver the signal name and number. Computed names for other event families and chained registrations are unsupported. Windows registration is limited to CRT signals; WASI has no OS signals.
-
-Literal `uncaughtException` and `uncaughtExceptionMonitor` registrations compile without the JavaScript engine. Handled exceptions resume queued native work; monitors alone do not suppress failure. Error objects and primitive exceptions can reach listeners, while arbitrary native objects remain subject to exception-value restrictions. Exception capture callbacks and embedded-engine exception handling are unsupported.
+<include>../limitations/process-events.mdx</include>
 
 ## Native addons
 
-Node-API (N-API) and V8 `.node` addons require Node's addon runtime, which scriptc does not embed. Direct `createRequire` calls to local addons are rejected at compile time. Embedded npm packages receive a catchable `ERR_DLOPEN_FAILED` when loading an addon, allowing packages with JavaScript fallbacks to use them.
+<include>../limitations/native-addons.mdx</include>
 
-Use [Native FFI](/docs/ffi#replacing-a-node-api-addon) to call a plain C ABI function linked from an object or static archive. The guide includes a replacement for a small Node-API helper.
+## WebAssembly modules
+
+<include>../limitations/webassembly-modules.mdx</include>
 
 ## WASI target
 
-The `wasm32-wasi` executable target supports async/await, promises, generators, timers, portable event-loop work, stdin/readline, filesystem callbacks and promises, and the embedded JavaScript engine.
-
-WASI Preview 1 does not provide sockets, process spawning, OS signals, network interfaces, or filesystem notifications. Networking/fetch, child processes, signal APIs, `os.networkInterfaces()`, and `fs.watch` are rejected before linking with `SC3002`. `--sanitize` and native FFI are unavailable.
-
-Library mode emits an async-free Wasm reactor with named host imports. Native runtime localization and thread instances are unsupported. Each Wasm instance owns independent state. Filesystem access is limited to directories opened by the host; `scriptc run` exposes the current working directory and `/tmp`. See [Platform Support](/docs/platforms) for build and run details.
+<include>../limitations/wasi-target.mdx</include>
 
 ## Tooling and native FFI
 
-`scriptc run` does not forward extra CLI arguments to the program. Build an executable and invoke it directly to pass arguments.
-
-Native FFI links manifest-declared C ABI functions. Formats 2–5 support call-scoped callbacks, copied string/byte callback parameters, explicitly released retained callbacks, and asynchronous foreign-thread delivery. Format 6 adds single-precision floats, signed 8-bit and signed/unsigned 16-bit integers, and borrowed writable byte spans. Variadic calls, structs by value, owned pointer/string/byte returns, runtime dynamic-library loading, and library-mode builds are unsupported. See [Native FFI](/docs/ffi).
-
-Numbers use JavaScript's double-precision representation. Integer inference and ownership analysis are not implemented.
+<include>../limitations/tooling-and-native-ffi.mdx</include>
 
 ## Browser embedding
 
-Wasm reactors require a host-provided WASI Preview 1 adapter. A reactor can run supported three.js CPU operations and send animated geometry, material state, and resource lifecycle notifications to an external web application through declared imports. The application supplies DOM, graphics, media, audio, and decoder bindings, including the renderer.
+<include>../limitations/browser-embedding.mdx</include>
 
-Library mode excludes promises, async functions, timers, and the embedded JavaScript engine. See [WebAssembly Modules](/docs/wasm) for the embedding contract.
+## Native debugging
+
+<include>../limitations/native-debugging.mdx</include>

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/fixtures/npm/cases/island-json-stringify/main.ts"
+ ],
+ "diags": []
+}

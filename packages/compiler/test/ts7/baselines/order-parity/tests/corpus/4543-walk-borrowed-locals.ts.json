@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/4543-walk-borrowed-locals.ts"
+ ],
+ "diags": []
+}

@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2784-array-reduce-missing-result.ts"
+ ],
+ "diags": []
+}

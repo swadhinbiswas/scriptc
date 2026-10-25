@@ -1,4 +1,3 @@
-// @dynamic
 // An evolving-`any` array of pushed closures flowing into a monomorphized
 // .map: the binding lowered array<jsval> at its `any[]` declaration, while
 // tsc's evolving-array analysis types the receiver by the pushed element

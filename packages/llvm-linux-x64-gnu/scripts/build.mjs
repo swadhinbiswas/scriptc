@@ -7,10 +7,35 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const repo = fileURLToPath(new URL("../../..", import.meta.url));
-if (process.platform !== "linux" || process.arch !== "x64") { process.stdout.write("@scriptc/llvm-linux-x64-gnu: skipped on this host\n"); process.exit(0); }
+if (process.platform !== "linux" || process.arch !== "x64") {
+  process.stdout.write("@scriptc/llvm-linux-x64-gnu: skipped on this host\n");
+  process.exit(0);
+}
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const build = join(repo, "node_modules/.cache/scriptc-llvm-linux-x64-gnu");
-execFileSync("cmake", ["-S", join(repo, "native/llvm-codegen"), "-B", build, "-G", "Ninja", `-DLLVM_DIR=${process.env.LLVM_DIR ?? "/usr/lib/llvm-22/lib/cmake/llvm"}`, `-DSCRIPTC_PACKAGE_VERSION=${manifest.version}`, "-DSCRIPTC_DEFAULT_TARGET=x86_64-unknown-linux-gnu", "-DSCRIPTC_DEFAULT_DATA_LAYOUT=e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128", ...nativeTargetCmakeArgs, "-DSCRIPTC_STATIC_LINUX_BUILD=ON", "-DCMAKE_EXE_LINKER_FLAGS=-static", "-DCMAKE_BUILD_TYPE=Release"], { stdio: "inherit" });
+execFileSync(
+  "cmake",
+  [
+    "-S",
+    join(repo, "native/llvm-codegen"),
+    "-B",
+    build,
+    "-G",
+    "Ninja",
+    `-DLLVM_DIR=${process.env.LLVM_DIR ?? "/usr/lib/llvm-22/lib/cmake/llvm"}`,
+    `-DSCRIPTC_PACKAGE_VERSION=${manifest.version}`,
+    "-DSCRIPTC_DEFAULT_TARGET=x86_64-unknown-linux-gnu",
+    "-DSCRIPTC_DEFAULT_DATA_LAYOUT=e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+    ...nativeTargetCmakeArgs,
+    "-DSCRIPTC_STATIC_LINUX_BUILD=ON",
+    "-DCMAKE_EXE_LINKER_FLAGS=-static",
+    "-DCMAKE_BUILD_TYPE=Release",
+  ],
+  { stdio: "inherit" },
+);
 execFileSync("cmake", ["--build", build, "--target", "scriptc-llvm-codegen"], { stdio: "inherit" });
 mkdirSync(join(root, "bin"), { recursive: true });
-const output = join(root, "bin", "scriptc-llvm-codegen"); copyFileSync(join(build, "scriptc-llvm-codegen"), output); execFileSync("strip", [output], { stdio: "inherit" }); chmodSync(output, 0o755);
+const output = join(root, "bin", "scriptc-llvm-codegen");
+copyFileSync(join(build, "scriptc-llvm-codegen"), output);
+execFileSync("strip", [output], { stdio: "inherit" });
+chmodSync(output, 0o755);

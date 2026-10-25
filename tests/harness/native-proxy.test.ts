@@ -12,7 +12,9 @@ for (const backend of ["llvm"] as const) {
   test(`native Proxy boundaries unwind catchably (${backend})`, async () => {
     const outDir = mkdtempSync(join(tmpdir(), "scriptc-proxy-boundaries-"));
     const entry = join(outDir, "main.mjs");
-    writeFileSync(entry, `
+    writeFileSync(
+      entry,
+      `
 const proxy = new Proxy({}, {});
 function stringify(value) { return String(value); }
 function add(left, right) { return left + right; }
@@ -28,26 +30,32 @@ const falsish = new Proxy({}, { set() { return false; }, deleteProperty() { retu
 try { falsish.value = 1; } catch (error) { console.log(error.message); }
 try { delete falsish.value; } catch (error) { console.log(error.message); }
 console.log("after");
-`);
+`,
+    );
     const result = await compile(entry, {
-      backend, dynamic: false, sanitize: process.env["SCRIPTC_SAN"] === "1",
-      outDir, outPath: join(outDir, "program"),
+      backend,
+      sanitize: process.env["SCRIPTC_SAN"] === "1",
+      outDir,
+      outPath: join(outDir, "program"),
     });
     expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
     if (!result.ok) return;
     const { stdout, stderr } = await execFileAsync(result.binaryPath, [], { encoding: "utf8" });
-    expect(stdout).toBe([
-      "string conversion on a native Proxy is not supported yet",
-      "string conversion on a native Proxy is not supported yet",
-      "string conversion on a native Proxy is not supported yet",
-      "assignment without a set trap on a native Proxy is not supported yet",
-      "Object.assign on a native Proxy is not supported yet",
-      "JSON.stringify on a native Proxy is not supported yet",
-      "DataCloneError",
-      "falsish set traps on a native Proxy is not supported yet",
-      "falsish deleteProperty traps on a native Proxy is not supported yet",
-      "after", "",
-    ].join("\n"));
+    expect(stdout).toBe(
+      [
+        "string conversion on a native Proxy is not supported yet",
+        "string conversion on a native Proxy is not supported yet",
+        "string conversion on a native Proxy is not supported yet",
+        "assignment without a set trap on a native Proxy is not supported yet",
+        "Object.assign on a native Proxy is not supported yet",
+        "JSON.stringify on a native Proxy is not supported yet",
+        "DataCloneError",
+        "falsish set traps on a native Proxy is not supported yet",
+        "falsish deleteProperty traps on a native Proxy is not supported yet",
+        "after",
+        "",
+      ].join("\n"),
+    );
     expect(stderr).toBe("");
   });
 }

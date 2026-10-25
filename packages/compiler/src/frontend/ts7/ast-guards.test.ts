@@ -12,24 +12,39 @@ type Predicate = (value: unknown, kinds?: number) => boolean;
 const upstream = require(join(sdkRoot, "dist/ast/is.js")) as Record<string, Predicate>;
 const owned = guards as unknown as Record<string, Predicate>;
 const signatures = ["is.generated.d.ts", "is.d.ts"].flatMap((file) =>
-  [...readFileSync(join(sdkRoot, "dist/ast", file), "utf8").matchAll(/export declare function (is\w+)\((node|kind):/g)]
-    .map((match) => ({ name: match[1]!, node: match[2] === "node" })),
+  [
+    ...readFileSync(join(sdkRoot, "dist/ast", file), "utf8").matchAll(
+      /export declare function (is\w+)\((node|kind):/g,
+    ),
+  ].map((match) => ({ name: match[1]!, node: match[2] === "node" })),
 );
 
 test("all owned guards match the pinned kind and flag predicates", () => {
   expect(signatures.length).toBeGreaterThan(300);
-  expect(Object.keys(guards).filter((name) => name.startsWith("is")).sort()).toEqual(signatures.map((entry) => entry.name).sort());
+  expect(
+    Object.keys(guards)
+      .filter((name) => name.startsWith("is"))
+      .sort(),
+  ).toEqual(signatures.map((entry) => entry.name).sort());
   for (const entry of signatures) {
     const oracle = upstream[entry.name]!;
     const actual = owned[entry.name]!;
     for (let kind = -1; kind <= SyntaxKind.Count + 1; kind++) {
       for (const scriptKind of [ScriptKind.TS, ScriptKind.JS]) {
         const expression = { kind: SyntaxKind.AsExpression, type: { flags: NodeFlags.Reparsed } };
-        const value = entry.node ? { kind, expression, getSourceFile: () => ({ scriptKind }) } : kind;
+        const value = entry.node
+          ? { kind, expression, getSourceFile: () => ({ scriptKind }) }
+          : kind;
         expect(actual(value), `${entry.name}(${kind}, ${scriptKind})`).toBe(oracle(value));
         if (entry.name === "isOuterExpression") {
-          for (const mask of [0, OuterExpressionKinds.Parentheses, OuterExpressionKinds.ExcludeJSDocTypeAssertion | OuterExpressionKinds.All]) {
-            expect(actual(value, mask), `${entry.name}(${kind}, ${scriptKind}, ${mask})`).toBe(oracle(value, mask));
+          for (const mask of [
+            0,
+            OuterExpressionKinds.Parentheses,
+            OuterExpressionKinds.ExcludeJSDocTypeAssertion | OuterExpressionKinds.All,
+          ]) {
+            expect(actual(value, mask), `${entry.name}(${kind}, ${scriptKind}, ${mask})`).toBe(
+              oracle(value, mask),
+            );
           }
         }
       }
@@ -39,7 +54,10 @@ test("all owned guards match the pinned kind and flag predicates", () => {
 });
 
 test("native token spelling preserves every SDK token and unknown values", () => {
-  const oracle = require(join(sdkRoot, "dist/ast/scanner.js")) as { tokenToString: typeof tokenToString };
-  for (let kind = -1; kind <= SyntaxKind.Count + 1; kind++) expect(tokenToString(kind), String(kind)).toBe(oracle.tokenToString(kind));
+  const oracle = require(join(sdkRoot, "dist/ast/scanner.js")) as {
+    tokenToString: typeof tokenToString;
+  };
+  for (let kind = -1; kind <= SyntaxKind.Count + 1; kind++)
+    expect(tokenToString(kind), String(kind)).toBe(oracle.tokenToString(kind));
   for (const kind of [0.5, NaN, Infinity, -Infinity]) expect(tokenToString(kind)).toBeUndefined();
 });

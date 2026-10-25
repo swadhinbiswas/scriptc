@@ -1,0 +1,9 @@
+{
+ "order": [
+  "<repo>/tests/corpus/3067-cjs-function-export-require/dependency.cjs",
+  "<repo>/tests/corpus/3067-cjs-function-export-require/member.cjs",
+  "<repo>/tests/corpus/3067-cjs-function-export-require/single.cjs",
+  "<repo>/tests/corpus/3067-cjs-function-export-require/main.cjs"
+ ],
+ "diags": []
+}

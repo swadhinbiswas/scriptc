@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5513-assert-deep-equal-loose.js"
+ ],
+ "diags": []
+}

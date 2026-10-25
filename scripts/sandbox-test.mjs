@@ -15,15 +15,14 @@ import {
   sandboxVercelConfig,
   sandboxVercelEnvironment,
 } from "./sandbox-config.mjs";
+import { sandboxHostSchedule, sandboxLaneEnv } from "./sandbox-platform.mjs";
+import { filterExistingWorktreePaths, workspaceResetCommand } from "./worktree-files.mjs";
 import {
-  sandboxHostSchedule,
-  sandboxLaneEnv,
-} from "./sandbox-platform.mjs";
-import {
-  filterExistingWorktreePaths,
-  workspaceResetCommand,
-} from "./worktree-files.mjs";
-import { REMOTE_COMMAND_PENDING, sandboxCommand, sandboxStatusCommand, waitForSandboxCommand } from "./sandbox-command.mjs";
+  REMOTE_COMMAND_PENDING,
+  sandboxCommand,
+  sandboxStatusCommand,
+  waitForSandboxCommand,
+} from "./sandbox-command.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const laneCaseShardedFiles = [
@@ -31,7 +30,6 @@ const laneCaseShardedFiles = [
   "tests/harness/effect4.test.ts",
   "tests/harness/differential.test.ts",
   "tests/harness/llvm-differential.test.ts",
-  "tests/harness/npm.test.ts",
   "tests/harness/server.test.ts",
   "tests/harness/test262.test.ts",
   "tests/harness/three.test.ts",
@@ -62,7 +60,7 @@ const caseShardedFiles = [
 
 // These files neither consume SCRIPTC_SAN nor delegate to a helper that does.
 // Run their full coverage once. Files absent from this allowlist remain in
-// both lanes by default, so a new test never silently loses sanitizer coverage.
+// both lanes by default, so a new test keeps sanitizer coverage unless it is listed here.
 const invariantRemoteFiles = [
   "packages/cli/test/flush.test.ts",
   "packages/cli/test/paths.test.ts",
@@ -87,7 +85,7 @@ const invariantRemoteFiles = [
   "packages/runtime/test/map.test.ts",
   "packages/runtime/test/path.test.ts",
   "packages/runtime/test/regex.test.ts",
-  "tests/harness/island-surface.test.ts",
+  "tests/harness/stdlib-surface.test.ts",
   "tests/harness/library-mode.test.ts",
   "tests/harness/library-profile.test.ts",
   "tests/harness/linux-differential.test.ts",
@@ -127,7 +125,6 @@ const remoteWorkspaceReset = workspaceResetCommand("/workspace");
 const hostLaneContractFiles = [
   "tests/harness/ffi.test.ts",
   "tests/harness/ffi-scalars.test.ts",
-  "tests/harness/island.test.ts",
   "tests/harness/library-multi.test.ts",
   "tests/harness/differential.test.ts",
   "tests/harness/server.test.ts",
@@ -138,7 +135,6 @@ const hostLaneContractPattern = [
   "calls the manifest-bound archive across every v1 ABI class",
   "matches Node conversions through native calls",
   "a missing FFI symbol is an SC5004 diagnostic",
-  "deep island recursion on a fiber is a catchable RangeError",
   "M1: external definitions equal the declared set exactly",
   "M2: independent state and collects",
   "M6: four threads, one archive",
@@ -152,7 +148,6 @@ const hostLaneContractPattern = [
   "read-all: chunked writes with delays, then EOF",
 ].join("|");
 const hostInvariantContractFiles = [
-  "tests/harness/island.test.ts",
   "tests/harness/library-mode.test.ts",
   "tests/harness/regex.test.ts",
 ];
@@ -169,11 +164,8 @@ const hostInvariantContractPattern = [
 // Logically portable acceptance suites whose oracle lives in an external
 // worktree that is intentionally not uploaded. Run them locally in both
 // flavors, sharding suites whose individual cases are independently addressable.
-const localLaneFiles = [
-  "tests/harness/prettier-e2e.test.ts",
-  "tests/harness/portless-e2e.test.ts",
-];
-const localCaseShardedFiles = ["tests/harness/vercel-e2e.test.ts"];
+const localLaneFiles = ["tests/harness/portless-e2e.test.ts"];
+const localCaseShardedFiles = [];
 
 const { values } = parseArgs({
   options: {
@@ -208,14 +200,8 @@ const sourceConfig = sandboxTestSourceConfig();
 const bootstrapCommand = sandboxBootstrapCommand(sourceConfig.prepared);
 const vercelConfig = sandboxVercelConfig();
 const vercelProcessEnv = sandboxVercelEnvironment(vercelConfig);
-const {
-  vcpus,
-  testWorkers,
-  localTestWorkers,
-  localCaseShards,
-  sandboxTimeout,
-  sandboxTimeoutMs,
-} = sandboxRunnerConfig();
+const { vcpus, testWorkers, localTestWorkers, localCaseShards, sandboxTimeout, sandboxTimeoutMs } =
+  sandboxRunnerConfig();
 
 if (!["plain", "san", "both"].includes(values.lane)) {
   throw new Error(`--lane must be plain, san, or both (got ${values.lane})`);
@@ -369,7 +355,11 @@ function run(
       } else if (exitMarker && remoteExitCode === undefined) {
         reject(new Error(`${label ?? command} did not report its remote exit status`));
       } else if (remoteExitCode !== undefined && remoteExitCode !== 0) {
-        reject(Object.assign(new Error(`${label ?? command} remote command exited ${remoteExitCode}`), { remoteExitCode }));
+        reject(
+          Object.assign(new Error(`${label ?? command} remote command exited ${remoteExitCode}`), {
+            remoteExitCode,
+          }),
+        );
       } else {
         resolve();
       }
@@ -426,9 +416,26 @@ const execIn = async (
   ];
   const deadline = Date.now() + wallTimeoutMs;
   const recoveredLog = async () => {
-    await vercel(["sandbox", "exec", "--timeout", "1m", "--workdir", workdir, worker.name, "tail", "-n", "160", logPath], {
-      label: `${label} recovered log`, timeoutMs: 60_000, idleTimeoutMs: 30_000,
-    }).catch((error) => console.warn(`[${label}] could not recover ${logPath}: ${error.message}`));
+    await vercel(
+      [
+        "sandbox",
+        "exec",
+        "--timeout",
+        "1m",
+        "--workdir",
+        workdir,
+        worker.name,
+        "tail",
+        "-n",
+        "160",
+        logPath,
+      ],
+      {
+        label: `${label} recovered log`,
+        timeoutMs: 60_000,
+        idleTimeoutMs: 30_000,
+      },
+    ).catch((error) => console.warn(`[${label}] could not recover ${logPath}: ${error.message}`));
   };
   try {
     await vercel(commandArgs, {
@@ -439,26 +446,50 @@ const execIn = async (
     });
   } catch (error) {
     if (error.remoteExitCode !== undefined) throw error;
-    console.warn(`[${label}] CLI completion was not confirmed (${error.message}); checking the remote command status...`);
+    console.warn(
+      `[${label}] CLI completion was not confirmed (${error.message}); checking the remote command status...`,
+    );
     try {
-      await waitForSandboxCommand(async (remaining) => {
-        const probeMarker = `__SCRIPTC_REMOTE_PROBE_${randomBytes(12).toString("hex")}__`;
-        const probeScript = sandboxStatusCommand(statusPath, probeMarker, Math.min(20, Math.floor(remaining / 1000)));
-        await vercel(
-          ["sandbox", "exec", "--timeout", "1m", "--workdir", workdir, worker.name, "sh", "-c", probeScript],
-          {
-            exitMarker: probeMarker,
-            idleTimeoutMs: 30_000,
-            label: `${label} status`,
-            timeoutMs: Math.min(60_000, remaining),
-          },
-        );
-      }, {
-        deadline, label,
-        onPending: (probeError) => console.warn(probeError.remoteExitCode === REMOTE_COMMAND_PENDING
-          ? `[${label}] remote command has not recorded completion; waiting...`
-          : `[${label}] remote status probe was not confirmed (${probeError.message}); retrying...`),
-      });
+      await waitForSandboxCommand(
+        async (remaining) => {
+          const probeMarker = `__SCRIPTC_REMOTE_PROBE_${randomBytes(12).toString("hex")}__`;
+          const probeScript = sandboxStatusCommand(
+            statusPath,
+            probeMarker,
+            Math.min(20, Math.floor(remaining / 1000)),
+          );
+          await vercel(
+            [
+              "sandbox",
+              "exec",
+              "--timeout",
+              "1m",
+              "--workdir",
+              workdir,
+              worker.name,
+              "sh",
+              "-c",
+              probeScript,
+            ],
+            {
+              exitMarker: probeMarker,
+              idleTimeoutMs: 30_000,
+              label: `${label} status`,
+              timeoutMs: Math.min(60_000, remaining),
+            },
+          );
+        },
+        {
+          deadline,
+          label,
+          onPending: (probeError) =>
+            console.warn(
+              probeError.remoteExitCode === REMOTE_COMMAND_PENDING
+                ? `[${label}] remote command has not recorded completion; waiting...`
+                : `[${label}] remote status probe was not confirmed (${probeError.message}); retrying...`,
+            ),
+        },
+      );
     } finally {
       await recoveredLog();
     }
@@ -560,7 +591,9 @@ async function createWorker(worker) {
       });
       return;
     } catch {
-      console.warn(`[${worker.label}] create completion was not confirmed; checking the Sandbox...`);
+      console.warn(
+        `[${worker.label}] create completion was not confirmed; checking the Sandbox...`,
+      );
       try {
         await execIn(worker, "true", [], {}, "create status", 60_000, "/");
         return;
@@ -582,7 +615,9 @@ async function uploadArchive(worker, archive) {
       });
       return;
     } catch {
-      console.warn(`[${worker.label}] copy completion was not confirmed; checking the remote archive...`);
+      console.warn(
+        `[${worker.label}] copy completion was not confirmed; checking the remote archive...`,
+      );
       try {
         // Listing every member also verifies the gzip stream reached its
         // footer; a merely non-empty, partially uploaded file is rejected.
@@ -598,7 +633,9 @@ async function uploadArchive(worker, archive) {
         return;
       } catch (error) {
         if (attempt === 2) throw error;
-        console.warn(`[${worker.label}] remote archive is absent or incomplete; retrying the copy once...`);
+        console.warn(
+          `[${worker.label}] remote archive is absent or incomplete; retrying the copy once...`,
+        );
       }
     }
   }
@@ -609,12 +646,16 @@ async function allWorkers(phase, task, concurrency = workers.length) {
   console.log(`\n${phase} (${workers.length} sandboxes)...`);
   const results = [];
   for (let offset = 0; offset < workers.length; offset += concurrency) {
-    results.push(...(await Promise.allSettled(workers.slice(offset, offset + concurrency).map(task))));
+    results.push(
+      ...(await Promise.allSettled(workers.slice(offset, offset + concurrency).map(task))),
+    );
   }
   const failures = results.filter((result) => result.status === "rejected");
   if (failures.length) {
     for (const failure of failures) console.error(failure.reason);
-    throw new Error(`${phase} failed for ${failures.length} sandbox${failures.length === 1 ? "" : "es"}`);
+    throw new Error(
+      `${phase} failed for ${failures.length} sandbox${failures.length === 1 ? "" : "es"}`,
+    );
   }
   console.log(`${phase} completed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
@@ -629,7 +670,9 @@ async function cleanup() {
   if (values.keep || created.size === 0) return;
   if (!cleanupPromise) {
     cleanupPromise = (async () => {
-      console.log(`\nStopping ${created.size} disposable sandbox${created.size === 1 ? "" : "es"}...`);
+      console.log(
+        `\nStopping ${created.size} disposable sandbox${created.size === 1 ? "" : "es"}...`,
+      );
       const results = await Promise.allSettled(
         [...created].map((name) =>
           vercel(["sandbox", "stop", name], {
@@ -641,7 +684,9 @@ async function cleanup() {
       );
       const failures = results.filter((result) => result.status === "rejected");
       if (failures.length) {
-        console.error(`Failed to stop ${failures.length} sandbox${failures.length === 1 ? "" : "es"}.`);
+        console.error(
+          `Failed to stop ${failures.length} sandbox${failures.length === 1 ? "" : "es"}.`,
+        );
       }
     })();
   }
@@ -654,17 +699,15 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     handlingSignal = true;
     for (const child of children) child.kill("SIGTERM");
     if (!values.keep && created.size) {
-      console.log(`\nStopping ${created.size} disposable sandbox${created.size === 1 ? "" : "es"}...`);
-      spawnSync(
-        "vercel",
-        ["sandbox", "stop", ...scopeArgs, ...created],
-        {
-          cwd: root,
-          env: { ...vercelProcessEnv, NO_UPDATE_NOTIFIER: "1" },
-          stdio: "inherit",
-          timeout: 30_000,
-        },
+      console.log(
+        `\nStopping ${created.size} disposable sandbox${created.size === 1 ? "" : "es"}...`,
       );
+      spawnSync("vercel", ["sandbox", "stop", ...scopeArgs, ...created], {
+        cwd: root,
+        env: { ...vercelProcessEnv, NO_UPDATE_NOTIFIER: "1" },
+        stdio: "inherit",
+        timeout: 30_000,
+      });
     }
     process.exit(signal === "SIGINT" ? 130 : 143);
   });
@@ -689,85 +732,95 @@ try {
       await createWorker(worker);
     });
 
-    await allWorkers(
-      "Uploading worktree",
-      (worker) => uploadArchive(worker, archive),
-      8,
-    );
+    await allWorkers("Uploading worktree", (worker) => uploadArchive(worker, archive), 8);
 
-    await allWorkers("Preparing worktree", async (worker) => {
-      if (bootstrapCommand) {
+    await allWorkers(
+      "Preparing worktree",
+      async (worker) => {
+        if (bootstrapCommand) {
+          await execIn(
+            worker,
+            bootstrapCommand.prepareWorkspace.command,
+            bootstrapCommand.prepareWorkspace.args,
+            {},
+            "workspace",
+            2 * 60_000,
+            bootstrapCommand.prepareWorkspace.workdir,
+          );
+        }
         await execIn(
           worker,
-          bootstrapCommand.prepareWorkspace.command,
-          bootstrapCommand.prepareWorkspace.args,
+          remoteWorkspaceReset.command,
+          remoteWorkspaceReset.args,
           {},
-          "workspace",
+          "reset",
           2 * 60_000,
-          bootstrapCommand.prepareWorkspace.workdir,
         );
-      }
-      await execIn(
-        worker,
-        remoteWorkspaceReset.command,
-        remoteWorkspaceReset.args,
-        {},
-        "reset",
-        2 * 60_000,
-      );
-      await execIn(
-        worker,
-        "tar",
-        ["-xzf", "/tmp/worktree.tar.gz", "-C", "/workspace"],
-        {},
-        "",
-        2 * 60_000,
-      );
-      if (bootstrapCommand) {
         await execIn(
           worker,
-          bootstrapCommand.install.command,
-          bootstrapCommand.install.args,
+          "tar",
+          ["-xzf", "/tmp/worktree.tar.gz", "-C", "/workspace"],
           {},
-          "bootstrap",
-          15 * 60_000,
-          bootstrapCommand.install.workdir,
+          "",
+          2 * 60_000,
+        );
+        if (bootstrapCommand) {
+          await execIn(
+            worker,
+            bootstrapCommand.install.command,
+            bootstrapCommand.install.args,
+            {},
+            "bootstrap",
+            15 * 60_000,
+            bootstrapCommand.install.workdir,
+            5 * 60_000,
+          );
+        }
+        await execIn(worker, "pnpm", ["install", "--frozen-lockfile"], {}, "", 2 * 60_000);
+        // Resetting the source tree removes dist but preserves node_modules,
+        // including TypeScript's incremental metadata. Rebuild both together.
+        await execIn(worker, "pnpm", ["build:fresh"], {}, "", 2 * 60_000);
+        // Workspace builds deliberately do not rebuild packaged native artifacts.
+        // Every remote lane needs the Linux helper and runtime from this worktree.
+        await execIn(
+          worker,
+          "pnpm",
+          ["--filter", "@scriptc/llvm-linux-x64-gnu", "build:native"],
+          {},
+          "LLVM helper",
           5 * 60_000,
         );
-      }
-      await execIn(worker, "pnpm", ["install", "--frozen-lockfile"], {}, "", 2 * 60_000);
-      // Resetting the source tree removes dist but preserves node_modules,
-      // including TypeScript's incremental metadata. Rebuild both together.
-      await execIn(worker, "pnpm", ["build:fresh"], {}, "", 2 * 60_000);
-      // Workspace builds deliberately do not rebuild packaged native artifacts.
-      // Every remote lane needs the Linux helper and runtime from this worktree.
-      await execIn(worker, "pnpm", ["--filter", "@scriptc/llvm-linux-x64-gnu", "build:native"], {}, "LLVM helper", 5 * 60_000);
-      await execIn(
-        worker,
-        "pnpm",
-        ["--filter", "@scriptc/runtime-linux-x64-gnu", "build:native"],
-        { CC: "zig", AR: "zig" },
-        "runtime pack",
-        5 * 60_000,
-        "/workspace",
-        3 * 60_000,
-      );
-      // Keep Zig available to the portable compiler bootstrap and entropy
-      // contract, without expanding the conditional cross-target cache tests.
-      await execIn(
-        worker,
-        "sh",
-        ["-c", [
-          "set -eu",
-          "mkdir -p /tmp/scriptc-native-build-tools",
-          'ln -sf "$(readlink -f "$(command -v zig)")" /tmp/scriptc-native-build-tools/zig',
-          "sudo rm -f /usr/local/bin/zig",
-        ].join("\n")],
-        {},
-        "runtime toolchain cleanup",
-        60_000,
-      );
-    }, sourceConfig.prepared ? workers.length : 8);
+        await execIn(
+          worker,
+          "pnpm",
+          ["--filter", "@scriptc/runtime-linux-x64-gnu", "build:native"],
+          { CC: "zig", AR: "zig" },
+          "runtime pack",
+          5 * 60_000,
+          "/workspace",
+          3 * 60_000,
+        );
+        // Keep Zig available to the portable compiler bootstrap and entropy
+        // contract, without expanding the conditional cross-target cache tests.
+        await execIn(
+          worker,
+          "sh",
+          [
+            "-c",
+            [
+              "set -eu",
+              "mkdir -p /tmp/scriptc-native-build-tools",
+              'ln -sf "$(readlink -f "$(command -v zig)")" /tmp/scriptc-native-build-tools/zig',
+              "sudo rm -f /usr/local/bin/zig",
+            ].join("\n"),
+          ],
+          {},
+          "runtime toolchain cleanup",
+          60_000,
+        );
+      },
+      sourceConfig.prepared ? workers.length : 8,
+    );
 
     await allWorkers("Testing", async (worker) => {
       const sharedTestEnv = {
@@ -824,10 +877,9 @@ try {
             ...localCaseShardedFiles.map((file) => `--exclude=${file}`),
             ...(worker.lane === onceLane
               ? []
-              : [
-                  ...invariantRemoteFiles,
-                  ...hostSchedule.remoteInvariantFiles,
-                ].map((file) => `--exclude=${file}`)),
+              : [...invariantRemoteFiles, ...hostSchedule.remoteInvariantFiles].map(
+                  (file) => `--exclude=${file}`,
+                )),
           ],
           {
             ...sharedTestEnv,
@@ -851,25 +903,34 @@ try {
           },
           "cache",
         );
-      const nativeBuild = () => execIn(
-        worker,
-        "sh",
-        ["-c", 'export PATH="/tmp/scriptc-native-build-tools:$PATH"; exec "$@"', "sh",
-          "pnpm", "test", "--reporter=dot", ...nativeBuildFiles],
-        { ...sharedTestEnv, SCRIPTC_TEST_WORKERS: "1" },
-        "native bootstrap",
-      );
+      const nativeBuild = () =>
+        execIn(
+          worker,
+          "sh",
+          [
+            "-c",
+            'export PATH="/tmp/scriptc-native-build-tools:$PATH"; exec "$@"',
+            "sh",
+            "pnpm",
+            "test",
+            "--reporter=dot",
+            ...nativeBuildFiles,
+          ],
+          { ...sharedTestEnv, SCRIPTC_TEST_WORKERS: "1" },
+          "native bootstrap",
+        );
       // The corpus owns the remaining pool while file/cache processes share
       // the reserved side slots (serially when only one slot is available).
-      const sideTasks = [...(worker.shard === 1 ? [nativeBuild] : []), files, ...(runCacheCases ? [cacheCases] : [])];
+      const sideTasks = [
+        ...(worker.shard === 1 ? [nativeBuild] : []),
+        files,
+        ...(runCacheCases ? [cacheCases] : []),
+      ];
       if (sideConcurrency === 0) {
         await cases();
         await runTaskQueue(sideTasks, 1);
       } else {
-        await Promise.all([
-          cases(),
-          runTaskQueue(sideTasks, sideConcurrency),
-        ]);
+        await Promise.all([cases(), runTaskQueue(sideTasks, sideConcurrency)]);
       }
     });
 
@@ -912,129 +973,98 @@ try {
           ...(nativeHostInvariantFiles.length > 0
             ? [`${nativeHostInvariantFiles.length} ${hostName}-native files`]
             : []),
-          ...(hostSchedule.darwinContracts
-            ? ["compact Darwin platform contracts"]
-            : []),
-          ...(hostSchedule.localArtifactContracts
-            ? ["compact host artifact contracts"]
-            : []),
+          ...(hostSchedule.darwinContracts ? ["compact Darwin platform contracts"] : []),
+          ...(hostSchedule.localArtifactContracts ? ["compact host artifact contracts"] : []),
           `${localLaneFiles.length + localCaseShardedFiles.length} external suites`,
         ];
-        console.log(
-          `\nBuilding and testing ${localWork.join(", ")} locally...`,
-        );
+        console.log(`\nBuilding and testing ${localWork.join(", ")} locally...`);
         await run("pnpm", ["build"], { label: "local build" });
         const nativeHostTasks =
           nativeHostInvariantFiles.length === 0
             ? []
             : [
-                run(
-                  "pnpm",
-                  [
-                    "test",
-                    ...nativeHostInvariantFiles,
-                  ],
-                  {
-                    env: {
-                      ...sandboxLaneEnv(onceLane),
-                      SCRIPTC_TEST_WORKERS: localTestWorkers,
-                    },
-                    label: `local ${onceLane} ${hostName}`,
+                run("pnpm", ["test", ...nativeHostInvariantFiles], {
+                  env: {
+                    ...sandboxLaneEnv(onceLane),
+                    SCRIPTC_TEST_WORKERS: localTestWorkers,
                   },
-                ),
+                  label: `local ${onceLane} ${hostName}`,
+                }),
               ];
-        const artifactContractTasks =
-          !hostSchedule.localArtifactContracts
-            ? []
-            : [
-                run(
-                  "pnpm",
-                  [
-                    "test",
-                    "--reporter=dot",
-                    "-t",
-                    hostInvariantContractPattern,
-                    ...hostInvariantContractFiles,
-                  ],
-                  {
-                    env: {
-                      ...sandboxLaneEnv(onceLane),
-                      ...(process.platform === "linux"
-                        ? { ASAN_OPTIONS: "detect_leaks=0" }
-                        : {}),
-                      SCRIPTC_TEST_WORKERS: localTestWorkers,
-                    },
-                    label: `local ${onceLane} ${hostName} artifact contract`,
+        const artifactContractTasks = !hostSchedule.localArtifactContracts
+          ? []
+          : [
+              run(
+                "pnpm",
+                [
+                  "test",
+                  "--reporter=dot",
+                  "-t",
+                  hostInvariantContractPattern,
+                  ...hostInvariantContractFiles,
+                ],
+                {
+                  env: {
+                    ...sandboxLaneEnv(onceLane),
+                    ...(process.platform === "linux" ? { ASAN_OPTIONS: "detect_leaks=0" } : {}),
+                    SCRIPTC_TEST_WORKERS: localTestWorkers,
                   },
-                ),
-              ];
-        const darwinContractTasks =
-          !hostSchedule.darwinContracts
-            ? []
-            : lanes.map((lane) =>
-                run(
-                  "pnpm",
-                  [
-                    "test",
-                    "--reporter=dot",
-                    "-t",
-                    hostLaneContractPattern,
-                    ...hostLaneContractFiles,
-                  ],
-                  {
-                    env: {
-                      ...sandboxLaneEnv(lane),
-                      SCRIPTC_TEST_WORKERS: localTestWorkers,
-                    },
-                    label: `local ${lane} Darwin contract`,
+                  label: `local ${onceLane} ${hostName} artifact contract`,
+                },
+              ),
+            ];
+        const darwinContractTasks = !hostSchedule.darwinContracts
+          ? []
+          : lanes.map((lane) =>
+              run(
+                "pnpm",
+                ["test", "--reporter=dot", "-t", hostLaneContractPattern, ...hostLaneContractFiles],
+                {
+                  env: {
+                    ...sandboxLaneEnv(lane),
+                    SCRIPTC_TEST_WORKERS: localTestWorkers,
                   },
-                ),
-              );
+                  label: `local ${lane} Darwin contract`,
+                },
+              ),
+            );
         const laneFileTasks = lanes.map((lane) =>
-          run(
-            "pnpm",
-            ["test", "--reporter=dot", ...localLaneFiles],
-            {
+          run("pnpm", ["test", "--reporter=dot", ...localLaneFiles], {
+            env: {
+              ...sandboxLaneEnv(lane),
+              SCRIPTC_TEST_RUN_ID: nonce,
+              SCRIPTC_TEST_WORKERS: "1",
+            },
+            label: `local ${lane} external files`,
+          }),
+        );
+        const caseTasks = (localCaseShardedFiles.length === 0 ? [] : lanes).flatMap((lane) =>
+          Array.from({ length: localCaseShardCount }, (_, offset) => {
+            const shard = offset + 1;
+            return run("pnpm", ["test", "--reporter=dot", ...localCaseShardedFiles], {
               env: {
                 ...sandboxLaneEnv(lane),
+                SCRIPTC_TEST_SHARD: `${shard}/${localCaseShardCount}`,
                 SCRIPTC_TEST_RUN_ID: nonce,
                 SCRIPTC_TEST_WORKERS: "1",
               },
-              label: `local ${lane} external files`,
-            },
-          ),
-        );
-        const caseTasks = lanes.flatMap((lane) =>
-          Array.from({ length: localCaseShardCount }, (_, offset) => {
-            const shard = offset + 1;
-            return run(
-              "pnpm",
-              ["test", "--reporter=dot", ...localCaseShardedFiles],
-              {
-                env: {
-                  ...sandboxLaneEnv(lane),
-                  SCRIPTC_TEST_SHARD: `${shard}/${localCaseShardCount}`,
-                  SCRIPTC_TEST_RUN_ID: nonce,
-                  SCRIPTC_TEST_WORKERS: "1",
-                },
-                label: `local ${lane} external ${shard}/${localCaseShardCount}`,
-              },
-            );
+              label: `local ${lane} external ${shard}/${localCaseShardCount}`,
+            });
           }),
         );
-        const results = await Promise.allSettled(
-          [
-            ...nativeHostTasks,
-            ...artifactContractTasks,
-            ...darwinContractTasks,
-            ...laneFileTasks,
-            ...caseTasks,
-          ],
-        );
+        const results = await Promise.allSettled([
+          ...nativeHostTasks,
+          ...artifactContractTasks,
+          ...darwinContractTasks,
+          ...laneFileTasks,
+          ...caseTasks,
+        ]);
         const failures = results.filter((result) => result.status === "rejected");
         if (failures.length) {
           for (const result of failures) console.error(result.reason);
-          throw new Error(`${failures.length} local test lane${failures.length === 1 ? "" : "s"} failed`);
+          throw new Error(
+            `${failures.length} local test lane${failures.length === 1 ? "" : "s"} failed`,
+          );
         }
       })();
 

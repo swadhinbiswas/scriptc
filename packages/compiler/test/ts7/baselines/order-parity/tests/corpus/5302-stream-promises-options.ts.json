@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/5302-stream-promises-options.ts"
+ ],
+ "diags": []
+}
