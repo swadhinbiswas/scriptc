@@ -15,7 +15,7 @@ export function wasiGuestPath(
 ): string | null {
   const windows = flavor === "win32";
   const separator = windows ? win32.sep : posix.sep;
-  const absolute = windows ? win32.resolve(hostPath) : posix.resolve(hostPath);
+  const absolute = windows ? win32.resolve(cwd, hostPath) : posix.resolve(cwd, hostPath);
 
   const under = (hostRoot: string, guestRoot: string): string | null => {
     const root = windows ? win32.resolve(hostRoot) : posix.resolve(hostRoot);
